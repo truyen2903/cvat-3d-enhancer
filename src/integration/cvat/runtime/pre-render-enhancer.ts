@@ -90,8 +90,18 @@ export interface CvatDrawnObjectEntry {
     hidden?: boolean;
     outside?: boolean;
   };
+  state?: {
+    clientID?: number;
+    points?: number[];
+    hidden?: boolean;
+    outside?: boolean;
+  };
   cuboid: {
+    setColor?: (hexColor: string) => void;
     perspective?: {
+      position?: { x: number; y: number; z: number };
+      rotation?: { x: number; y: number; z: number };
+      scale?: { x: number; y: number; z: number };
       material?: {
         color?: ThreeColorLike;
       };
@@ -266,6 +276,14 @@ export function getDistinctCuboidColor(
   return [entry[0], entry[1], entry[2]];
 }
 
+export function normalizedRgbToHex(r: number, g: number, b: number): string {
+  const toByte = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v * 255)))
+      .toString(16)
+      .padStart(2, '0');
+  return `#${toByte(r)}${toByte(g)}${toByte(b)}`;
+}
+
 interface OrientedBoxBounds {
   readonly clientID: number;
   readonly cx: number;
@@ -306,20 +324,55 @@ export function compileOrientedCuboids(
   let boxIdx = 0;
 
   for (const entry of Object.values(drawnObjects)) {
-    const { data } = entry;
-    if (!data || data.hidden || data.outside || !Array.isArray(data.points) || data.points.length < 9) {
+    const data = entry?.data;
+    const state = entry?.state;
+    const hidden = Boolean(data?.hidden ?? state?.hidden);
+    const outside = Boolean(data?.outside ?? state?.outside);
+    if (hidden || outside) {
       continue;
     }
 
-    const cx = Number(data.points[0]);
-    const cy = Number(data.points[1]);
-    const cz = Number(data.points[2]);
-    const rx = Number(data.points[3]);
-    const ry = Number(data.points[4]);
-    const rz = Number(data.points[5]);
-    const sx = Math.abs(Number(data.points[6]));
-    const sy = Math.abs(Number(data.points[7]));
-    const sz = Math.abs(Number(data.points[8]));
+    const rawPoints =
+      Array.isArray(data?.points) && data.points.length >= 9
+        ? data.points
+        : Array.isArray(state?.points) && state.points.length >= 9
+          ? state.points
+          : null;
+
+    const perspMesh = entry?.cuboid?.perspective;
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    let rx = 0;
+    let ry = 0;
+    let rz = 0;
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+
+    if (rawPoints) {
+      cx = Number(rawPoints[0]);
+      cy = Number(rawPoints[1]);
+      cz = Number(rawPoints[2]);
+      rx = Number(rawPoints[3]);
+      ry = Number(rawPoints[4]);
+      rz = Number(rawPoints[5]);
+      sx = Math.abs(Number(rawPoints[6]));
+      sy = Math.abs(Number(rawPoints[7]));
+      sz = Math.abs(Number(rawPoints[8]));
+    } else if (perspMesh?.position && perspMesh?.rotation && perspMesh?.scale) {
+      cx = Number(perspMesh.position.x);
+      cy = Number(perspMesh.position.y);
+      cz = Number(perspMesh.position.z);
+      rx = Number(perspMesh.rotation.x);
+      ry = Number(perspMesh.rotation.y);
+      rz = Number(perspMesh.rotation.z);
+      sx = Math.abs(Number(perspMesh.scale.x));
+      sy = Math.abs(Number(perspMesh.scale.y));
+      sz = Math.abs(Number(perspMesh.scale.z));
+    } else {
+      continue;
+    }
 
     if (sx <= 0 || sy <= 0 || sz <= 0) {
       continue;
@@ -354,12 +407,17 @@ export function compileOrientedCuboids(
     const aabbY = Math.abs(m10) * hx + Math.abs(m11) * hy + Math.abs(m12) * hz;
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
-    const [r, g, b] = getDistinctCuboidColor(data.clientID, boxIdx, whiteBackground);
+    const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
+    const [r, g, b] = getDistinctCuboidColor(clientID, boxIdx, whiteBackground);
     boxIdx += 1;
+
+    if (typeof entry.cuboid?.setColor === 'function') {
+      entry.cuboid.setColor(normalizedRgbToHex(r, g, b));
+    }
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame
     result.push({
-      clientID: data.clientID,
+      clientID,
       cx,
       cy,
       cz,
@@ -525,6 +583,7 @@ export class Cvat3dPreRenderEnhancer {
     this.applySceneBackgrounds(view);
 
     if (this.hookedViews.has(view)) {
+      this.applyOnceIfNeeded(view, canvas3d?.model);
       return true;
     }
     this.hookedViews.add(view);
@@ -603,7 +662,9 @@ export class Cvat3dPreRenderEnhancer {
       this.pendingFrameObjectsLoad = false;
     }
 
-    const frameId = model?.data?.imageID ?? 'unknown';
+    const domFrameAttr =
+      view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
+    const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
     const orthoFixed = this.options.fixedOrthoPointSize ?? true;
     const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${orthoFixed ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
 
@@ -704,14 +765,10 @@ export class Cvat3dPreRenderEnhancer {
       this.baseColorsCache.set(colorAttr, originalColors);
     }
 
-    // Check whether CVAT stored 0..255 or 0..1 floats in the color buffer attribute
-    let colorScale = 1;
-    for (let i = 0; i < Math.min(len, 30); i += 1) {
-      if ((originalColors[i] ?? 0) > 1.01) {
-        colorScale = 255;
-        break;
-      }
-    }
+    // WebGL Float32BufferAttribute (Float32Array) always expects normalized 0.0..1.0 floats;
+    // only Uint8Array/Uint8ClampedArray attributes use 0..255.
+    const colorScale =
+      colorArray instanceof Uint8Array || colorArray instanceof Uint8ClampedArray ? 255 : 1;
 
     // Check if LiDAR intensity attribute is available for scattering mode
     const intensityArray = ptsObj.geometry?.attributes?.intensity?.array;

@@ -5,11 +5,14 @@ import type {
 } from '../integration/cvat/runtime';
 import {
   type Cvat3dWorkspaceRenderOptions,
+  type CvatDrawnObjectEntry,
   type CvatInternalCanvas3dLike,
+  type CvatInternalViewLike,
   Cvat3dPreRenderEnhancer,
   injectCvatWorkspaceSettingsControls,
   readRenderOptionsFromClientSettings,
   syncEarlyViewportBackgroundDom,
+  type ThreeSceneLike,
   writeRenderOptionsToClientSettings,
 } from '../integration/cvat/runtime/pre-render-enhancer';
 import {
@@ -67,6 +70,9 @@ export class PageBridgeRuntimeHost {
   private reduxStore: CvatReduxStoreLike | null = null;
   private pluginRegistered = false;
   private settingsObserver: MutationObserver | null = null;
+  private readonly hookedPerspectiveCanvases = new WeakSet<HTMLCanvasElement>();
+  private domBackedViewRef: CvatInternalViewLike | null = null;
+  private lastDomCanvasRef: HTMLCanvasElement | null = null;
 
   public constructor(
     sessionToken: string,
@@ -105,11 +111,17 @@ export class PageBridgeRuntimeHost {
       this.settingsObserver.observe(this.doc.documentElement, {
         childList: true,
         subtree: true,
+        attributes: true,
+        attributeFilter: ['data-frame-number'],
       });
     }
 
     syncEarlyViewportBackgroundDom(this.doc, this.preRenderEnhancer.getOptions().whiteBackground);
     this.tryMountWorkspaceSettingsCheckboxes();
+    const initialInstance = this.getActiveCanvas3dInstance();
+    if (initialInstance) {
+      this.preRenderEnhancer.ensureHooked(initialInstance);
+    }
 
     return () => {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
@@ -180,21 +192,146 @@ export class PageBridgeRuntimeHost {
   }
 
   private getActiveCanvas3dInstance(): CvatCanvas3dLike | null {
-    if (!this.reduxStore) {
-      return null;
-    }
-    try {
-      const state = this.reduxStore.getState();
-      const annotation = state.annotation as Record<string, unknown> | undefined;
-      const canvas = annotation?.canvas as Record<string, unknown> | undefined;
-      const instance = canvas?.instance as CvatCanvas3dLike | undefined;
-      if (instance && typeof instance.configure === 'function') {
-        return instance;
+    const domInstance = this.resolveDomBackedCanvas3dInstance();
+
+    if (this.reduxStore) {
+      try {
+        const state = this.reduxStore.getState();
+        const annotation = state.annotation as Record<string, unknown> | undefined;
+        const canvas = annotation?.canvas as Record<string, unknown> | undefined;
+        const instance = canvas?.instance as CvatCanvas3dLike | undefined;
+        if (instance && (typeof instance.configure === 'function' || instance.view)) {
+          if (!instance.view?.views?.perspective?.scene && domInstance?.view) {
+            return {
+              configure: instance.configure?.bind(instance),
+              keyControls: instance.keyControls?.bind(instance),
+              fit: instance.fit?.bind(instance),
+              view: domInstance.view,
+              model: instance.model ?? domInstance.model,
+            };
+          }
+          return instance;
+        }
+      } catch {
+        // Fall through to DOM-backed 3D canvas inspection
       }
-    } catch {
+    }
+
+    return domInstance;
+  }
+
+  private bindDomPerspectiveCanvasEvents(): HTMLCanvasElement | null {
+    const perspCanvas = this.doc.querySelector<
+      HTMLCanvasElement & {
+        scene?: ThreeSceneLike;
+        getDrawnObjects?: () => CvatDrawnObjectEntry[];
+      }
+    >('.cvat-canvas3d-perspective canvas');
+
+    if (!perspCanvas) {
       return null;
     }
-    return null;
+
+    if (!this.hookedPerspectiveCanvases.has(perspCanvas)) {
+      this.hookedPerspectiveCanvases.add(perspCanvas);
+      perspCanvas.addEventListener('canvas.setup', () => {
+        this.preRenderEnhancer.markDirty();
+        const inst = this.getActiveCanvas3dInstance();
+        if (inst?.view) {
+          this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
+        }
+      });
+    }
+
+    return perspCanvas;
+  }
+
+  /**
+   * Fallback/direct bridge that reads CVAT's `canvas.scene` (`THREE.Scene`) and
+   * `canvas.getDrawnObjects()` defined directly on `.cvat-canvas3d-perspective canvas`
+   * and `.cvat-canvas3d-orthographic-view canvas` in `canvas3dView.ts`.
+   */
+  private resolveDomBackedCanvas3dInstance(): CvatCanvas3dLike | null {
+    const perspCanvas = this.bindDomPerspectiveCanvasEvents() as
+      | (HTMLCanvasElement & {
+          scene?: ThreeSceneLike;
+          getDrawnObjects?: () => CvatDrawnObjectEntry[];
+        })
+      | null;
+
+    if (!perspCanvas?.scene) {
+      return null;
+    }
+
+    const topCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+      '.cvat-canvas3d-topview canvas'
+    );
+    const sideCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+      '.cvat-canvas3d-sideview canvas'
+    );
+    const frontCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+      '.cvat-canvas3d-frontview canvas'
+    );
+
+    if (!this.domBackedViewRef || this.lastDomCanvasRef !== perspCanvas) {
+      this.lastDomCanvasRef = perspCanvas;
+      const docRef = this.doc;
+      this.domBackedViewRef = {
+        get views() {
+          const p = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+            '.cvat-canvas3d-perspective canvas'
+          );
+          const t = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+            '.cvat-canvas3d-topview canvas'
+          );
+          const s = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+            '.cvat-canvas3d-sideview canvas'
+          );
+          const f = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+            '.cvat-canvas3d-frontview canvas'
+          );
+          return {
+            perspective: p?.scene ? { scene: p.scene, renderer: { domElement: p } } : undefined,
+            top: t?.scene ? { scene: t.scene, renderer: { domElement: t } } : undefined,
+            side: s?.scene ? { scene: s.scene, renderer: { domElement: s } } : undefined,
+            front: f?.scene ? { scene: f.scene, renderer: { domElement: f } } : undefined,
+          };
+        },
+        get drawnObjects() {
+          const map: Record<number, CvatDrawnObjectEntry> = {};
+          const p = docRef.querySelector<
+            HTMLCanvasElement & { getDrawnObjects?: () => CvatDrawnObjectEntry[] }
+          >('.cvat-canvas3d-perspective canvas');
+          if (typeof p?.getDrawnObjects === 'function') {
+            const list = p.getDrawnObjects();
+            if (Array.isArray(list)) {
+              list.forEach((item, idx) => {
+                const id = item?.data?.clientID ?? item?.state?.clientID ?? idx;
+                map[id] = item;
+              });
+            }
+          }
+          return map;
+        },
+      };
+    } else {
+      // Ensure top/side/front references stay fresh
+      void topCanvas;
+      void sideCanvas;
+      void frontCanvas;
+    }
+
+    const frameAttr = perspCanvas.getAttribute('data-frame-number');
+    const parsedFrame = frameAttr !== null ? Number(frameAttr) : null;
+
+    return {
+      view: this.domBackedViewRef,
+      model: {
+        data: {
+          imageID: Number.isFinite(parsedFrame) ? parsedFrame : null,
+        },
+      },
+    };
   }
 
   public probeRuntime(): PageRuntimeProbeResult {
