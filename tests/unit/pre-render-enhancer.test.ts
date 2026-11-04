@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
   Cvat3dPreRenderEnhancer,
+  getDistinctCuboidColor,
   injectCvatWorkspaceSettingsControls,
+  OVERLAP_RGB_WHITE_BG,
   readRenderOptionsFromClientSettings,
   writeRenderOptionsToClientSettings,
 } from '../../src/integration/cvat/runtime/pre-render-enhancer';
@@ -66,10 +68,14 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     });
   });
 
-  it('runs pre-render pass ONLY ONCE per frame/state change (dirty flag optimization) and colors points inside oriented cuboids', () => {
-    // 2 points: point 0 at (1, 1, 1) inside cuboid, point 1 at (50, 50, 50) outside cuboid
-    const positionArray = new Float32Array([1, 1, 1, 50, 50, 50]);
-    const colorArray = new Float32Array([1, 1, 1, 1, 1, 1]);
+  it('colors each cuboid distinctly, assigns a 3rd overlap color for overlapping boxes, uses 100% black/white when scattering is off, and freezes colors during box drag until frame change', () => {
+    // 4 points:
+    // - point 0 at (-2, 0, 0): inside Box #1 only
+    // - point 1 at (2, 0, 0): inside Box #2 only
+    // - point 2 at (0, 0, 0): inside BOTH Box #1 and Box #2 (overlap!)
+    // - point 3 at (50, 50, 50): outside all boxes
+    const positionArray = new Float32Array([-2, 0, 0, 2, 0, 0, 0, 0, 0, 50, 50, 50]);
+    const colorArray = new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
 
     const pointsObj = {
       type: 'Points',
@@ -91,6 +97,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     const bgSetSpy = vi.fn();
     const origRenderSpy = vi.fn();
+    const origNotifySpy = vi.fn();
 
     const mockCanvas3d: CvatInternalCanvas3dLike = {
       model: {
@@ -109,60 +116,84 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
           },
         },
         drawnObjects: {
-          101: {
+          1: {
             data: {
-              clientID: 101,
+              clientID: 1,
               labelColor: '#ff0000',
-              // Center (0,0,0), Rotation (0,0,0), Scale (4,4,4) -> bounds [-2, 2]
-              points: [0, 0, 0, 0, 0, 0, 4, 4, 4],
+              // Box #1 centered at (-1, 0, 0), size (4, 4, 4) -> X in [-3, 1]
+              points: [-1, 0, 0, 0, 0, 0, 4, 4, 4],
               hidden: false,
               outside: false,
             },
-            cuboid: {
-              perspective: {
-                material: {
-                  color: { r: 1, g: 0, b: 0, set: vi.fn() },
-                },
-              },
+            cuboid: {},
+          },
+          2: {
+            data: {
+              clientID: 2,
+              labelColor: '#ff0000',
+              // Box #2 centered at (1, 0, 0), size (4, 4, 4) -> X in [-1, 3]
+              points: [1, 0, 0, 0, 0, 0, 4, 4, 4],
+              hidden: false,
+              outside: false,
             },
+            cuboid: {},
           },
         },
+        notify: origNotifySpy,
         render: origRenderSpy,
       },
     };
 
     const enhancer = new Cvat3dPreRenderEnhancer({
       whiteBackground: true,
-      enableScattering: true,
+      enableScattering: false,
       colorPointsByCuboid: true,
     });
 
     enhancer.ensureHooked(mockCanvas3d);
 
-    // Point 0 (inside box #101) should be colored red (1, 0, 0)
-    expect(colorArray[0]).toBeCloseTo(1, 3);
-    expect(colorArray[1]).toBeCloseTo(0, 3);
-    expect(colorArray[2]).toBeCloseTo(0, 3);
+    const expectedBox1 = getDistinctCuboidColor(1, 0, true);
+    const expectedBox2 = getDistinctCuboidColor(2, 1, true);
 
-    // Point 1 (outside box, on white background) should be darkened to charcoal (0.12, 0.12, 0.12)
-    expect(colorArray[3]).toBeCloseTo(0.12, 3);
-    expect(colorArray[4]).toBeCloseTo(0.12, 3);
-    expect(colorArray[5]).toBeCloseTo(0.12, 3);
+    // Box #1 and Box #2 must have distinct colors even though both share the same labelColor
+    expect(expectedBox1).not.toEqual(expectedBox2);
 
-    // Scattering applied to material
-    expect(pointsObj.material.size).toBe(0.025);
-    expect(pointsObj.material.transparent).toBe(true);
-    expect(bgSetSpy).toHaveBeenCalledWith(0xffffff);
+    // Point 0 (inside Box #1 only) -> Box #1 distinct color
+    expect(colorArray[0]).toBeCloseTo(expectedBox1[0], 3);
+    expect(colorArray[1]).toBeCloseTo(expectedBox1[1], 3);
+    expect(colorArray[2]).toBeCloseTo(expectedBox1[2], 3);
 
-    // Clear spy and simulate 60fps render() calls without frame/object changes
-    bgSetSpy.mockClear();
+    // Point 1 (inside Box #2 only) -> Box #2 distinct color
+    expect(colorArray[3]).toBeCloseTo(expectedBox2[0], 3);
+    expect(colorArray[4]).toBeCloseTo(expectedBox2[1], 3);
+    expect(colorArray[5]).toBeCloseTo(expectedBox2[2], 3);
+
+    // Point 2 (inside BOTH Box #1 and Box #2) -> 3rd overlap color (OVERLAP_RGB_WHITE_BG)
+    expect(colorArray[6]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[0], 3);
+    expect(colorArray[7]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[1], 3);
+    expect(colorArray[8]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[2], 3);
+
+    // Point 3 (outside all boxes, scattering OFF on white background) -> 100% pure Black (0, 0, 0)
+    expect(colorArray[9]).toBeCloseTo(0, 3);
+    expect(colorArray[10]).toBeCloseTo(0, 3);
+    expect(colorArray[11]).toBeCloseTo(0, 3);
+
+    // Simulate dragging Box #1 to wrap Point 3 (50, 50, 50) on the SAME frame (imageID = 1)
+    mockCanvas3d.view!.drawnObjects![1]!.data.points = [50, 50, 50, 0, 0, 0, 4, 4, 4];
+    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'objects_updated');
     mockCanvas3d.view!.render!();
-    mockCanvas3d.view!.render!();
-    mockCanvas3d.view!.render!();
 
-    // Pre-render pass MUST NOT re-execute on subsequent 60fps frames when not dirty
-    expect(bgSetSpy).not.toHaveBeenCalled();
-    expect(origRenderSpy).toHaveBeenCalledTimes(3);
+    // Point 3 MUST NOT change color while dragging on the same frame
+    expect(colorArray[9]).toBeCloseTo(0, 3);
+
+    // Now simulate Next Frame -> Prev Frame (image_changed + initial objects_updated)
+    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'image_changed');
+    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'objects_updated');
+
+    // After frame reload, Point 3 (now inside Box #1) updates to Box #1's color
+    expect(colorArray[9]).toBeCloseTo(expectedBox1[0], 3);
+    expect(colorArray[10]).toBeCloseTo(expectedBox1[1], 3);
+    expect(colorArray[11]).toBeCloseTo(expectedBox1[2], 3);
   });
 
   it('applies white background immediately on frame 0 even before PCD point cloud finishes loading (zero black flash)', () => {

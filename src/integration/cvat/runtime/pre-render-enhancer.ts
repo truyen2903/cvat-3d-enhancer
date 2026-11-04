@@ -59,6 +59,7 @@ export interface ThreeObject3DLike {
     attributes?: {
       position?: ThreeBufferAttributeLike;
       color?: ThreeBufferAttributeLike;
+      intensity?: ThreeBufferAttributeLike;
     };
   };
   material?: ThreePointsMaterialLike;
@@ -208,7 +209,60 @@ export function parseHexColorToNormalizedRgb(hex: string): [number, number, numb
   return [r, g, b];
 }
 
+/**
+ * Curated per-vehicle / per-cuboid palettes designed to stand out vividly against White vs Black backgrounds.
+ * Red/Crimson is intentionally excluded from single-box palettes and reserved exclusively as the 3rd color
+ * for overlapping regions wrapped by 2+ bounding boxes.
+ */
+export const WHITE_BG_BOX_PALETTE: readonly [number, number, number][] = [
+  [0.0, 0.32, 0.8], // #0052cc Vivid Cobalt Blue
+  [0.0, 0.53, 0.35], // #00875a Deep Emerald Green
+  [0.4, 0.33, 0.75], // #6554c0 Royal Purple
+  [0.85, 0.47, 0.02], // #d97706 Burnt Amber Gold
+  [0.0, 0.64, 0.75], // #00a3bf Deep Teal Cyan
+  [0.15, 0.39, 0.92], // #2563eb Sapphire Blue
+  [0.08, 0.5, 0.24], // #15803d Forest Green
+  [0.49, 0.23, 0.93], // #7c3aed Vivid Violet
+  [0.8, 0.33, 0.0], // #cc5500 Burnt Orange
+  [0.03, 0.57, 0.7], // #0891b2 Ocean Cyan
+  [0.31, 0.27, 0.9], // #4f46e5 Indigo
+  [0.4, 0.64, 0.05], // #65a30d Olive Lime
+];
+
+export const BLACK_BG_BOX_PALETTE: readonly [number, number, number][] = [
+  [0.22, 0.74, 0.97], // #38bdf8 Electric Sky Blue
+  [0.29, 0.87, 0.5], // #4ade80 Neon Mint Green
+  [0.65, 0.55, 0.98], // #a78bfa Luminous Lavender Violet
+  [0.98, 0.75, 0.14], // #fbbf24 Cyber Amber Gold
+  [0.18, 0.83, 0.75], // #2dd4bf Bright Aqua Teal
+  [0.64, 0.9, 0.21], // #a3e635 Electric Lime
+  [0.38, 0.65, 0.98], // #60a5fa Bright Azure
+  [0.75, 0.52, 0.99], // #c084fc Bright Orchid
+  [0.98, 0.57, 0.24], // #fb923c Sunset Orange
+  [0.13, 0.83, 0.93], // #22d3ee Laser Cyan
+  [0.2, 0.83, 0.6], // #34d399 Bright Emerald
+  [0.98, 0.8, 0.08], // #facc15 Vivid Yellow
+];
+
+/**
+ * Dedicated 3rd color reserved exclusively for points that fall inside 2 or more overlapping cuboids.
+ */
+export const OVERLAP_RGB_WHITE_BG: readonly [number, number, number] = [0.86, 0.08, 0.24]; // #dc143c Vivid Crimson
+export const OVERLAP_RGB_BLACK_BG: readonly [number, number, number] = [1.0, 0.18, 0.33]; // #ff2e54 Neon Crimson-Red
+
+export function getDistinctCuboidColor(
+  clientID: number,
+  fallbackIndex: number,
+  whiteBackground: boolean
+): [number, number, number] {
+  const palette = whiteBackground ? WHITE_BG_BOX_PALETTE : BLACK_BG_BOX_PALETTE;
+  const idNum = Number.isFinite(clientID) && clientID >= 0 ? Math.floor(clientID) : fallbackIndex;
+  const entry = palette[idNum % palette.length]!;
+  return [entry[0], entry[1], entry[2]];
+}
+
 interface OrientedBoxBounds {
+  readonly clientID: number;
   readonly cx: number;
   readonly cy: number;
   readonly cz: number;
@@ -236,17 +290,18 @@ interface OrientedBoxBounds {
 }
 
 /**
- * Precomputes inverse Euler XYZ rotation matrix and AABB envelope for each 3D cuboid
- * so point-in-cuboid testing runs in O(1) arithmetic operations per point with zero heap allocations.
+ * Precomputes inverse Euler XYZ rotation matrix, AABB envelope, and distinct background-adapted color
+ * for each 3D cuboid so point-in-cuboid testing runs in O(1) arithmetic operations per point.
  */
 export function compileOrientedCuboids(
   drawnObjects: Record<number, CvatDrawnObjectEntry>,
-  colorBy = 'Label'
+  whiteBackground = false
 ): OrientedBoxBounds[] {
   const result: OrientedBoxBounds[] = [];
+  let boxIdx = 0;
 
   for (const entry of Object.values(drawnObjects)) {
-    const { data, cuboid } = entry;
+    const { data } = entry;
     if (!data || data.hidden || data.outside || !Array.isArray(data.points) || data.points.length < 9) {
       continue;
     }
@@ -294,32 +349,12 @@ export function compileOrientedCuboids(
     const aabbY = Math.abs(m10) * hx + Math.abs(m11) * hy + Math.abs(m12) * hz;
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
-    let r = 0.22;
-    let g = 0.74;
-    let b = 0.97;
-
-    const meshColor = cuboid?.perspective?.material?.color;
-    if (
-      meshColor &&
-      typeof meshColor.r === 'number' &&
-      typeof meshColor.g === 'number' &&
-      typeof meshColor.b === 'number'
-    ) {
-      r = meshColor.r;
-      g = meshColor.g;
-      b = meshColor.b;
-    } else {
-      const hex =
-        colorBy === 'Label'
-          ? (data.labelColor ?? data.color ?? '#38bdf8')
-          : colorBy === 'Group'
-            ? (data.groupColor ?? data.color ?? '#38bdf8')
-            : (data.color ?? data.labelColor ?? '#38bdf8');
-      [r, g, b] = parseHexColorToNormalizedRgb(hex);
-    }
+    const [r, g, b] = getDistinctCuboidColor(data.clientID, boxIdx, whiteBackground);
+    boxIdx += 1;
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame
     result.push({
+      clientID: data.clientID,
       cx,
       cy,
       cz,
@@ -389,6 +424,7 @@ export class Cvat3dPreRenderEnhancer {
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
   private lastExecutionSignature = '';
   private dirty = true;
+  private pendingFrameObjectsLoad = true;
 
   public constructor(initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS) {
     this.options = { ...initialOptions };
@@ -419,6 +455,7 @@ export class Cvat3dPreRenderEnhancer {
 
   public markDirty(): void {
     this.dirty = true;
+    this.pendingFrameObjectsLoad = true;
   }
 
   /**
@@ -457,8 +494,10 @@ export class Cvat3dPreRenderEnhancer {
 
   /**
    * Hooks a `Canvas3d` instance's internal `view` (`Canvas3dViewImpl`) so that:
-   * - `onSceneImageLoaded`: marks dirty when a new frame's PCD point cloud finishes loading.
-   * - `notify`: marks dirty when `OBJECTS_UPDATED` or `CONFIG_UPDATED` fires.
+   * - `onSceneImageLoaded`: marks dirty + `pendingFrameObjectsLoad = true` when a new frame's PCD finishes loading.
+   * - `notify`: only recomputes on `image_changed` or the initial `objects_updated` of a newly loaded frame;
+   *   ignores subsequent `objects_updated` while dragging/editing a box on the current frame so point colors
+   *   only update after switching frames (Next Frame -> Prev Frame) or toggling an option.
    * - `render`: executes `applyOnceIfNeeded()` BEFORE `renderer.render(scene, camera)` ONLY when dirty.
    */
   public ensureHooked(canvas3d: CvatInternalCanvas3dLike | null): boolean {
@@ -475,12 +514,14 @@ export class Cvat3dPreRenderEnhancer {
     }
     this.hookedViews.add(view);
     this.dirty = true;
+    this.pendingFrameObjectsLoad = true;
 
     if (typeof view.onSceneImageLoaded === 'function') {
       const origOnSceneLoaded = view.onSceneImageLoaded.bind(view);
       view.onSceneImageLoaded = (points: ThreeObject3DLike): void => {
         origOnSceneLoaded(points);
         this.dirty = true;
+        this.pendingFrameObjectsLoad = true;
         this.applyOnceIfNeeded(view, canvas3d?.model);
       };
     }
@@ -490,15 +531,18 @@ export class Cvat3dPreRenderEnhancer {
       view.notify = (model: unknown, reason: string): void => {
         if (reason === 'image_changed') {
           this.dirty = true;
+          this.pendingFrameObjectsLoad = true;
           this.appliedViewBackground.delete(view);
           this.applySceneBackgrounds(view);
         }
         origNotify(model, reason);
-        if (
-          reason === 'image_changed' ||
-          reason === 'objects_updated' ||
-          reason === 'config_updated'
-        ) {
+        if (reason === 'image_changed') {
+          this.dirty = true;
+          this.pendingFrameObjectsLoad = true;
+          this.applyOnceIfNeeded(view, canvas3d?.model);
+        } else if (reason === 'objects_updated' && this.pendingFrameObjectsLoad) {
+          // Only color boxes on initial frame object load; ignore subsequent box drag/resize/rotate on same frame
+          this.pendingFrameObjectsLoad = false;
           this.dirty = true;
           this.applyOnceIfNeeded(view, canvas3d?.model);
         }
@@ -539,16 +583,13 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     const drawnObjects = view.drawnObjects ?? {};
-    const objectSignature = Object.values(drawnObjects)
-      .map(
-        (o) =>
-          `${o.data?.clientID}:${o.data?.color}:${o.data?.labelColor}:${(o.data?.points ?? []).join(',')}:${String(o.data?.hidden)}:${String(o.data?.outside)}`
-      )
-      .join('|');
+    const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
+    if (hasDrawnObjects) {
+      this.pendingFrameObjectsLoad = false;
+    }
 
     const frameId = model?.data?.imageID ?? 'unknown';
-    const colorBy = model?.data?.configuration?.colorBy ?? 'Label';
-    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${colorBy}::${objectSignature}`;
+    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
 
     if (!this.dirty && currentSignature === this.lastExecutionSignature) {
       return false;
@@ -572,7 +613,7 @@ export class Cvat3dPreRenderEnhancer {
     // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry)
     const processedGeometries = new WeakSet<object>();
     const compiledBoxes = this.options.colorPointsByCuboid
-      ? compileOrientedCuboids(drawnObjects, colorBy)
+      ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
       : [];
 
     for (const key of viewKeys) {
@@ -596,13 +637,13 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     if (this.options.enableScattering) {
-      // Reduced scattering / glare: tighter attenuated point size + subtle translucency
+      // Scattering ON: attenuated point size + subtle translucency
       mat.size = isPerspective ? 0.025 : 0.28;
       mat.sizeAttenuation = true;
       mat.transparent = true;
       mat.opacity = 0.78;
     } else {
-      // Native CVAT v2.81.0 defaults: 0.05 for perspective, 0.5 for orthographic
+      // Scattering OFF: 100% solid opaque points (100% black on white bg, or 100% white on black bg)
       mat.size = isPerspective ? 0.05 : 0.5;
       mat.sizeAttenuation = true;
       mat.transparent = false;
@@ -647,17 +688,26 @@ export class Cvat3dPreRenderEnhancer {
       }
     }
 
-    const defaultPointColorWhenWhiteBg = 0.12 * colorScale;
-
-    if (!this.options.colorPointsByCuboid && !this.options.whiteBackground) {
-      // Fast restore from cached Float32Array
-      for (let i = 0; i < len; i += 1) {
-        colorArray[i] = originalColors[i] ?? colorScale;
+    // Check if LiDAR intensity attribute is available for scattering mode
+    const intensityArray = ptsObj.geometry?.attributes?.intensity?.array;
+    let minIntensity = Infinity;
+    let maxIntensity = -Infinity;
+    if (this.options.enableScattering && intensityArray && intensityArray.length > 0) {
+      const sampleStep = Math.max(1, Math.floor(intensityArray.length / 500));
+      for (let idx = 0; idx < intensityArray.length; idx += sampleStep) {
+        const val = intensityArray[idx] ?? 0;
+        if (Number.isFinite(val)) {
+          if (val < minIntensity) minIntensity = val;
+          if (val > maxIntensity) maxIntensity = val;
+        }
       }
-      colorAttr.needsUpdate = true;
-      return;
     }
+    const hasIntensitySpread =
+      Number.isFinite(minIntensity) &&
+      Number.isFinite(maxIntensity) &&
+      maxIntensity - minIntensity > 1e-5;
 
+    const overlapRgb = this.options.whiteBackground ? OVERLAP_RGB_WHITE_BG : OVERLAP_RGB_BLACK_BG;
     const boxCount = boxes.length;
 
     for (let i = 0; i < len; i += 3) {
@@ -666,6 +716,7 @@ export class Cvat3dPreRenderEnhancer {
       const pz = posArray[i + 2] ?? 0;
 
       let matchedBox: OrientedBoxBounds | null = null;
+      let isOverlapping = false;
 
       if (this.options.colorPointsByCuboid && boxCount > 0) {
         for (let b = 0; b < boxCount; b += 1) {
@@ -696,34 +747,52 @@ export class Cvat3dPreRenderEnhancer {
           const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
           if (lz < -box.hz || lz > box.hz) continue;
 
-          matchedBox = box;
-          break;
+          if (matchedBox === null) {
+            matchedBox = box;
+          } else {
+            // Point is wrapped by 2+ overlapping boxes -> assign 3rd overlap color
+            isOverlapping = true;
+            break;
+          }
         }
       }
 
-      if (matchedBox) {
+      if (isOverlapping) {
+        colorArray[i] = overlapRgb[0] * colorScale;
+        colorArray[i + 1] = overlapRgb[1] * colorScale;
+        colorArray[i + 2] = overlapRgb[2] * colorScale;
+      } else if (matchedBox) {
         colorArray[i] = matchedBox.r * colorScale;
         colorArray[i + 1] = matchedBox.g * colorScale;
         colorArray[i + 2] = matchedBox.b * colorScale;
-      } else if (this.options.whiteBackground) {
-        // On white background, pure white unboxed points become dark charcoal so they remain visible
-        const origR = originalColors[i] ?? colorScale;
-        const origG = originalColors[i + 1] ?? colorScale;
-        const origB = originalColors[i + 2] ?? colorScale;
-        const threshold = 0.9 * colorScale;
-        if (origR >= threshold && origG >= threshold && origB >= threshold) {
-          colorArray[i] = defaultPointColorWhenWhiteBg;
-          colorArray[i + 1] = defaultPointColorWhenWhiteBg;
-          colorArray[i + 2] = defaultPointColorWhenWhiteBg;
-        } else {
-          colorArray[i] = origR;
-          colorArray[i + 1] = origG;
-          colorArray[i + 2] = origB;
-        }
+      } else if (!this.options.enableScattering) {
+        // Scattering OFF: 100% pure black on white background, or 100% pure white on black background
+        const solidBase = this.options.whiteBackground ? 0 : 1 * colorScale;
+        colorArray[i] = solidBase;
+        colorArray[i + 1] = solidBase;
+        colorArray[i + 2] = solidBase;
       } else {
-        colorArray[i] = originalColors[i] ?? colorScale;
-        colorArray[i + 1] = originalColors[i + 1] ?? colorScale;
-        colorArray[i + 2] = originalColors[i + 2] ?? colorScale;
+        // Scattering ON: compute LiDAR scattering intensity/range shade adapted to background
+        const ptIdx = Math.floor(i / 3);
+        let scatterFactor = 0.5;
+        if (hasIntensitySpread && intensityArray) {
+          const rawI = intensityArray[ptIdx] ?? minIntensity;
+          scatterFactor = Math.max(
+            0,
+            Math.min(1, (rawI - minIntensity) / (maxIntensity - minIntensity))
+          );
+        } else {
+          const dist = Math.sqrt(px * px + py * py + pz * pz);
+          scatterFactor = Math.max(0, Math.min(1, dist / 60));
+        }
+
+        const shade = this.options.whiteBackground
+          ? (0.12 + 0.52 * scatterFactor) * colorScale
+          : (0.35 + 0.65 * (1 - 0.55 * scatterFactor)) * colorScale;
+
+        colorArray[i] = shade;
+        colorArray[i + 1] = shade;
+        colorArray[i + 2] = shade;
       }
     }
 
