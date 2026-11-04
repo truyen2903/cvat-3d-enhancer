@@ -30,6 +30,7 @@ export function getSessionPatStorageKey(origin: string): string {
 
 export const DEFAULT_AUTHORIZED_ORIGINS: readonly string[] = [
   'https://app.cvat.ai',
+  'https://cvat.itup.io.vn',
   'http://localhost:8080',
   'http://127.0.0.1:8080',
 ] as const;

@@ -10,6 +10,8 @@ export default defineManifest({
   permissions: ['storage', 'activeTab', 'scripting'],
   host_permissions: [
     'https://*.cvat.ai/*',
+    'https://cvat.itup.io.vn/*',
+    'https://*.itup.io.vn/*',
     'http://localhost/*',
     'http://127.0.0.1/*',
   ],
@@ -26,6 +28,8 @@ export default defineManifest({
     {
       matches: [
         'https://*.cvat.ai/*',
+        'https://cvat.itup.io.vn/*',
+        'https://*.itup.io.vn/*',
         'http://localhost/*',
         'http://127.0.0.1/*',
       ],
@@ -35,7 +39,7 @@ export default defineManifest({
   ],
   web_accessible_resources: [
     {
-      resources: ['assets/page-bridge.js'],
+      resources: ['assets/*', 'src/*'],
       matches: ['https://*/*', 'http://*/*'],
     },
   ],

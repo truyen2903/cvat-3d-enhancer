@@ -191,12 +191,16 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   });
 
   let mountedPanel: MountedShadowPanel | null = null;
-  if (document.body) {
-    mountedPanel = mountFloatingPanelShadowHost(document);
-    lifecycle.registerCleanup(() => {
-      mountedPanel?.unmount();
-    });
-  }
+  const ensurePanelMounted = () => {
+    if (!mountedPanel && document.body) {
+      mountedPanel = mountFloatingPanelShadowHost(document);
+      lifecycle.registerCleanup(() => {
+        mountedPanel?.unmount();
+        mountedPanel = null;
+      });
+    }
+  };
+  ensurePanelMounted();
 
   lifecycle.registerCleanup(async () => {
     await featureRegistry.unmountAll();
@@ -208,6 +212,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   try {
     await authManager.detectAuthentication(window.location.origin);
     await syncAll();
+    ensurePanelMounted();
   } catch (err) {
     log.error('Initial bootstrap synchronization error', err);
   }
@@ -218,6 +223,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     document.documentElement,
     { childList: true, subtree: true },
     () => {
+      ensurePanelMounted();
       const nextRoute = runtimeDetector.detectRouteContext();
       if (
         nextRoute.pathname !== currentRoute.pathname ||
