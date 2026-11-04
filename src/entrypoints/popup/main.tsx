@@ -39,6 +39,17 @@ export const PopupApp: React.FC = () => {
       return;
     }
     try {
+      // Request persistent host permission for this origin so F5 / future visits auto-inject
+      if (typeof chrome !== 'undefined' && chrome.permissions?.request) {
+        try {
+          await chrome.permissions.request({
+            origins: [`${activeTabOrigin}/*`],
+          });
+        } catch {
+          // Proceed with activeTab fallback if optional permission prompt is dismissed
+        }
+      }
+
       const updated = await addAuthorizedOrigin(activeTabOrigin);
       setAuthorizedOrigins(updated);
 
@@ -52,7 +63,9 @@ export const PopupApp: React.FC = () => {
           });
         }
       }
-      setStatusMessage(`Activated CVAT 3D Enhancer on ${activeTabOrigin}!`);
+      setStatusMessage(
+        `Activated & persisted on ${activeTabOrigin}! It will now auto-start on F5.`
+      );
     } catch (err) {
       setStatusMessage(
         err instanceof Error ? err.message : 'Failed to activate on current tab.'

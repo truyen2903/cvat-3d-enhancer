@@ -13,6 +13,7 @@ export default defineManifest({
     'http://localhost/*',
     'http://127.0.0.1/*',
   ],
+  optional_host_permissions: ['https://*/*', 'http://*/*'],
   background: {
     service_worker: 'src/entrypoints/background.ts',
     type: 'module',
@@ -38,7 +39,7 @@ export default defineManifest({
       matches: ['https://*/*', 'http://*/*'],
     },
   ],
-  content_security_policy: {
+    content_security_policy: {
     extension_pages: "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';",
   },
-});
+} as never);

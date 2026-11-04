@@ -55,6 +55,61 @@ export async function addAuthorizedOrigin(
   const updated = Array.from(new Set([...current, normalized]));
   const customOnly = updated.filter((o) => !DEFAULT_AUTHORIZED_ORIGINS.includes(o));
   await storage.set(STORAGE_KEYS.AUTHORIZED_ORIGINS, customOnly);
+  await syncDynamicContentScripts(storage);
   return updated;
+}
+
+/**
+ * Registers persistent Manifest V3 dynamic content scripts for all user-authorized custom origins
+ * so that refreshing (F5) or opening new tabs on that domain automatically runs the extension.
+ */
+export async function syncDynamicContentScripts(
+  storage: KeyValueStorageAdapter = new ChromeLocalStorageAdapter()
+): Promise<void> {
+  if (
+    typeof chrome === 'undefined' ||
+    !chrome.scripting?.registerContentScripts ||
+    !chrome.runtime?.getManifest
+  ) {
+    return;
+  }
+
+  try {
+    const manifest = chrome.runtime.getManifest();
+    const contentScriptFiles = manifest.content_scripts?.[0]?.js ?? [];
+    if (contentScriptFiles.length === 0) {
+      return;
+    }
+
+    const custom = await storage.get<unknown>(STORAGE_KEYS.AUTHORIZED_ORIGINS);
+    const customOrigins = Array.isArray(custom)
+      ? custom.filter((item): item is string => typeof item === 'string')
+      : [];
+
+    const scriptId = 'cvat-enhancer-dynamic-origins';
+    try {
+      await chrome.scripting.unregisterContentScripts({ ids: [scriptId] });
+    } catch {
+      // Ignore if not previously registered
+    }
+
+    if (customOrigins.length === 0) {
+      return;
+    }
+
+    const matches = customOrigins.map((origin) => `${origin}/*`);
+    await chrome.scripting.registerContentScripts([
+      {
+        id: scriptId,
+        js: contentScriptFiles,
+        matches,
+        runAt: 'document_idle',
+        persistAcrossSessions: true,
+      },
+    ]);
+    log.info(`Registered persistent dynamic content scripts for ${matches.length} custom origin(s)`);
+  } catch (err) {
+    log.warn('Could not register dynamic content scripts (host permission may be required)', err);
+  }
 }
 
