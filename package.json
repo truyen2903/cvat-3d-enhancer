@@ -1,0 +1,47 @@
+{
+  "name": "cvat-3d-enhancer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Security-first Chrome/Brave Manifest V3 extension for CVAT 3D/LiDAR annotation enhancement",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests scripts",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,html}\" \"tests/**/*.{ts,tsx}\" \"docs/**/*.md\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,html}\" \"tests/**/*.{ts,tsx}\"",
+    "test": "vitest run",
+    "test:security": "vitest run tests/security && node scripts/check-secrets.mjs",
+    "test:e2e": "playwright test",
+    "security:audit": "npm audit --audit-level=high && node scripts/check-secrets.mjs"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "4.6.7",
+    "zustand": "5.0.16"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "2.7.1",
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.64.1",
+    "@types/chrome": "0.3.7",
+    "@types/node": "22.13.5",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "autoprefixer": "10.4.20",
+    "eslint": "9.39.5",
+    "globals": "16.0.0",
+    "jsdom": "26.0.0",
+    "postcss": "8.5.32",
+    "prettier": "3.9.10",
+    "tailwindcss": "3.4.19",
+    "typescript": "5.7.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "6.4.5",
+    "vitest": "5.1.0"
+  }
+}
