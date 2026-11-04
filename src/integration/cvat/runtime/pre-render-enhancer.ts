@@ -386,6 +386,7 @@ export class Cvat3dPreRenderEnhancer {
   private options: Cvat3dWorkspaceRenderOptions;
   private readonly baseColorsCache = new WeakMap<object, Float32Array>();
   private readonly hookedViews = new WeakSet<object>();
+  private readonly appliedViewBackground = new WeakMap<object, boolean>();
   private lastExecutionSignature = '';
   private dirty = true;
 
@@ -410,6 +411,7 @@ export class Cvat3dPreRenderEnhancer {
     if (changed) {
       this.dirty = true;
       if (canvas3d?.view) {
+        this.appliedViewBackground.delete(canvas3d.view);
         this.applyOnceIfNeeded(canvas3d.view, canvas3d.model);
       }
     }
@@ -417,6 +419,40 @@ export class Cvat3dPreRenderEnhancer {
 
   public markDirty(): void {
     this.dirty = true;
+  }
+
+  /**
+   * Immediately applies the target background color (`0xffffff` or `0x000000`) to all 4 Three.js
+   * scenes and WebGL renderers, even BEFORE the first frame's PCD point cloud finishes loading,
+   * eliminating the initial black-frame flash on frame 0.
+   */
+  public applySceneBackgrounds(view: CvatInternalViewLike): void {
+    if (!view.views) {
+      return;
+    }
+    if (!this.dirty && this.appliedViewBackground.get(view) === this.options.whiteBackground) {
+      return;
+    }
+
+    const viewKeys = ['perspective', 'top', 'side', 'front'] as const;
+    const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
+    const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
+
+    for (const key of viewKeys) {
+      const rv = view.views[key];
+      if (!rv) continue;
+      if (rv.scene?.background && typeof rv.scene.background.set === 'function') {
+        rv.scene.background.set(targetBgHex);
+      }
+      if (rv.renderer?.setClearColor) {
+        rv.renderer.setClearColor(targetBgHex, 1);
+      }
+      if (rv.renderer?.domElement) {
+        rv.renderer.domElement.style.backgroundColor = targetBgCss;
+      }
+    }
+
+    this.appliedViewBackground.set(view, this.options.whiteBackground);
   }
 
   /**
@@ -430,6 +466,9 @@ export class Cvat3dPreRenderEnhancer {
     if (!view || typeof view !== 'object') {
       return false;
     }
+
+    // Always ensure background is synced immediately even before PCD finishes loading
+    this.applySceneBackgrounds(view);
 
     if (this.hookedViews.has(view)) {
       return true;
@@ -449,6 +488,11 @@ export class Cvat3dPreRenderEnhancer {
     if (typeof view.notify === 'function') {
       const origNotify = view.notify.bind(view);
       view.notify = (model: unknown, reason: string): void => {
+        if (reason === 'image_changed') {
+          this.dirty = true;
+          this.appliedViewBackground.delete(view);
+          this.applySceneBackgrounds(view);
+        }
         origNotify(model, reason);
         if (
           reason === 'image_changed' ||
@@ -464,6 +508,7 @@ export class Cvat3dPreRenderEnhancer {
     if (typeof view.render === 'function') {
       const origRender = view.render.bind(view);
       view.render = (): void => {
+        this.applySceneBackgrounds(view);
         if (this.dirty) {
           this.applyOnceIfNeeded(view, canvas3d?.model);
         }
@@ -483,10 +528,13 @@ export class Cvat3dPreRenderEnhancer {
       return false;
     }
 
+    // Set WebGL scene background BEFORE checking whether point cloud has loaded so frame 0 never flashes black
+    this.applySceneBackgrounds(view);
+
     const perspectiveScene = view.views.perspective?.scene;
     const perspectivePoints = findPointsObjectsInScene(perspectiveScene);
     if (perspectivePoints.length === 0) {
-      // Scene point cloud not yet populated for this frame
+      // Scene point cloud not yet populated for this frame; keep dirty=true so point coloring runs on PCD load
       return false;
     }
 
@@ -510,21 +558,10 @@ export class Cvat3dPreRenderEnhancer {
     this.dirty = false;
 
     const viewKeys = ['perspective', 'top', 'side', 'front'] as const;
-    const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
-    const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
 
     for (const key of viewKeys) {
       const rv = view.views[key];
       if (!rv) continue;
-      if (rv.scene?.background && typeof rv.scene.background.set === 'function') {
-        rv.scene.background.set(targetBgHex);
-      }
-      if (rv.renderer?.setClearColor) {
-        rv.renderer.setClearColor(targetBgHex, 1);
-      }
-      if (rv.renderer?.domElement) {
-        rv.renderer.domElement.style.backgroundColor = targetBgCss;
-      }
 
       const pointsList = findPointsObjectsInScene(rv.scene);
       for (const ptsObj of pointsList) {
@@ -695,6 +732,51 @@ export class Cvat3dPreRenderEnhancer {
 }
 
 const WORKSPACE_SETTINGS_INJECTED_ID = 'cvat-3d-enhancer-workspace-settings-section';
+const EARLY_VIEWPORT_BG_STYLE_ID = 'cvat-3d-enhancer-early-viewport-bg-style';
+
+/**
+ * Synchronously applies early CSS background rules and updates any mounted 3D `<canvas>.scene.background`
+ * in the DOM so the 3D viewport is white from frame 0 with zero black flash.
+ */
+export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: boolean): void {
+  const root = doc.head || doc.documentElement;
+  if (root) {
+    let styleEl = doc.getElementById(EARLY_VIEWPORT_BG_STYLE_ID) as HTMLStyleElement | null;
+    if (whiteBackground) {
+      if (!styleEl) {
+        styleEl = doc.createElement('style');
+        styleEl.id = EARLY_VIEWPORT_BG_STYLE_ID;
+        root.appendChild(styleEl);
+      }
+      const css = `
+        .cvat-canvas3d-perspective,
+        .cvat-canvas3d-perspective .cvat-canvas-container,
+        .cvat-canvas3d-orthographic-view .cvat-canvas3d-fullsize,
+        .cvat-canvas3d-perspective canvas,
+        .cvat-canvas3d-orthographic-view canvas {
+          background-color: #ffffff !important;
+        }
+      `;
+      if (styleEl.textContent !== css) {
+        styleEl.textContent = css;
+      }
+    } else if (styleEl) {
+      styleEl.remove();
+    }
+  }
+
+  const targetHex = whiteBackground ? 0xffffff : 0x000000;
+  const targetCss = whiteBackground ? '#ffffff' : '#000000';
+  const canvases = doc.querySelectorAll<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+    '.cvat-canvas3d-perspective canvas, .cvat-canvas3d-orthographic-view canvas'
+  );
+  for (const canvas of canvases) {
+    if (canvas.scene?.background && typeof canvas.scene.background.set === 'function') {
+      canvas.scene.background.set(targetHex);
+    }
+    canvas.style.backgroundColor = targetCss;
+  }
+}
 
 /**
  * Injects the 3 tickable 3D render options directly into CVAT's native Settings -> Workspace tab

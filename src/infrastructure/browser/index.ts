@@ -117,7 +117,7 @@ export async function syncDynamicContentScripts(
         id: scriptId,
         js: contentScriptFiles,
         matches,
-        runAt: 'document_idle',
+        runAt: 'document_start',
         persistAcrossSessions: true,
       },
     ]);

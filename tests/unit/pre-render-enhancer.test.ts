@@ -164,4 +164,43 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(bgSetSpy).not.toHaveBeenCalled();
     expect(origRenderSpy).toHaveBeenCalledTimes(3);
   });
+
+  it('applies white background immediately on frame 0 even before PCD point cloud finishes loading (zero black flash)', () => {
+    const bgSetSpy = vi.fn();
+    const setClearColorSpy = vi.fn();
+
+    const emptyFrame0Canvas3d: CvatInternalCanvas3dLike = {
+      model: {
+        data: {
+          imageID: 0,
+        },
+      },
+      view: {
+        views: {
+          perspective: {
+            scene: {
+              background: { r: 0, g: 0, b: 0, set: bgSetSpy },
+              children: [], // Point cloud not yet loaded (async PCD arrayBuffer pending)
+            },
+            renderer: {
+              setClearColor: setClearColorSpy,
+            },
+          },
+        },
+        drawnObjects: {},
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: true,
+      enableScattering: false,
+      colorPointsByCuboid: false,
+    });
+
+    enhancer.ensureHooked(emptyFrame0Canvas3d);
+
+    // Must set background to 0xffffff immediately before PCD finishes loading
+    expect(bgSetSpy).toHaveBeenCalledWith(0xffffff);
+    expect(setClearColorSpy).toHaveBeenCalledWith(0xffffff, 1);
+  });
 });

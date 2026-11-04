@@ -56,7 +56,7 @@ export class RuntimeDetector {
         taskId !== null ||
         projectId !== null ||
         Boolean(doc.querySelector(CVAT_DOM_SELECTORS.ROOT_CONTAINER)) ||
-        Boolean(doc.body));
+        Boolean(doc.body || doc.documentElement));
 
     return {
       origin: locationObj.origin,

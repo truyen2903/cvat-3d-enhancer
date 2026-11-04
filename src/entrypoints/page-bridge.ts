@@ -9,6 +9,7 @@ import {
   Cvat3dPreRenderEnhancer,
   injectCvatWorkspaceSettingsControls,
   readRenderOptionsFromClientSettings,
+  syncEarlyViewportBackgroundDom,
   writeRenderOptionsToClientSettings,
 } from '../integration/cvat/runtime/pre-render-enhancer';
 import {
@@ -77,6 +78,7 @@ export class PageBridgeRuntimeHost {
     this.doc = doc;
     const savedOptions = readRenderOptionsFromClientSettings(this.win.localStorage);
     this.preRenderEnhancer = new Cvat3dPreRenderEnhancer(savedOptions);
+    syncEarlyViewportBackgroundDom(this.doc, savedOptions.whiteBackground);
     this.tryHookCvatUIPlugin();
   }
 
@@ -90,6 +92,10 @@ export class PageBridgeRuntimeHost {
     // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
     if (this.doc.documentElement) {
       this.settingsObserver = new MutationObserver(() => {
+        syncEarlyViewportBackgroundDom(
+          this.doc,
+          this.preRenderEnhancer.getOptions().whiteBackground
+        );
         this.tryMountWorkspaceSettingsCheckboxes();
         const instance = this.getActiveCanvas3dInstance();
         if (instance) {
@@ -102,6 +108,7 @@ export class PageBridgeRuntimeHost {
       });
     }
 
+    syncEarlyViewportBackgroundDom(this.doc, this.preRenderEnhancer.getOptions().whiteBackground);
     this.tryMountWorkspaceSettingsCheckboxes();
 
     return () => {
@@ -118,6 +125,7 @@ export class PageBridgeRuntimeHost {
       () => this.preRenderEnhancer.getOptions(),
       (next: Cvat3dWorkspaceRenderOptions) => {
         const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
+        syncEarlyViewportBackgroundDom(this.doc, persisted.whiteBackground);
         const canvasInstance = this.getActiveCanvas3dInstance();
         this.preRenderEnhancer.setOptions(persisted, canvasInstance);
       }

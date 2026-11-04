@@ -57,21 +57,25 @@ function injectPageBridgeScript(doc: Document, sessionToken: string): () => void
 export async function bootstrapContentExtension(): Promise<BootstrapController> {
   const lifecycle = new LifecycleManager();
   const eventBus = new EventBus();
+
+  // Inject page bridge synchronously at document_start so pre-render hooks and white background
+  // styles attach before CVAT mounts its first 3D WebGL frame
+  const bridge = new PageBridge(window);
+  lifecycle.registerCleanup(bridge.attach());
+  lifecycle.registerCleanup(injectPageBridgeScript(document, bridge.getSessionToken()));
+
   const authorizedOrigins = await loadAuthorizedOrigins();
   const runtimeDetector = new RuntimeDetector(authorizedOrigins);
   const routeContext = runtimeDetector.detectRouteContext();
 
   if (!routeContext.isCvatPage) {
+    await lifecycle.dispose();
     return {
       dispose: async () => {
         await lifecycle.dispose();
       },
     };
   }
-
-  const bridge = new PageBridge(window);
-  lifecycle.registerCleanup(bridge.attach());
-  lifecycle.registerCleanup(injectPageBridgeScript(document, bridge.getSessionToken()));
 
   const domAdapter = new CvatDomAdapter(document);
   const versionDetector = new VersionDetector(authorizedOrigins);

@@ -30,7 +30,7 @@ export default defineManifest({
         'http://127.0.0.1/*',
       ],
       js: ['src/entrypoints/content.ts'],
-      run_at: 'document_idle',
+      run_at: 'document_start',
     },
   ],
   web_accessible_resources: [
