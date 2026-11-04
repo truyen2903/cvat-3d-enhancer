@@ -57,18 +57,23 @@ export function validateCvatOrigin(
   }
 
   const isLocalDev = isPrivateOrLocalHostname(parsed.hostname);
-
-  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocalDev)) {
-    return {
-      valid: false,
-      normalizedOrigin: null,
-      isLocalDev,
-      reason: 'Credentials may only be transmitted over HTTPS (or local/LAN HTTP for development).',
-    };
-  }
-
   const normalizedOrigin = parsed.origin;
   const allowlist = new Set(authorizedOrigins);
+
+  const isExplicitlyAuthorized = allowlist.has(normalizedOrigin);
+
+  if (
+    parsed.protocol !== 'https:' &&
+    !(parsed.protocol === 'http:' && (isLocalDev || isExplicitlyAuthorized))
+  ) {
+    return {
+      valid: false,
+      normalizedOrigin,
+      isLocalDev,
+      reason:
+        'Credentials may only be transmitted over HTTPS (or explicitly authorized HTTP CVAT origins).',
+    };
+  }
 
   const isDefaultCvatCloud =
     authorizedOrigins === DEFAULT_AUTHORIZED_ORIGINS &&
@@ -79,7 +84,7 @@ export function validateCvatOrigin(
     authorizedOrigins === DEFAULT_AUTHORIZED_ORIGINS &&
     LOCALHOST_HOSTNAMES.has(parsed.hostname);
 
-  if (!allowlist.has(normalizedOrigin) && !isDefaultCvatCloud && !isDefaultLocalhost) {
+  if (!isExplicitlyAuthorized && !isDefaultCvatCloud && !isDefaultLocalhost) {
     return {
       valid: false,
       normalizedOrigin,

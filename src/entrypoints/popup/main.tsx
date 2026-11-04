@@ -39,7 +39,7 @@ export const PopupApp: React.FC = () => {
       return;
     }
     try {
-      // Request persistent host permission for this origin so F5 / future visits auto-inject
+      // Request persistent host permission synchronously inside the click gesture
       if (typeof chrome !== 'undefined' && chrome.permissions?.request) {
         try {
           await chrome.permissions.request({
@@ -53,15 +53,17 @@ export const PopupApp: React.FC = () => {
       const updated = await addAuthorizedOrigin(activeTabOrigin);
       setAuthorizedOrigins(updated);
 
-      if (typeof chrome !== 'undefined' && chrome.runtime?.getManifest && chrome.scripting) {
-        const manifest = chrome.runtime.getManifest();
-        const contentScriptFiles = manifest.content_scripts?.[0]?.js ?? [];
-        if (contentScriptFiles.length > 0) {
-          await chrome.scripting.executeScript({
-            target: { tabId: activeTabId },
-            files: contentScriptFiles,
-          });
-        }
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        await new Promise<void>((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: 'ACTIVATE_ON_TAB',
+              tabId: activeTabId,
+              origin: activeTabOrigin,
+            },
+            () => resolve()
+          );
+        });
       }
       setStatusMessage(
         `Activated & persisted on ${activeTabOrigin}! It will now auto-start on F5.`
