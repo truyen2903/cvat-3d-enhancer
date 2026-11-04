@@ -10,6 +10,20 @@ const log = rootLogger.child('background');
 void configureTrustedSessionStorageAccess();
 void syncDynamicContentScripts();
 
+if (typeof chrome !== 'undefined' && chrome.permissions?.onAdded) {
+  chrome.permissions.onAdded.addListener(() => {
+    void syncDynamicContentScripts();
+  });
+}
+
+if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local' && changes['cvat-enhancer:authorized-origins']) {
+      void syncDynamicContentScripts();
+    }
+  });
+}
+
 if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
   chrome.runtime.onInstalled.addListener((details) => {
     log.info(`CVAT 3D Enhancer installed/updated (${details.reason})`);

@@ -39,32 +39,35 @@ export const PopupApp: React.FC = () => {
       return;
     }
     try {
-      // Request persistent host permission synchronously inside the click gesture
-      if (typeof chrome !== 'undefined' && chrome.permissions?.request) {
-        try {
-          await chrome.permissions.request({
-            origins: [`${activeTabOrigin}/*`],
-          });
-        } catch {
-          // Proceed with activeTab fallback if optional permission prompt is dismissed
-        }
-      }
+      // 1. Trigger permission request synchronously inside user click gesture (before any await)
+      const permPromise =
+        typeof chrome !== 'undefined' && chrome.permissions?.request
+          ? chrome.permissions.request({ origins: [`${activeTabOrigin}/*`] }).catch(() => false)
+          : Promise.resolve(true);
 
+      // 2. Immediately persist the origin and notify background service worker in parallel
+      // so even if Chrome closes the popup when the permission dialog opens, it is already saved!
       const updated = await addAuthorizedOrigin(activeTabOrigin);
       setAuthorizedOrigins(updated);
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        await new Promise<void>((resolve) => {
-          chrome.runtime.sendMessage(
-            {
-              type: 'ACTIVATE_ON_TAB',
-              tabId: activeTabId,
-              origin: activeTabOrigin,
-            },
-            () => resolve()
-          );
+        chrome.runtime.sendMessage({
+          type: 'ACTIVATE_ON_TAB',
+          tabId: activeTabId,
+          origin: activeTabOrigin,
         });
       }
+
+      await permPromise;
+
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({
+          type: 'ACTIVATE_ON_TAB',
+          tabId: activeTabId,
+          origin: activeTabOrigin,
+        });
+      }
+
       setStatusMessage(
         `Activated & persisted on ${activeTabOrigin}! It will now auto-start on F5.`
       );
