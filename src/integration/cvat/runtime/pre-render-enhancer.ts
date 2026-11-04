@@ -16,12 +16,14 @@ export interface Cvat3dWorkspaceRenderOptions {
   readonly whiteBackground: boolean;
   readonly enableScattering: boolean;
   readonly colorPointsByCuboid: boolean;
+  readonly fixedOrthoPointSize?: boolean;
 }
 
 export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Object.freeze({
   whiteBackground: false,
   enableScattering: false,
   colorPointsByCuboid: false,
+  fixedOrthoPointSize: true,
 });
 
 export const CLIENT_SETTINGS_STORAGE_KEY = 'clientSettings' as const;
@@ -150,6 +152,8 @@ export function readRenderOptionsFromClientSettings(
       whiteBackground: Boolean(obj.whiteBackground),
       enableScattering: Boolean(obj.enableScattering),
       colorPointsByCuboid: Boolean(obj.colorPointsByCuboid),
+      fixedOrthoPointSize:
+        typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
     };
   } catch {
     return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
@@ -186,6 +190,7 @@ export function writeRenderOptionsToClientSettings(
     whiteBackground: Boolean(options.whiteBackground),
     enableScattering: Boolean(options.enableScattering),
     colorPointsByCuboid: Boolean(options.colorPointsByCuboid),
+    fixedOrthoPointSize: options.fixedOrthoPointSize ?? true,
   };
 
   root.workspace = {
@@ -427,7 +432,11 @@ export class Cvat3dPreRenderEnhancer {
   private pendingFrameObjectsLoad = true;
 
   public constructor(initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS) {
-    this.options = { ...initialOptions };
+    this.options = {
+      ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
+      ...initialOptions,
+      fixedOrthoPointSize: initialOptions.fixedOrthoPointSize ?? true,
+    };
   }
 
   public getOptions(): Cvat3dWorkspaceRenderOptions {
@@ -438,12 +447,18 @@ export class Cvat3dPreRenderEnhancer {
     next: Cvat3dWorkspaceRenderOptions,
     canvas3d?: CvatInternalCanvas3dLike | null
   ): void {
+    const nextOrthoFixed = next.fixedOrthoPointSize ?? true;
+    const prevOrthoFixed = this.options.fixedOrthoPointSize ?? true;
     const changed =
       next.whiteBackground !== this.options.whiteBackground ||
       next.enableScattering !== this.options.enableScattering ||
-      next.colorPointsByCuboid !== this.options.colorPointsByCuboid;
+      next.colorPointsByCuboid !== this.options.colorPointsByCuboid ||
+      nextOrthoFixed !== prevOrthoFixed;
 
-    this.options = { ...next };
+    this.options = {
+      ...next,
+      fixedOrthoPointSize: nextOrthoFixed,
+    };
     if (changed) {
       this.dirty = true;
       if (canvas3d?.view) {
@@ -589,7 +604,8 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     const frameId = model?.data?.imageID ?? 'unknown';
-    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
+    const orthoFixed = this.options.fixedOrthoPointSize ?? true;
+    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${orthoFixed ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
 
     if (!this.dirty && currentSignature === this.lastExecutionSignature) {
       return false;
@@ -636,16 +652,25 @@ export class Cvat3dPreRenderEnhancer {
       return;
     }
 
-    if (this.options.enableScattering) {
-      // Scattering ON: attenuated point size + subtle translucency
-      mat.size = isPerspective ? 0.025 : 0.28;
+    const useFixedOrtho25px = this.options.fixedOrthoPointSize ?? true;
+
+    if (isPerspective) {
+      mat.size = this.options.enableScattering ? 0.025 : 0.05;
       mat.sizeAttenuation = true;
+    } else if (useFixedOrtho25px) {
+      // Top / Side / Front views: fixed 2.5px point size by default
+      mat.size = 2.5;
+      mat.sizeAttenuation = false;
+    } else {
+      // Option unchecked: follow CVAT v2.81.0 native orthographic point size (0.5)
+      mat.size = 0.5;
+      mat.sizeAttenuation = true;
+    }
+
+    if (this.options.enableScattering) {
       mat.transparent = true;
       mat.opacity = 0.78;
     } else {
-      // Scattering OFF: 100% solid opaque points (100% black on white bg, or 100% white on black bg)
-      mat.size = isPerspective ? 0.05 : 0.5;
-      mat.sizeAttenuation = true;
       mat.transparent = false;
       mat.opacity = 1.0;
     }
@@ -889,9 +914,13 @@ export function injectCvatWorkspaceSettingsControls(
     const boxInput = existing.querySelector<HTMLInputElement>(
       'input[data-enhancer-opt="colorPointsByCuboid"]'
     );
+    const orthoInput = existing.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="fixedOrthoPointSize"]'
+    );
     if (bgInput) syncCheckboxVisualState(bgInput, opts.whiteBackground);
     if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
     if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
+    if (orthoInput) syncCheckboxVisualState(orthoInput, opts.fixedOrthoPointSize ?? true);
     return true;
   }
 
@@ -922,12 +951,21 @@ export function injectCvatWorkspaceSettingsControls(
       title: 'Color 3D points by bounding box',
       description: 'Highlight points inside each 3D cuboid using the cuboid color',
     },
+    {
+      key: 'fixedOrthoPointSize',
+      rowClass: 'cvat-workspace-settings-3d-ortho-point-size',
+      title: 'Fixed 2.5px point size in Top/Side/Front views',
+      description: 'Lock point size to 2.5px in orthographic views (uncheck to follow CVAT default)',
+    },
   ];
 
   const initialOpts = getOptions();
 
   for (const item of items) {
-    const isChecked = initialOpts[item.key];
+    const isChecked =
+      item.key === 'fixedOrthoPointSize'
+        ? (initialOpts.fixedOrthoPointSize ?? true)
+        : Boolean(initialOpts[item.key]);
 
     const row = doc.createElement('div');
     row.className = `ant-row ${item.rowClass} cvat-player-setting`;

@@ -158,7 +158,9 @@ export class PageBridgeRuntimeHost {
               if (
                 inStorage.whiteBackground !== currentOpts.whiteBackground ||
                 inStorage.enableScattering !== currentOpts.enableScattering ||
-                inStorage.colorPointsByCuboid !== currentOpts.colorPointsByCuboid
+                inStorage.colorPointsByCuboid !== currentOpts.colorPointsByCuboid ||
+                (inStorage.fixedOrthoPointSize ?? true) !==
+                  (currentOpts.fixedOrthoPointSize ?? true)
               ) {
                 writeRenderOptionsToClientSettings(currentOpts, this.win.localStorage);
               }

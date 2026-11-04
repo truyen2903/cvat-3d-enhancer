@@ -37,6 +37,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       whiteBackground: true,
       enableScattering: true,
       colorPointsByCuboid: false,
+      fixedOrthoPointSize: true,
     });
   });
 
@@ -233,5 +234,71 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     // Must set background to 0xffffff immediately before PCD finishes loading
     expect(bgSetSpy).toHaveBeenCalledWith(0xffffff);
     expect(setClearColorSpy).toHaveBeenCalledWith(0xffffff, 1);
+  });
+
+  it('defaults Top/Side/Front orthographic views to fixed 2.5px point size and reverts to CVAT 0.5px when unchecked', () => {
+    const perspPoints = {
+      type: 'Points',
+      geometry: {
+        attributes: {
+          position: { array: new Float32Array([0, 0, 0]) },
+          color: { array: new Float32Array([1, 1, 1]) },
+        },
+      },
+      material: {
+        size: 0.05,
+        sizeAttenuation: true,
+        color: { r: 1, g: 1, b: 1, set: vi.fn() },
+      },
+    };
+    const topPoints = {
+      type: 'Points',
+      geometry: {
+        attributes: {
+          position: { array: new Float32Array([0, 0, 0]) },
+          color: { array: new Float32Array([1, 1, 1]) },
+        },
+      },
+      material: {
+        size: 0.5,
+        sizeAttenuation: true,
+        color: { r: 1, g: 1, b: 1, set: vi.fn() },
+      },
+    };
+
+    const canvas3d: CvatInternalCanvas3dLike = {
+      view: {
+        views: {
+          perspective: {
+            scene: { background: null, children: [perspPoints] },
+          },
+          top: {
+            scene: { background: null, children: [topPoints] },
+          },
+        },
+        drawnObjects: {},
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer();
+    enhancer.ensureHooked(canvas3d);
+
+    // By default (fixedOrthoPointSize: true), orthographic view point size is fixed at 2.5px
+    expect(topPoints.material.size).toBe(2.5);
+    expect(topPoints.material.sizeAttenuation).toBe(false);
+    expect(perspPoints.material.size).toBe(0.05);
+
+    // When turned OFF (fixedOrthoPointSize: false), reverts to CVAT native 0.5px
+    enhancer.setOptions(
+      {
+        whiteBackground: false,
+        enableScattering: false,
+        colorPointsByCuboid: false,
+        fixedOrthoPointSize: false,
+      },
+      canvas3d
+    );
+    expect(topPoints.material.size).toBe(0.5);
+    expect(topPoints.material.sizeAttenuation).toBe(true);
   });
 });
