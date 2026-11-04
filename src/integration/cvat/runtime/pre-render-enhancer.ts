@@ -80,6 +80,16 @@ export interface CvatRenderViewLike {
   };
 }
 
+export interface CvatCuboidViewMeshLike {
+  position?: { x: number; y: number; z: number };
+  rotation?: { x: number; y: number; z: number };
+  scale?: { x: number; y: number; z: number };
+  material?: {
+    color?: ThreeColorLike;
+    depthWrite?: boolean;
+  };
+}
+
 export interface CvatDrawnObjectEntry {
   data: {
     clientID: number;
@@ -98,14 +108,10 @@ export interface CvatDrawnObjectEntry {
   };
   cuboid: {
     setColor?: (hexColor: string) => void;
-    perspective?: {
-      position?: { x: number; y: number; z: number };
-      rotation?: { x: number; y: number; z: number };
-      scale?: { x: number; y: number; z: number };
-      material?: {
-        color?: ThreeColorLike;
-      };
-    };
+    perspective?: CvatCuboidViewMeshLike;
+    top?: CvatCuboidViewMeshLike;
+    side?: CvatCuboidViewMeshLike;
+    front?: CvatCuboidViewMeshLike;
   };
 }
 
@@ -340,6 +346,12 @@ export function compileOrientedCuboids(
           : null;
 
     const perspMesh = entry?.cuboid?.perspective;
+    for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
+      const meshMat = entry?.cuboid?.[viewKey]?.material;
+      if (meshMat && typeof meshMat === 'object') {
+        meshMat.depthWrite = false;
+      }
+    }
     let cx = 0;
     let cy = 0;
     let cz = 0;
@@ -410,10 +422,6 @@ export function compileOrientedCuboids(
     const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
     const [r, g, b] = getDistinctCuboidColor(clientID, boxIdx, whiteBackground);
     boxIdx += 1;
-
-    if (typeof entry.cuboid?.setColor === 'function') {
-      entry.cuboid.setColor(normalizedRgbToHex(r, g, b));
-    }
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame
     result.push({
@@ -687,6 +695,16 @@ export class Cvat3dPreRenderEnhancer {
       }
     }
 
+    // Ensure translucent cuboid meshes never write to depth buffer and depth-cull internal points
+    for (const entry of Object.values(drawnObjects)) {
+      for (const viewKey of viewKeys) {
+        const meshMat = entry?.cuboid?.[viewKey]?.material;
+        if (meshMat && typeof meshMat === 'object') {
+          meshMat.depthWrite = false;
+        }
+      }
+    }
+
     // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry)
     const processedGeometries = new WeakSet<object>();
     const compiledBoxes = this.options.colorPointsByCuboid
@@ -716,7 +734,7 @@ export class Cvat3dPreRenderEnhancer {
     const useFixedOrtho25px = this.options.fixedOrthoPointSize ?? true;
 
     if (isPerspective) {
-      mat.size = this.options.enableScattering ? 0.025 : 0.05;
+      mat.size = 0.05;
       mat.sizeAttenuation = true;
     } else if (useFixedOrtho25px) {
       // Top / Side / Front views: fixed 2.5px point size by default
@@ -728,13 +746,12 @@ export class Cvat3dPreRenderEnhancer {
       mat.sizeAttenuation = true;
     }
 
-    if (this.options.enableScattering) {
-      mat.transparent = true;
-      mat.opacity = 0.78;
-    } else {
-      mat.transparent = false;
-      mat.opacity = 1.0;
-    }
+    // CRITICAL: Keep PointsMaterial opaque (`transparent = false`) at all times!
+    // In Three.js, setting `transparent = true` on Points moves the point cloud into the
+    // transparent render pass AFTER CuboidModel meshes (`depthWrite: true`), causing active
+    // cuboids in Perspective/Top/Side/Front to depth-cull and erase all points inside the box!
+    mat.transparent = false;
+    mat.opacity = 1.0;
     mat.needsUpdate = true;
   }
 

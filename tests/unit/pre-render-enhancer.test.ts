@@ -301,4 +301,59 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(topPoints.material.size).toBe(0.5);
     expect(topPoints.material.sizeAttenuation).toBe(true);
   });
+
+  it('keeps PointsMaterial opaque (transparent = false) and disables cuboid depthWrite when scattering is enabled so active boxes never hide internal points', () => {
+    const perspPoints = {
+      type: 'Points',
+      geometry: {
+        attributes: {
+          position: { array: new Float32Array([0, 0, 0]) },
+          color: { array: new Float32Array([1, 1, 1]) },
+        },
+      },
+      material: {
+        size: 0.05,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.82,
+        color: { r: 1, g: 1, b: 1, set: vi.fn() },
+      },
+    };
+    const activeCuboidPerspectiveMat = { depthWrite: true };
+    const activeCuboidTopMat = { depthWrite: true };
+
+    const canvas3d: CvatInternalCanvas3dLike = {
+      view: {
+        views: {
+          perspective: {
+            scene: { background: null, children: [perspPoints] },
+          },
+        },
+        drawnObjects: {
+          1: {
+            data: {
+              clientID: 1,
+              points: [0, 0, 0, 0, 0, 0, 4, 4, 4],
+            },
+            cuboid: {
+              perspective: { material: activeCuboidPerspectiveMat },
+              top: { material: activeCuboidTopMat },
+            },
+          },
+        },
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: true,
+      enableScattering: true,
+      colorPointsByCuboid: true,
+    });
+    enhancer.ensureHooked(canvas3d);
+
+    expect(perspPoints.material.transparent).toBe(false);
+    expect(perspPoints.material.opacity).toBe(1.0);
+    expect(activeCuboidPerspectiveMat.depthWrite).toBe(false);
+    expect(activeCuboidTopMat.depthWrite).toBe(false);
+  });
 });
