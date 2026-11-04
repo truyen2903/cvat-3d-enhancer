@@ -29,7 +29,6 @@ import {
 } from '../integration/cvat/runtime';
 import type { CameraPresetAction } from '../shared/constants';
 import type { EnhancerConfig, PartialEnhancerConfig } from '../shared/types';
-import { mountFloatingPanelShadowHost, type MountedShadowPanel } from '../ui/floating-panel';
 import { useEnhancerUiStore } from '../ui/settings/store';
 
 export interface BootstrapController {
@@ -190,17 +189,14 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     },
   });
 
-  let mountedPanel: MountedShadowPanel | null = null;
-  const ensurePanelMounted = () => {
-    if (!mountedPanel && document.body) {
-      mountedPanel = mountFloatingPanelShadowHost(document);
-      lifecycle.registerCleanup(() => {
-        mountedPanel?.unmount();
-        mountedPanel = null;
-      });
+  // Remove any legacy floating panel host so all 3D features remain stealthily integrated inside CVAT native UI
+  const removeLegacyFloatingHost = () => {
+    const existingHost = document.getElementById('cvat-3d-enhancer-shadow-host');
+    if (existingHost) {
+      existingHost.remove();
     }
   };
-  ensurePanelMounted();
+  removeLegacyFloatingHost();
 
   lifecycle.registerCleanup(async () => {
     await featureRegistry.unmountAll();
@@ -212,7 +208,6 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   try {
     await authManager.detectAuthentication(window.location.origin);
     await syncAll();
-    ensurePanelMounted();
   } catch (err) {
     log.error('Initial bootstrap synchronization error', err);
   }
@@ -223,7 +218,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     document.documentElement,
     { childList: true, subtree: true },
     () => {
-      ensurePanelMounted();
+      removeLegacyFloatingHost();
       const nextRoute = runtimeDetector.detectRouteContext();
       if (
         nextRoute.pathname !== currentRoute.pathname ||

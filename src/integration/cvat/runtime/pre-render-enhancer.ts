@@ -698,7 +698,8 @@ const WORKSPACE_SETTINGS_INJECTED_ID = 'cvat-3d-enhancer-workspace-settings-sect
 
 /**
  * Injects the 3 tickable 3D render options directly into CVAT's native Settings -> Workspace tab
- * (`.cvat-workspace-settings`) matching CVAT's Ant Design Checkbox layout and `clientSettings` format.
+ * (`.cvat-workspace-settings`) using CVAT's exact Ant Design Row/Col/Checkbox/Text DOM structure
+ * so the options blend seamlessly with native CVAT settings.
  */
 export function injectCvatWorkspaceSettingsControls(
   doc: Document,
@@ -710,9 +711,23 @@ export function injectCvatWorkspaceSettingsControls(
     return false;
   }
 
+  const syncCheckboxVisualState = (
+    input: HTMLInputElement,
+    checked: boolean
+  ): void => {
+    input.checked = checked;
+    const checkboxSpan = input.closest('.ant-checkbox');
+    const wrapperLabel = input.closest('.ant-checkbox-wrapper');
+    if (checkboxSpan) {
+      checkboxSpan.classList.toggle('ant-checkbox-checked', checked);
+    }
+    if (wrapperLabel) {
+      wrapperLabel.classList.toggle('ant-checkbox-wrapper-checked', checked);
+    }
+  };
+
   const existing = doc.getElementById(WORKSPACE_SETTINGS_INJECTED_ID);
   if (existing) {
-    // Sync checkbox states if already mounted
     const opts = getOptions();
     const bgInput = existing.querySelector<HTMLInputElement>(
       'input[data-enhancer-opt="whiteBackground"]'
@@ -723,76 +738,89 @@ export function injectCvatWorkspaceSettingsControls(
     const boxInput = existing.querySelector<HTMLInputElement>(
       'input[data-enhancer-opt="colorPointsByCuboid"]'
     );
-    if (bgInput) bgInput.checked = opts.whiteBackground;
-    if (scInput) scInput.checked = opts.enableScattering;
-    if (boxInput) boxInput.checked = opts.colorPointsByCuboid;
+    if (bgInput) syncCheckboxVisualState(bgInput, opts.whiteBackground);
+    if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
+    if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
     return true;
   }
 
-  const section = doc.createElement('div');
-  section.id = WORKSPACE_SETTINGS_INJECTED_ID;
-  section.className = 'ant-row cvat-player-setting';
-  section.style.marginTop = '16px';
-  section.style.paddingTop = '12px';
-  section.style.borderTop = '1px solid rgba(0, 0, 0, 0.08)';
-
-  const headerCol = doc.createElement('div');
-  headerCol.className = 'ant-col ant-col-24';
-  headerCol.style.marginBottom = '8px';
-
-  const headerTitle = doc.createElement('span');
-  headerTitle.className = 'ant-typography cvat-text-color';
-  headerTitle.style.fontWeight = '600';
-  headerTitle.textContent = '3D Point Cloud & Cuboid Render Options (CVAT 3D Enhancer)';
-  headerCol.appendChild(headerTitle);
-  section.appendChild(headerCol);
+  const wrapper = doc.createElement('div');
+  wrapper.id = WORKSPACE_SETTINGS_INJECTED_ID;
 
   const items: {
     readonly key: keyof Cvat3dWorkspaceRenderOptions;
+    readonly rowClass: string;
     readonly title: string;
     readonly description: string;
   }[] = [
     {
       key: 'whiteBackground',
-      title: 'White 3D canvas background (Nền trắng 3D)',
-      description:
-        'Switch 3D perspective and orthographic viewports to a high-contrast white background and darken unboxed white points',
+      rowClass: 'cvat-workspace-settings-3d-white-background',
+      title: 'White 3D canvas background',
+      description: 'Use a white background in 3D viewports and adjust unboxed point contrast',
     },
     {
       key: 'enableScattering',
-      title: 'Point cloud scattering control (Độ tán xạ điểm 3D)',
-      description:
-        'Apply attenuated point size and anti-glare translucency to reduce LiDAR point haloing',
+      rowClass: 'cvat-workspace-settings-3d-point-scattering',
+      title: 'Reduce 3D point cloud scattering',
+      description: 'Apply attenuated point size and translucency for denser point cloud inspection',
     },
     {
       key: 'colorPointsByCuboid',
-      title: 'Color points inside each cuboid (Mỗi point trong box màu riêng)',
-      description:
-        'Pre-render single-pass OBB filter that colors 3D points inside each bounding box with its cuboid color',
+      rowClass: 'cvat-workspace-settings-3d-color-points-by-cuboid',
+      title: 'Color 3D points by bounding box',
+      description: 'Highlight points inside each 3D cuboid using the cuboid color',
     },
   ];
 
+  const initialOpts = getOptions();
+
   for (const item of items) {
+    const isChecked = initialOpts[item.key];
+
     const row = doc.createElement('div');
-    row.className = 'ant-col ant-col-24';
-    row.style.marginBottom = '10px';
+    row.className = `ant-row ${item.rowClass} cvat-player-setting`;
+
+    const checkboxCol = doc.createElement('div');
+    checkboxCol.className = 'ant-col ant-col-24';
 
     const label = doc.createElement('label');
-    label.className = 'ant-checkbox-wrapper cvat-text-color';
-    label.style.display = 'inline-flex';
-    label.style.alignItems = 'center';
-    label.style.cursor = 'pointer';
-    label.style.gap = '8px';
+    label.className = `ant-checkbox-wrapper cvat-text-color${
+      isChecked ? ' ant-checkbox-wrapper-checked' : ''
+    }`;
+
+    const checkboxSpan = doc.createElement('span');
+    checkboxSpan.className = `ant-checkbox${isChecked ? ' ant-checkbox-checked' : ''}`;
 
     const checkboxInput = doc.createElement('input');
     checkboxInput.type = 'checkbox';
+    checkboxInput.className = 'ant-checkbox-input';
     checkboxInput.dataset.enhancerOpt = item.key;
-    checkboxInput.checked = getOptions()[item.key];
-    checkboxInput.style.width = '16px';
-    checkboxInput.style.height = '16px';
-    checkboxInput.style.cursor = 'pointer';
+    checkboxInput.checked = isChecked;
+
+    const checkboxInner = doc.createElement('span');
+    checkboxInner.className = 'ant-checkbox-inner';
+
+    checkboxSpan.appendChild(checkboxInput);
+    checkboxSpan.appendChild(checkboxInner);
+
+    const titleSpan = doc.createElement('span');
+    titleSpan.textContent = item.title;
+
+    label.appendChild(checkboxSpan);
+    label.appendChild(titleSpan);
+    checkboxCol.appendChild(label);
+
+    const descCol = doc.createElement('div');
+    descCol.className = 'ant-col ant-col-24';
+
+    const descText = doc.createElement('span');
+    descText.className = 'ant-typography ant-typography-secondary';
+    descText.textContent = item.description;
+    descCol.appendChild(descText);
 
     checkboxInput.addEventListener('change', () => {
+      syncCheckboxVisualState(checkboxInput, checkboxInput.checked);
       const current = getOptions();
       const updated: Cvat3dWorkspaceRenderOptions = {
         ...current,
@@ -801,26 +829,11 @@ export function injectCvatWorkspaceSettingsControls(
       onChange(updated);
     });
 
-    const titleSpan = doc.createElement('span');
-    titleSpan.textContent = item.title;
-
-    label.appendChild(checkboxInput);
-    label.appendChild(titleSpan);
-    row.appendChild(label);
-
-    const descRow = doc.createElement('div');
-    const descText = doc.createElement('span');
-    descText.className = 'ant-typography ant-typography-secondary';
-    descText.style.display = 'block';
-    descText.style.fontSize = '12px';
-    descText.style.marginLeft = '24px';
-    descText.textContent = item.description;
-    descRow.appendChild(descText);
-    row.appendChild(descRow);
-
-    section.appendChild(row);
+    row.appendChild(checkboxCol);
+    row.appendChild(descCol);
+    wrapper.appendChild(row);
   }
 
-  container.appendChild(section);
+  container.appendChild(wrapper);
   return true;
 }
