@@ -64,12 +64,12 @@ export const CAMERA_PRESET_ACTIONS = [
 export type CameraPresetAction = (typeof CAMERA_PRESET_ACTIONS)[number];
 
 export const CVAT_DOM_SELECTORS = {
-  ROOT_CONTAINER: '#root',
+  ROOT_CONTAINER: '#root, #cvat-ui, .cvat-app-wrapper',
   PERSPECTIVE_WRAPPER: '.cvat-canvas3d-perspective',
   PERSPECTIVE_CANVAS_CONTAINER: '.cvat-canvas3d-perspective .cvat-canvas-container',
   TOP_VIEW_WRAPPER: '.cvat-canvas3d-topview',
   SIDE_VIEW_WRAPPER: '.cvat-canvas3d-sideview',
   FRONT_VIEW_WRAPPER: '.cvat-canvas3d-frontview',
   ORTHOGRAPHIC_VIEW: '.cvat-canvas3d-orthographic-view',
-  ANNOTATION_HEADER: '.cvat-annotation-header',
+  ANNOTATION_HEADER: '.cvat-annotation-header, .cvat-header',
 } as const;

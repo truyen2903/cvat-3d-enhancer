@@ -34,7 +34,7 @@ export default defineManifest({
   ],
   web_accessible_resources: [
     {
-      resources: ['src/entrypoints/page-bridge.ts'],
+      resources: ['assets/page-bridge.js'],
       matches: [
         'https://app.cvat.ai/*',
         'http://localhost:8080/*',

@@ -46,14 +46,17 @@ export class RuntimeDetector {
 
     const hasPerspectiveDom = Boolean(doc.querySelector(CVAT_DOM_SELECTORS.PERSPECTIVE_WRAPPER));
     const hasCvatHeader = Boolean(doc.querySelector(CVAT_DOM_SELECTORS.ANNOTATION_HEADER));
+    const hasCvatTitle = typeof doc.title === 'string' && /cvat/i.test(doc.title);
     const isCvatPage =
       originValidation.valid &&
       (hasPerspectiveDom ||
         hasCvatHeader ||
+        hasCvatTitle ||
         jobId !== null ||
         taskId !== null ||
         projectId !== null ||
-        Boolean(doc.querySelector(CVAT_DOM_SELECTORS.ROOT_CONTAINER)));
+        Boolean(doc.querySelector(CVAT_DOM_SELECTORS.ROOT_CONTAINER)) ||
+        Boolean(doc.body));
 
     return {
       origin: locationObj.origin,
