@@ -46,7 +46,7 @@ export async function addAuthorizedOrigin(
   newOrigin: string,
   storage: KeyValueStorageAdapter = new ChromeLocalStorageAdapter()
 ): Promise<readonly string[]> {
-  const parsed = new URL(newOrigin);
+  const parsed = new URL(newOrigin.trim());
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error('Only HTTP/HTTPS origins can be authorized.');
   }
@@ -57,6 +57,20 @@ export async function addAuthorizedOrigin(
   await storage.set(STORAGE_KEYS.AUTHORIZED_ORIGINS, customOnly);
   await syncDynamicContentScripts(storage);
   return updated;
+}
+
+export async function removeAuthorizedOrigin(
+  originToRemove: string,
+  storage: KeyValueStorageAdapter = new ChromeLocalStorageAdapter()
+): Promise<readonly string[]> {
+  const custom = await storage.get<unknown>(STORAGE_KEYS.AUTHORIZED_ORIGINS);
+  const customOrigins = Array.isArray(custom)
+    ? custom.filter((item): item is string => typeof item === 'string')
+    : [];
+  const nextCustom = customOrigins.filter((o) => o !== originToRemove);
+  await storage.set(STORAGE_KEYS.AUTHORIZED_ORIGINS, nextCustom);
+  await syncDynamicContentScripts(storage);
+  return Array.from(new Set([...DEFAULT_AUTHORIZED_ORIGINS, ...nextCustom]));
 }
 
 /**
