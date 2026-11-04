@@ -1,16 +1,64 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ConfigurationManager } from '../../application/config';
-import { DEFAULT_AUTHORIZED_ORIGINS } from '../../shared/constants';
+import { addAuthorizedOrigin, loadAuthorizedOrigins } from '../../infrastructure/browser';
 import type { EnhancerConfig } from '../../shared/types';
 
 export const PopupApp: React.FC = () => {
   const [config, setConfig] = useState<EnhancerConfig | null>(null);
+  const [authorizedOrigins, setAuthorizedOrigins] = useState<readonly string[]>([]);
+  const [activeTabOrigin, setActiveTabOrigin] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const manager = new ConfigurationManager();
     void manager.resolveEffectiveConfig().then(setConfig);
+    void loadAuthorizedOrigins().then(setAuthorizedOrigins);
+
+    if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const currentTab = tabs[0];
+        if (currentTab?.url && currentTab.id !== undefined) {
+          try {
+            const parsed = new URL(currentTab.url);
+            if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+              setActiveTabOrigin(parsed.origin);
+              setActiveTabId(currentTab.id);
+            }
+          } catch {
+            // Ignore non-standard browser URLs (e.g. chrome://)
+          }
+        }
+      });
+    }
   }, []);
+
+  const handleActivateOnCurrentTab = async () => {
+    if (!activeTabOrigin || activeTabId === null) {
+      return;
+    }
+    try {
+      const updated = await addAuthorizedOrigin(activeTabOrigin);
+      setAuthorizedOrigins(updated);
+
+      if (typeof chrome !== 'undefined' && chrome.runtime?.getManifest && chrome.scripting) {
+        const manifest = chrome.runtime.getManifest();
+        const contentScriptFiles = manifest.content_scripts?.[0]?.js ?? [];
+        if (contentScriptFiles.length > 0) {
+          await chrome.scripting.executeScript({
+            target: { tabId: activeTabId },
+            files: contentScriptFiles,
+          });
+        }
+      }
+      setStatusMessage(`Activated CVAT 3D Enhancer on ${activeTabOrigin}!`);
+    } catch (err) {
+      setStatusMessage(
+        err instanceof Error ? err.message : 'Failed to activate on current tab.'
+      );
+    }
+  };
 
   return (
     <div style={{ padding: '14px', fontFamily: 'Inter, system-ui, sans-serif', fontSize: '12px' }}>
@@ -27,10 +75,46 @@ export const PopupApp: React.FC = () => {
         <strong style={{ fontSize: '14px' }}>CVAT 3D Enhancer</strong>
       </div>
 
-      <p style={{ color: '#94a3b8', margin: '0 0 10px 0', lineHeight: 1.45 }}>
-        Open an authorized CVAT 3D annotation workspace to access the Shadow DOM Floating Panel,
-        capability matrix, and runtime controls.
-      </p>
+      {activeTabOrigin && (
+        <div
+          style={{
+            background: '#1e293b',
+            border: '1px solid #38bdf8',
+            borderRadius: '8px',
+            padding: '10px',
+            marginBottom: '10px',
+          }}
+        >
+          <div style={{ fontWeight: 700, color: '#e2e8f0', marginBottom: '4px', fontSize: '11px' }}>
+            CURRENT TAB ORIGIN
+          </div>
+          <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: '8px' }}>
+            {activeTabOrigin}
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleActivateOnCurrentTab()}
+            style={{
+              width: '100%',
+              background: '#38bdf8',
+              color: '#020617',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '7px 10px',
+              fontWeight: 700,
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            Authorize & Activate on This Tab
+          </button>
+          {statusMessage && (
+            <div style={{ marginTop: '6px', color: '#34d399', fontSize: '11px' }}>
+              {statusMessage}
+            </div>
+          )}
+        </div>
+      )}
 
       <div
         style={{
@@ -44,7 +128,7 @@ export const PopupApp: React.FC = () => {
         <div style={{ fontWeight: 700, color: '#94a3b8', marginBottom: '6px', fontSize: '11px' }}>
           AUTHORIZED CVAT ORIGINS
         </div>
-        {DEFAULT_AUTHORIZED_ORIGINS.map((origin) => (
+        {authorizedOrigins.map((origin) => (
           <div key={origin} style={{ color: '#e2e8f0', fontSize: '11px', marginBottom: '2px' }}>
             • {origin}
           </div>

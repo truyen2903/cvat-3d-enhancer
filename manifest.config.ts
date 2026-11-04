@@ -7,11 +7,11 @@ export default defineManifest({
   description:
     'Security-first 3D/LiDAR annotation workspace enhancer for CVAT with capability-verified runtime controls and hierarchical presets.',
   minimum_chrome_version: '114',
-  permissions: ['storage'],
+  permissions: ['storage', 'activeTab', 'scripting'],
   host_permissions: [
-    'https://app.cvat.ai/*',
-    'http://localhost:8080/*',
-    'http://127.0.0.1:8080/*',
+    'https://*.cvat.ai/*',
+    'http://localhost/*',
+    'http://127.0.0.1/*',
   ],
   background: {
     service_worker: 'src/entrypoints/background.ts',
@@ -24,9 +24,9 @@ export default defineManifest({
   content_scripts: [
     {
       matches: [
-        'https://app.cvat.ai/*',
-        'http://localhost:8080/*',
-        'http://127.0.0.1:8080/*',
+        'https://*.cvat.ai/*',
+        'http://localhost/*',
+        'http://127.0.0.1/*',
       ],
       js: ['src/entrypoints/content.ts'],
       run_at: 'document_idle',
@@ -35,11 +35,7 @@ export default defineManifest({
   web_accessible_resources: [
     {
       resources: ['assets/page-bridge.js'],
-      matches: [
-        'https://app.cvat.ai/*',
-        'http://localhost:8080/*',
-        'http://127.0.0.1:8080/*',
-      ],
+      matches: ['https://*/*', 'http://*/*'],
     },
   ],
   content_security_policy: {

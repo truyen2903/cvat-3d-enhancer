@@ -2,6 +2,23 @@ import { DEFAULT_AUTHORIZED_ORIGINS } from '../constants';
 
 const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  if (LOCALHOST_HOSTNAMES.has(hostname)) {
+    return true;
+  }
+  // RFC1918 private IPv4 ranges for local self-hosted CVAT deployments
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+    return true;
+  }
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+    return true;
+  }
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+    return true;
+  }
+  return false;
+}
+
 export interface OriginValidationResult {
   readonly valid: boolean;
   readonly normalizedOrigin: string | null;
@@ -11,7 +28,8 @@ export interface OriginValidationResult {
 
 /**
  * Validates that a URL or origin is safe for CVAT API communication.
- * Enforces HTTPS for all non-local origins and requires membership in the authorized origin allowlist.
+ * Enforces HTTPS for all remote origins (allowing HTTP for localhost/private LAN self-hosted CVAT)
+ * and requires membership in the authorized origin allowlist (supporting *.cvat.ai and any localhost port).
  */
 export function validateCvatOrigin(
   rawUrlOrOrigin: string,
@@ -38,21 +56,30 @@ export function validateCvatOrigin(
     };
   }
 
-  const isLocalDev = LOCALHOST_HOSTNAMES.has(parsed.hostname);
+  const isLocalDev = isPrivateOrLocalHostname(parsed.hostname);
 
   if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocalDev)) {
     return {
       valid: false,
       normalizedOrigin: null,
       isLocalDev,
-      reason: 'Credentials may only be transmitted over HTTPS (or localhost HTTP for development).',
+      reason: 'Credentials may only be transmitted over HTTPS (or local/LAN HTTP for development).',
     };
   }
 
   const normalizedOrigin = parsed.origin;
   const allowlist = new Set(authorizedOrigins);
 
-  if (!allowlist.has(normalizedOrigin)) {
+  const isDefaultCvatCloud =
+    authorizedOrigins === DEFAULT_AUTHORIZED_ORIGINS &&
+    parsed.protocol === 'https:' &&
+    (parsed.hostname === 'cvat.ai' || parsed.hostname.endsWith('.cvat.ai'));
+
+  const isDefaultLocalhost =
+    authorizedOrigins === DEFAULT_AUTHORIZED_ORIGINS &&
+    LOCALHOST_HOSTNAMES.has(parsed.hostname);
+
+  if (!allowlist.has(normalizedOrigin) && !isDefaultCvatCloud && !isDefaultLocalhost) {
     return {
       valid: false,
       normalizedOrigin,

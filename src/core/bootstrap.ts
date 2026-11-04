@@ -17,7 +17,7 @@ import { CuboidVisualizationFeature } from '../features/visualization-3d/cuboid'
 import { GridVisibilityFeature } from '../features/visualization-3d/grid';
 import { PointCloudAppearanceFeature } from '../features/visualization-3d/point-cloud';
 import { AuthenticationManager } from '../infrastructure/authentication';
-import { getExtensionRuntimeUrl } from '../infrastructure/browser';
+import { getExtensionRuntimeUrl, loadAuthorizedOrigins } from '../infrastructure/browser';
 import { PageBridge } from '../integration/cvat/bridge';
 import { VersionDetector } from '../integration/cvat/compatibility';
 import { RuntimeDetector } from '../integration/cvat/detector';
@@ -58,7 +58,8 @@ function injectPageBridgeScript(doc: Document, sessionToken: string): () => void
 export async function bootstrapContentExtension(): Promise<BootstrapController> {
   const lifecycle = new LifecycleManager();
   const eventBus = new EventBus();
-  const runtimeDetector = new RuntimeDetector();
+  const authorizedOrigins = await loadAuthorizedOrigins();
+  const runtimeDetector = new RuntimeDetector(authorizedOrigins);
   const routeContext = runtimeDetector.detectRouteContext();
 
   if (!routeContext.isCvatPage) {
@@ -74,7 +75,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   lifecycle.registerCleanup(injectPageBridgeScript(document, bridge.getSessionToken()));
 
   const domAdapter = new CvatDomAdapter(document);
-  const versionDetector = new VersionDetector();
+  const versionDetector = new VersionDetector(authorizedOrigins);
   const capabilityRegistry = new CapabilityRegistry();
   const runtimeAdapter = new CvatV2RuntimeAdapter(
     bridge,
@@ -85,6 +86,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   const runtimeManager = new RuntimeManager(runtimeAdapter, capabilityRegistry);
   const configManager = new ConfigurationManager();
   const authManager = new AuthenticationManager({
+    authorizedOrigins,
     onStateChange: (authState) => {
       eventBus.emit('auth:updated', authState);
       useEnhancerUiStore.getState().syncExternalState({ authState });

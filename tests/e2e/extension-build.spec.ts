@@ -13,7 +13,7 @@ test('Manifest V3 build output exists and enforces strict CSP', () => {
   };
 
   expect(manifest.manifest_version).toBe(3);
-  expect(manifest.permissions).toEqual(['storage']);
+  expect(manifest.permissions).toEqual(['storage', 'activeTab', 'scripting']);
   expect(manifest.content_security_policy.extension_pages).toContain("script-src 'self'");
   expect(manifest.content_security_policy.extension_pages).not.toContain('unsafe-eval');
 });
