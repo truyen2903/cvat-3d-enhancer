@@ -50,6 +50,7 @@ export interface ThreePointsMaterialLike {
   transparent?: boolean;
   color: ThreeColorLike;
   needsUpdate?: boolean;
+  clone?: () => ThreePointsMaterialLike;
 }
 
 export interface ThreeObject3DLike {
@@ -65,6 +66,7 @@ export interface ThreeObject3DLike {
     };
   };
   material?: ThreePointsMaterialLike;
+  onBeforeRender?: (...args: unknown[]) => void;
 }
 
 export interface ThreeSceneLike extends ThreeObject3DLike {
@@ -121,6 +123,7 @@ export interface CvatInternalViewLike {
     top?: CvatRenderViewLike;
     side?: CvatRenderViewLike;
     front?: CvatRenderViewLike;
+    [key: string]: CvatRenderViewLike | undefined;
   };
   drawnObjects?: Record<number, CvatDrawnObjectEntry>;
   onSceneImageLoaded?: (points: ThreeObject3DLike) => void;
@@ -492,7 +495,14 @@ export class Cvat3dPreRenderEnhancer {
   private options: Cvat3dWorkspaceRenderOptions;
   private readonly baseColorsCache = new WeakMap<object, Float32Array>();
   private readonly hookedViews = new WeakSet<object>();
+  private readonly hookedPrototypes = new WeakSet<object>();
+  private readonly hookedPointObjects = new WeakSet<object>();
+  private readonly primaryPerspectiveMaterials = new WeakSet<object>();
+  private readonly geometrySignatureMap = new WeakMap<object, string>();
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
+  private primaryPerspectiveScene: ThreeSceneLike | null = null;
+  private primaryPerspectiveCanvas: HTMLCanvasElement | null = null;
+  private lastCompiledBoxes: OrientedBoxBounds[] = [];
   private lastExecutionSignature = '';
   private dirty = true;
   private pendingFrameObjectsLoad = true;
@@ -540,24 +550,31 @@ export class Cvat3dPreRenderEnhancer {
   }
 
   /**
-   * Immediately applies the target background color (`0xffffff` or `0x000000`) to all 4 Three.js
-   * scenes and WebGL renderers, even BEFORE the first frame's PCD point cloud finishes loading,
-   * eliminating the initial black-frame flash on frame 0.
+   * Marks view structure dirty (e.g. when a new zoomed Top/Side/Front canvas is mounted)
+   * without resetting `pendingFrameObjectsLoad` so dragged boxes remain frozen.
+   */
+  public markViewStructureChanged(): void {
+    this.dirty = true;
+  }
+
+  /**
+   * Immediately applies the target background color (`0xffffff` or `0x000000`) to all Three.js
+   * scenes and WebGL renderers (including any zoomed Top/Side/Front views), even BEFORE the first
+   * frame's PCD point cloud finishes loading, eliminating the initial black-frame flash on frame 0.
    */
   public applySceneBackgrounds(view: CvatInternalViewLike): void {
     if (!view.views) {
       return;
     }
+    const entries = Object.entries(view.views);
     if (!this.dirty && this.appliedViewBackground.get(view) === this.options.whiteBackground) {
       return;
     }
 
-    const viewKeys = ['perspective', 'top', 'side', 'front'] as const;
     const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
     const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
 
-    for (const key of viewKeys) {
-      const rv = view.views[key];
+    for (const [, rv] of entries) {
       if (!rv) continue;
       if (rv.scene?.background && typeof rv.scene.background.set === 'function') {
         rv.scene.background.set(targetBgHex);
@@ -571,6 +588,174 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     this.appliedViewBackground.set(view, this.options.whiteBackground);
+  }
+
+  /**
+   * Hooks `THREE.Scene.prototype.onBeforeRender` and `THREE.Points.prototype.onBeforeRender`
+   * (plus per-instance `onBeforeRender` fallback) so that ANY newly opened canvas/modal/zoom view
+   * (e.g. when pressing the zoom key on Top, Side, or Front view) automatically receives:
+   * - Fixed 2.5px point size (`size = 2.5, sizeAttenuation = false`)
+   * - White/black scene & renderer background
+   * - Per-cuboid point cloud colors
+   * even if the zoom canvas creates its own `WebGLRenderer`, `Scene`, `Points`, or `PointsMaterial`.
+   */
+  private ensureThreePrototypesHooked(
+    perspectiveScene?: ThreeSceneLike,
+    samplePoints?: ThreeObject3DLike
+  ): void {
+    if (perspectiveScene && typeof perspectiveScene === 'object') {
+      const sceneProto = Object.getPrototypeOf(perspectiveScene) as
+        | { onBeforeRender?: (...args: unknown[]) => void }
+        | null;
+      if (
+        sceneProto &&
+        sceneProto !== Object.prototype &&
+        !this.hookedPrototypes.has(sceneProto)
+      ) {
+        this.hookedPrototypes.add(sceneProto);
+        const origSceneBeforeRender =
+          typeof sceneProto.onBeforeRender === 'function' ? sceneProto.onBeforeRender : null;
+        sceneProto.onBeforeRender = (
+          renderer?: unknown,
+          scene?: unknown,
+          camera?: unknown,
+          ...rest: unknown[]
+        ): void => {
+          if (origSceneBeforeRender) {
+            origSceneBeforeRender.call(scene ?? perspectiveScene, renderer, scene, camera, ...rest);
+          }
+          const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
+          const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
+          const sceneObj = scene as ThreeSceneLike | undefined;
+          if (sceneObj?.background && typeof sceneObj.background.set === 'function') {
+            sceneObj.background.set(targetBgHex);
+          }
+          const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
+          if (renObj?.domElement && renObj.domElement.style.backgroundColor !== targetBgCss) {
+            renObj.domElement.style.backgroundColor = targetBgCss;
+            if (typeof renObj.setClearColor === 'function') {
+              renObj.setClearColor(targetBgHex, 1);
+            }
+          }
+        };
+      }
+    }
+
+    if (samplePoints && typeof samplePoints === 'object') {
+      const pointsProto = Object.getPrototypeOf(samplePoints) as
+        | { onBeforeRender?: (...args: unknown[]) => void }
+        | null;
+      if (
+        pointsProto &&
+        pointsProto !== Object.prototype &&
+        !this.hookedPrototypes.has(pointsProto)
+      ) {
+        this.hookedPrototypes.add(pointsProto);
+        const origPointsBeforeRender =
+          typeof pointsProto.onBeforeRender === 'function' ? pointsProto.onBeforeRender : null;
+        const onPointsRender = (
+          pts: ThreeObject3DLike,
+          ren?: unknown,
+          scn?: unknown,
+          cam?: unknown,
+          mat?: unknown
+        ): void => {
+          this.handlePointsBeforeRender(pts, ren, scn, cam, mat);
+        };
+        pointsProto.onBeforeRender = function (
+          this: ThreeObject3DLike,
+          renderer?: unknown,
+          scene?: unknown,
+          camera?: unknown,
+          geometry?: unknown,
+          material?: unknown,
+          ...rest: unknown[]
+        ): void {
+          if (origPointsBeforeRender) {
+            origPointsBeforeRender.call(this, renderer, scene, camera, geometry, material, ...rest);
+          }
+          onPointsRender(this, renderer, scene, camera, material);
+        };
+      }
+    }
+  }
+
+  private bindInstanceBeforeRenderHook(ptsObj: ThreeObject3DLike): void {
+    if (!ptsObj || typeof ptsObj !== 'object' || this.hookedPointObjects.has(ptsObj)) {
+      return;
+    }
+    const proto = Object.getPrototypeOf(ptsObj);
+    if (proto && proto !== Object.prototype && this.hookedPrototypes.has(proto)) {
+      return;
+    }
+    this.hookedPointObjects.add(ptsObj);
+    const orig = typeof ptsObj.onBeforeRender === 'function' ? ptsObj.onBeforeRender : null;
+    ptsObj.onBeforeRender = (
+      renderer?: unknown,
+      scene?: unknown,
+      camera?: unknown,
+      geometry?: unknown,
+      material?: unknown,
+      ...rest: unknown[]
+    ): void => {
+      if (orig) {
+        orig.call(ptsObj, renderer, scene, camera, geometry, material, ...rest);
+      }
+      this.handlePointsBeforeRender(ptsObj, renderer, scene, camera, material);
+    };
+  }
+
+  private handlePointsBeforeRender(
+    ptsObj: ThreeObject3DLike,
+    renderer?: unknown,
+    scene?: unknown,
+    camera?: unknown,
+    materialArg?: unknown
+  ): void {
+    const camObj = camera as
+      | { isOrthographicCamera?: boolean; isPerspectiveCamera?: boolean; type?: string }
+      | undefined;
+    const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
+    const isOrthoCam = Boolean(
+      camObj && (camObj.isOrthographicCamera === true || camObj.type === 'OrthographicCamera')
+    );
+
+    let isPerspective = false;
+    if (!isOrthoCam) {
+      if (this.primaryPerspectiveCanvas && renObj?.domElement) {
+        isPerspective =
+          renObj.domElement === this.primaryPerspectiveCanvas &&
+          (!this.primaryPerspectiveScene || scene === this.primaryPerspectiveScene);
+      } else if (this.primaryPerspectiveScene && scene) {
+        isPerspective = scene === this.primaryPerspectiveScene;
+      } else {
+        isPerspective = Boolean(
+          camObj && (camObj.isPerspectiveCamera === true || camObj.type === 'PerspectiveCamera')
+        );
+      }
+    }
+
+    this.applyScatteringToMaterial(ptsObj, isPerspective);
+    if (
+      materialArg &&
+      typeof materialArg === 'object' &&
+      materialArg !== ptsObj.material &&
+      'size' in materialArg
+    ) {
+      this.applyScatteringToMaterial(
+        { material: materialArg as ThreePointsMaterialLike },
+        isPerspective
+      );
+    }
+
+    if (
+      ptsObj.geometry &&
+      this.lastExecutionSignature &&
+      this.geometrySignatureMap.get(ptsObj.geometry) !== this.lastExecutionSignature
+    ) {
+      this.geometrySignatureMap.set(ptsObj.geometry, this.lastExecutionSignature);
+      this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes);
+    }
   }
 
   /**
@@ -658,11 +843,16 @@ export class Cvat3dPreRenderEnhancer {
     this.applySceneBackgrounds(view);
 
     const perspectiveScene = view.views.perspective?.scene;
+    this.primaryPerspectiveScene = perspectiveScene ?? null;
+    this.primaryPerspectiveCanvas = view.views.perspective?.renderer?.domElement ?? null;
+
     const perspectivePoints = findPointsObjectsInScene(perspectiveScene);
     if (perspectivePoints.length === 0) {
       // Scene point cloud not yet populated for this frame; keep dirty=true so point coloring runs on PCD load
       return false;
     }
+
+    this.ensureThreePrototypesHooked(perspectiveScene, perspectivePoints[0]);
 
     const drawnObjects = view.drawnObjects ?? {};
     const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
@@ -670,11 +860,19 @@ export class Cvat3dPreRenderEnhancer {
       this.pendingFrameObjectsLoad = false;
     }
 
+    const viewEntries = Object.entries(view.views);
+    let totalPointsObjects = 0;
+    for (const [, rv] of viewEntries) {
+      if (rv?.scene) {
+        totalPointsObjects += findPointsObjectsInScene(rv.scene).length;
+      }
+    }
+
     const domFrameAttr =
       view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
     const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
     const orthoFixed = this.options.fixedOrthoPointSize ?? true;
-    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${orthoFixed ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
+    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${orthoFixed ? 1 : 0}::${hasDrawnObjects ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
 
     if (!this.dirty && currentSignature === this.lastExecutionSignature) {
       return false;
@@ -683,21 +881,22 @@ export class Cvat3dPreRenderEnhancer {
     this.lastExecutionSignature = currentSignature;
     this.dirty = false;
 
-    const viewKeys = ['perspective', 'top', 'side', 'front'] as const;
+    const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
 
-    for (const key of viewKeys) {
-      const rv = view.views[key];
+    for (const [key, rv] of viewEntries) {
       if (!rv) continue;
 
+      const isPerspective = key === 'perspective';
       const pointsList = findPointsObjectsInScene(rv.scene);
       for (const ptsObj of pointsList) {
-        this.applyScatteringToMaterial(ptsObj, key === 'perspective');
+        this.bindInstanceBeforeRenderHook(ptsObj);
+        this.applyScatteringToMaterial(ptsObj, isPerspective);
       }
     }
 
     // Ensure translucent cuboid meshes never write to depth buffer and depth-cull internal points
     for (const entry of Object.values(drawnObjects)) {
-      for (const viewKey of viewKeys) {
+      for (const viewKey of cuboidViewKeys) {
         const meshMat = entry?.cuboid?.[viewKey]?.material;
         if (meshMat && typeof meshMat === 'object') {
           meshMat.depthWrite = false;
@@ -710,13 +909,14 @@ export class Cvat3dPreRenderEnhancer {
     const compiledBoxes = this.options.colorPointsByCuboid
       ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
       : [];
+    this.lastCompiledBoxes = compiledBoxes;
 
-    for (const key of viewKeys) {
-      const rv = view.views[key];
+    for (const [, rv] of viewEntries) {
       const pointsList = findPointsObjectsInScene(rv?.scene);
       for (const ptsObj of pointsList) {
         if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
           processedGeometries.add(ptsObj.geometry);
+          this.geometrySignatureMap.set(ptsObj.geometry, currentSignature);
           this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
         }
       }
@@ -726,25 +926,31 @@ export class Cvat3dPreRenderEnhancer {
   }
 
   private applyScatteringToMaterial(ptsObj: ThreeObject3DLike, isPerspective: boolean): void {
-    const mat = ptsObj.material;
+    let mat = ptsObj.material;
     if (!mat) {
       return;
     }
 
-    const useFixedOrtho25px = this.options.fixedOrthoPointSize ?? true;
-
     if (isPerspective) {
-      mat.size = 0.05;
-      mat.sizeAttenuation = true;
-    } else if (useFixedOrtho25px) {
-      // Top / Side / Front views: fixed 2.5px point size by default
-      mat.size = 2.5;
-      mat.sizeAttenuation = false;
-    } else {
-      // Option unchecked: follow CVAT v2.81.0 native orthographic point size (0.5)
-      mat.size = 0.5;
-      mat.sizeAttenuation = true;
+      this.primaryPerspectiveMaterials.add(mat);
+    } else if (this.primaryPerspectiveMaterials.has(mat) && typeof mat.clone === 'function') {
+      // If a zoomed Top/Side/Front view cloned the perspective Points object without cloning its material,
+      // give the orthographic/zoom Points object its own isolated PointsMaterial so it stays at 2.5px.
+      mat = mat.clone();
+      ptsObj.material = mat;
     }
+
+    const useFixedOrtho25px = this.options.fixedOrthoPointSize ?? true;
+    const targetSize = isPerspective ? 0.05 : useFixedOrtho25px ? 2.5 : 0.5;
+    const targetAttenuation = isPerspective ? true : !useFixedOrtho25px;
+
+    const needsShaderUpdate =
+      mat.sizeAttenuation !== targetAttenuation ||
+      mat.transparent !== false ||
+      mat.needsUpdate === undefined;
+
+    mat.size = targetSize;
+    mat.sizeAttenuation = targetAttenuation;
 
     // CRITICAL: Keep PointsMaterial opaque (`transparent = false`) at all times!
     // In Three.js, setting `transparent = true` on Points moves the point cloud into the
@@ -752,7 +958,9 @@ export class Cvat3dPreRenderEnhancer {
     // cuboids in Perspective/Top/Side/Front to depth-cull and erase all points inside the box!
     mat.transparent = false;
     mat.opacity = 1.0;
-    mat.needsUpdate = true;
+    if (needsShaderUpdate) {
+      mat.needsUpdate = true;
+    }
   }
 
   private applyPointCloudBoxColors(
@@ -935,10 +1143,16 @@ export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: b
 
   const targetHex = whiteBackground ? 0xffffff : 0x000000;
   const targetCss = whiteBackground ? '#ffffff' : '#000000';
-  const canvases = doc.querySelectorAll<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-    '.cvat-canvas3d-perspective canvas, .cvat-canvas3d-orthographic-view canvas'
-  );
+  const canvases = doc.querySelectorAll<HTMLCanvasElement & { scene?: ThreeSceneLike }>('canvas');
   for (const canvas of canvases) {
+    const isCvatViewportCanvas =
+      Boolean(canvas.scene) ||
+      Boolean(
+        canvas.closest?.('.cvat-canvas3d-perspective, .cvat-canvas3d-orthographic-view')
+      );
+    if (!isCvatViewportCanvas) {
+      continue;
+    }
     if (canvas.scene?.background && typeof canvas.scene.background.set === 'function') {
       canvas.scene.background.set(targetHex);
     }

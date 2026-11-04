@@ -356,4 +356,88 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(activeCuboidPerspectiveMat.depthWrite).toBe(false);
     expect(activeCuboidTopMat.depthWrite).toBe(false);
   });
+
+  it('applies 2.5px fixed point size to newly opened zoomed Top/Side/Front canvases (both via views and via THREE.Points.prototype.onBeforeRender)', () => {
+    class MockThreePoints {
+      public type = 'Points';
+      public geometry = {
+        attributes: {
+          position: { array: new Float32Array([0, 0, 0]) },
+          color: { array: new Float32Array([1, 1, 1]) },
+        },
+      };
+      public material = {
+        size: 0.5,
+        sizeAttenuation: true,
+        transparent: false,
+        opacity: 1,
+        color: { r: 1, g: 1, b: 1, set: vi.fn() },
+        clone() {
+          return { ...this };
+        },
+      };
+      public onBeforeRender(..._args: unknown[]): void {
+        void _args;
+      }
+    }
+
+    const perspPoints = new MockThreePoints();
+    perspPoints.material.size = 0.05;
+    const perspCanvas = document.createElement('canvas');
+    const perspScene = { background: null, children: [perspPoints] };
+
+    const canvas3d: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 5 } },
+      view: {
+        views: {
+          perspective: {
+            scene: perspScene,
+            renderer: { domElement: perspCanvas },
+          },
+        },
+        drawnObjects: {},
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: true,
+      enableScattering: false,
+      colorPointsByCuboid: false,
+      fixedOrthoPointSize: true,
+    });
+    enhancer.ensureHooked(canvas3d);
+    expect(perspPoints.material.size).toBe(0.05);
+
+    // 1. Simulate pressing zoom key on Top/Side/Front which opens a new standalone zoom canvas
+    // with its own MockThreePoints instance (not even registered in view.views)
+    const zoomPointsStandalone = new MockThreePoints();
+    zoomPointsStandalone.material.size = 0.5;
+    const zoomCanvas = document.createElement('canvas');
+    const zoomScene = { background: null, children: [zoomPointsStandalone] };
+    const orthoCamera = { isOrthographicCamera: true, type: 'OrthographicCamera' };
+
+    // When WebGLRenderer renders zoomPointsStandalone, Three.js invokes onBeforeRender
+    zoomPointsStandalone.onBeforeRender(
+      { domElement: zoomCanvas },
+      zoomScene,
+      orthoCamera,
+      zoomPointsStandalone.geometry,
+      zoomPointsStandalone.material
+    );
+
+    expect(zoomPointsStandalone.material.size).toBe(2.5);
+    expect(zoomPointsStandalone.material.sizeAttenuation).toBe(false);
+
+    // 2. Also simulate a zoom canvas mounted into view.views['ortho_zoom_0'] on the same frame
+    const zoomPointsInViews = new MockThreePoints();
+    zoomPointsInViews.material.size = 0.5;
+    canvas3d.view!.views!['ortho_zoom_0'] = {
+      scene: { background: null, children: [zoomPointsInViews] },
+      renderer: { domElement: zoomCanvas },
+    };
+    enhancer.ensureHooked(canvas3d);
+
+    expect(zoomPointsInViews.material.size).toBe(2.5);
+    expect(zoomPointsInViews.material.sizeAttenuation).toBe(false);
+  });
 });

@@ -71,6 +71,7 @@ export class PageBridgeRuntimeHost {
   private pluginRegistered = false;
   private settingsObserver: MutationObserver | null = null;
   private readonly hookedPerspectiveCanvases = new WeakSet<HTMLCanvasElement>();
+  private readonly knownDomCanvases = new WeakSet<HTMLCanvasElement>();
   private domBackedViewRef: CvatInternalViewLike | null = null;
   private lastDomCanvasRef: HTMLCanvasElement | null = null;
 
@@ -103,6 +104,9 @@ export class PageBridgeRuntimeHost {
           this.preRenderEnhancer.getOptions().whiteBackground
         );
         this.tryMountWorkspaceSettingsCheckboxes();
+        if (this.checkForNewlyMountedCanvases()) {
+          this.preRenderEnhancer.markViewStructureChanged();
+        }
         const instance = this.getActiveCanvas3dInstance();
         if (instance) {
           this.preRenderEnhancer.ensureHooked(instance);
@@ -210,6 +214,13 @@ export class PageBridgeRuntimeHost {
               model: instance.model ?? domInstance.model,
             };
           }
+          if (instance.view?.views && domInstance?.view?.views) {
+            for (const [k, v] of Object.entries(domInstance.view.views)) {
+              if (k.startsWith('ortho_zoom_') && v) {
+                instance.view.views[k] = v;
+              }
+            }
+          }
           return instance;
         }
       } catch {
@@ -220,7 +231,27 @@ export class PageBridgeRuntimeHost {
     return domInstance;
   }
 
+  private checkForNewlyMountedCanvases(): boolean {
+    const allCanvases = this.doc.querySelectorAll<HTMLCanvasElement>('canvas');
+    let foundNew = false;
+    for (const c of allCanvases) {
+      if (!this.knownDomCanvases.has(c)) {
+        this.knownDomCanvases.add(c);
+        foundNew = true;
+        c.addEventListener('canvas.setup', () => {
+          this.preRenderEnhancer.markViewStructureChanged();
+          const inst = this.getActiveCanvas3dInstance();
+          if (inst?.view) {
+            this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
+          }
+        });
+      }
+    }
+    return foundNew;
+  }
+
   private bindDomPerspectiveCanvasEvents(): HTMLCanvasElement | null {
+    this.checkForNewlyMountedCanvases();
     const perspCanvas = this.doc.querySelector<
       HTMLCanvasElement & {
         scene?: ThreeSceneLike;
@@ -248,8 +279,8 @@ export class PageBridgeRuntimeHost {
 
   /**
    * Fallback/direct bridge that reads CVAT's `canvas.scene` (`THREE.Scene`) and
-   * `canvas.getDrawnObjects()` defined directly on `.cvat-canvas3d-perspective canvas`
-   * and `.cvat-canvas3d-orthographic-view canvas` in `canvas3dView.ts`.
+   * `canvas.getDrawnObjects()` defined directly on `.cvat-canvas3d-perspective canvas`,
+   * `.cvat-canvas3d-orthographic-view canvas`, and any newly opened zoom/modal `<canvas>`.
    */
   private resolveDomBackedCanvas3dInstance(): CvatCanvas3dLike | null {
     const perspCanvas = this.bindDomPerspectiveCanvasEvents() as
@@ -262,16 +293,6 @@ export class PageBridgeRuntimeHost {
     if (!perspCanvas?.scene) {
       return null;
     }
-
-    const topCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-      '.cvat-canvas3d-topview canvas'
-    );
-    const sideCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-      '.cvat-canvas3d-sideview canvas'
-    );
-    const frontCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-      '.cvat-canvas3d-frontview canvas'
-    );
 
     if (!this.domBackedViewRef || this.lastDomCanvasRef !== perspCanvas) {
       this.lastDomCanvasRef = perspCanvas;
@@ -290,12 +311,30 @@ export class PageBridgeRuntimeHost {
           const f = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
             '.cvat-canvas3d-frontview canvas'
           );
-          return {
+
+          const viewsMap: NonNullable<CvatInternalViewLike['views']> = {
             perspective: p?.scene ? { scene: p.scene, renderer: { domElement: p } } : undefined,
             top: t?.scene ? { scene: t.scene, renderer: { domElement: t } } : undefined,
             side: s?.scene ? { scene: s.scene, renderer: { domElement: s } } : undefined,
             front: f?.scene ? { scene: f.scene, renderer: { domElement: f } } : undefined,
           };
+
+          // Also include any zoomed/expanded Top/Side/Front canvas mounted anywhere in the DOM
+          const allSceneCanvases = docRef.querySelectorAll<
+            HTMLCanvasElement & { scene?: ThreeSceneLike }
+          >('canvas');
+          let extraIdx = 0;
+          for (const c of allSceneCanvases) {
+            if (c !== p && c !== t && c !== s && c !== f && c.scene) {
+              viewsMap[`ortho_zoom_${extraIdx}`] = {
+                scene: c.scene,
+                renderer: { domElement: c },
+              };
+              extraIdx += 1;
+            }
+          }
+
+          return viewsMap;
         },
         get drawnObjects() {
           const map: Record<number, CvatDrawnObjectEntry> = {};
@@ -314,11 +353,6 @@ export class PageBridgeRuntimeHost {
           return map;
         },
       };
-    } else {
-      // Ensure top/side/front references stay fresh
-      void topCanvas;
-      void sideCanvas;
-      void frontCanvas;
     }
 
     const frameAttr = perspCanvas.getAttribute('data-frame-number');
