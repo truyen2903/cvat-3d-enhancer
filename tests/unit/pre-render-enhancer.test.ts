@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
+  type CvatObjectStateLike,
   Cvat3dPreRenderEnhancer,
   getDistinctCuboidColor,
+  injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   OVERLAP_RGB_WHITE_BG,
   readRenderOptionsFromClientSettings,
+  syncTrackCuboidDimension,
   writeRenderOptionsToClientSettings,
 } from '../../src/integration/cvat/runtime/pre-render-enhancer';
 
@@ -439,5 +442,123 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     expect(zoomPointsInViews.material.size).toBe(2.5);
     expect(zoomPointsInViews.material.sizeAttenuation).toBe(false);
+  });
+
+  it('injects H, W, L dimension sync icons into CVAT object item sidebar and syncs dimensions ONLY to frames with 100% identical attributes', async () => {
+    document.body.innerHTML = `
+      <div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item">
+        <div class="ant-row ant-row-space-around ant-row-middle css-n0gjrg">
+          <div class="ant-col ant-col-20 css-n0gjrg" style="text-align: center;">
+            <div class="ant-row ant-row-space-around css-n0gjrg">
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-first-keyframe"></span></div>
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-prev-keyframe"></span></div>
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-next-keyframe"></span></div>
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-last-keyframe"></span></div>
+            </div>
+            <div class="ant-row ant-row-space-around css-n0gjrg">
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-outside"></span></div>
+              <div class="ant-col css-n0gjrg"><span role="img" class="anticon cvat-object-item-button-lock"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Track #1 keyframes:
+    // - Frame 0: attributes { 10: 'car', 20: 'moving' }, points [0,0,0, 0,0,0, 4.0, 1.8, 1.5]
+    // - Frame 5 (current): attributes { 10: 'car', 20: 'moving' }, points [1,2,3, 0,0,0, 4.8, 2.1, 1.75]
+    // - Frame 10: attributes { 10: 'car', 20: 'parked' } (MISMATCH!), points [2,3,4, 0,0,0, 4.0, 1.8, 1.5]
+    // - Frame 15: attributes { 10: 'car', 20: 'moving' }, points [3,4,5, 0,0,0, 4.1, 1.9, 1.6]
+    const trackShapes: Record<
+      number,
+      { points: number[]; attributes: Record<number, string> }
+    > = {
+      0: { points: [0, 0, 0, 0, 0, 0, 4.0, 1.8, 1.5], attributes: { 10: 'car', 20: 'moving' } },
+      5: { points: [1, 2, 3, 0, 0, 0, 4.8, 2.1, 1.75], attributes: { 10: 'car', 20: 'moving' } },
+      10: { points: [2, 3, 4, 0, 0, 0, 4.0, 1.8, 1.5], attributes: { 10: 'car', 20: 'parked' } },
+      15: { points: [3, 4, 5, 0, 0, 0, 4.1, 1.9, 1.6], attributes: { 10: 'car', 20: 'moving' } },
+    };
+
+    const internalSave = vi.fn((frame: number, data: CvatObjectStateLike): CvatObjectStateLike => {
+      const kf = trackShapes[frame]!;
+      if (data.updateFlags?.points && Array.isArray(data.points)) {
+        kf.points = [...data.points];
+        data.updateFlags.points = false;
+      }
+      return {
+        clientID: 1,
+        frame,
+        objectType: 'track',
+        shapeType: 'cuboid',
+        points: [...kf.points],
+        attributes: { ...kf.attributes },
+        updateFlags: {
+          reset() {
+            delete this.points;
+          },
+        },
+        __internal: {
+          save: internalSave,
+          export: () => ({
+            clientID: 1,
+            frame: 0,
+            shapes: Object.entries(trackShapes).map(([f, val]) => ({
+              frame: Number(f),
+              points: [...val.points],
+            })),
+          }),
+        },
+      };
+    });
+
+    const currentStateOnFrame5 = internalSave(5, { updateFlags: {} });
+    const perspCanvas = document.createElement('canvas') as HTMLCanvasElement & {
+      updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+    };
+    const updatePositionSpy = vi.fn();
+    perspCanvas.updatePosition = updatePositionSpy;
+
+    const mountedCount = injectCvatObjectDimensionSyncControls(document, (id, dim) =>
+      syncTrackCuboidDimension(id, dim, {
+        stateOnCurrentFrame: currentStateOnFrame5,
+        perspectiveCanvas: perspCanvas,
+      })
+    );
+    expect(mountedCount).toBe(1);
+
+    const syncHBtn = document.querySelector<HTMLElement>(
+      '#cvat-objects-sidebar-state-item-1 [data-enhancer-sync-dim="H"]'
+    );
+    const syncWBtn = document.querySelector<HTMLElement>(
+      '#cvat-objects-sidebar-state-item-1 [data-enhancer-sync-dim="W"]'
+    );
+    const syncLBtn = document.querySelector<HTMLElement>(
+      '#cvat-objects-sidebar-state-item-1 [data-enhancer-sync-dim="L"]'
+    );
+    expect(syncHBtn).not.toBeNull();
+    expect(syncWBtn).not.toBeNull();
+    expect(syncLBtn).not.toBeNull();
+
+    // 1. Click [H] -> syncs Height (index 8 = 1.75) to frames 0, 5, 15, but SKIPS frame 10 (different attribute!)
+    syncHBtn!.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(trackShapes[0]!.points[8]).toBeCloseTo(1.75, 4);
+    expect(trackShapes[5]!.points[8]).toBeCloseTo(1.75, 4);
+    expect(trackShapes[15]!.points[8]).toBeCloseTo(1.75, 4);
+    // Frame 10 has attribute 20 = 'parked' != 'moving' -> MUST remain 1.5!
+    expect(trackShapes[10]!.points[8]).toBeCloseTo(1.5, 4);
+    // W and L on frame 0 must still be untouched (1.8 and 4.0) because only [H] was clicked
+    expect(trackShapes[0]!.points[6]).toBeCloseTo(4.0, 4);
+    expect(trackShapes[0]!.points[7]).toBeCloseTo(1.8, 4);
+    expect(updatePositionSpy).toHaveBeenCalledTimes(1);
+
+    // 2. Click [L] -> syncs Length (index 6 = 4.8) to frames 0, 5, 15, skipping frame 10
+    syncLBtn!.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(trackShapes[0]!.points[6]).toBeCloseTo(4.8, 4);
+    expect(trackShapes[15]!.points[6]).toBeCloseTo(4.8, 4);
+    expect(trackShapes[10]!.points[6]).toBeCloseTo(4.0, 4);
   });
 });

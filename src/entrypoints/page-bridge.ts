@@ -4,14 +4,19 @@ import type {
   PageRuntimeProbeResult,
 } from '../integration/cvat/runtime';
 import {
+  type CuboidDimensionKey,
   type Cvat3dWorkspaceRenderOptions,
   type CvatDrawnObjectEntry,
   type CvatInternalCanvas3dLike,
   type CvatInternalViewLike,
+  type CvatObjectStateLike,
   Cvat3dPreRenderEnhancer,
+  type DimensionSyncResult,
+  injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   readRenderOptionsFromClientSettings,
   syncEarlyViewportBackgroundDom,
+  syncTrackCuboidDimension,
   type ThreeSceneLike,
   writeRenderOptionsToClientSettings,
 } from '../integration/cvat/runtime/pre-render-enhancer';
@@ -104,6 +109,7 @@ export class PageBridgeRuntimeHost {
           this.preRenderEnhancer.getOptions().whiteBackground
         );
         this.tryMountWorkspaceSettingsCheckboxes();
+        this.tryMountObjectItemDimensionSyncControls();
         if (this.checkForNewlyMountedCanvases()) {
           this.preRenderEnhancer.markViewStructureChanged();
         }
@@ -116,12 +122,13 @@ export class PageBridgeRuntimeHost {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['data-frame-number'],
+        attributeFilter: ['data-frame-number', 'class'],
       });
     }
 
     syncEarlyViewportBackgroundDom(this.doc, this.preRenderEnhancer.getOptions().whiteBackground);
     this.tryMountWorkspaceSettingsCheckboxes();
+    this.tryMountObjectItemDimensionSyncControls();
     const initialInstance = this.getActiveCanvas3dInstance();
     if (initialInstance) {
       this.preRenderEnhancer.ensureHooked(initialInstance);
@@ -146,6 +153,50 @@ export class PageBridgeRuntimeHost {
         this.preRenderEnhancer.setOptions(persisted, canvasInstance);
       }
     );
+  }
+
+  private tryMountObjectItemDimensionSyncControls(): void {
+    injectCvatObjectDimensionSyncControls(
+      this.doc,
+      (clientID: number, dimension: CuboidDimensionKey): Promise<DimensionSyncResult> =>
+        this.handleSyncObjectDimension(clientID, dimension)
+    );
+  }
+
+  private async handleSyncObjectDimension(
+    clientID: number,
+    dimension: CuboidDimensionKey
+  ): Promise<DimensionSyncResult> {
+    const instance = this.getActiveCanvas3dInstance();
+    const drawnEntry = instance?.view?.drawnObjects?.[clientID] ?? null;
+    let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
+
+    if (!stateOnCurrentFrame && this.reduxStore) {
+      try {
+        const state = this.reduxStore.getState();
+        const annotation = state.annotation as Record<string, unknown> | undefined;
+        const annotations = annotation?.annotations as Record<string, unknown> | undefined;
+        const states = annotations?.states as CvatObjectStateLike[] | undefined;
+        if (Array.isArray(states)) {
+          stateOnCurrentFrame =
+            states.find((s) => Number(s?.clientID) === clientID) ?? null;
+        }
+      } catch {
+        // Ignore fallback lookup errors
+      }
+    }
+
+    const perspCanvas = this.doc.querySelector<
+      HTMLCanvasElement & {
+        updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+      }
+    >('.cvat-canvas3d-perspective canvas');
+
+    return syncTrackCuboidDimension(clientID, dimension, {
+      drawnEntry,
+      stateOnCurrentFrame,
+      perspectiveCanvas: perspCanvas,
+    });
   }
 
   private tryHookCvatUIPlugin(): void {

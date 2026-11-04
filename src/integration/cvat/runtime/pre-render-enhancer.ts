@@ -92,6 +92,44 @@ export interface CvatCuboidViewMeshLike {
   };
 }
 
+export interface CvatSerializedTrackShape {
+  frame: number;
+  points?: number[];
+  outside?: boolean;
+  occluded?: boolean;
+  attributes?: { spec_id: number; value: string }[];
+}
+
+export interface CvatSerializedTrack {
+  clientID?: number;
+  frame?: number;
+  attributes?: { spec_id: number; value: string }[];
+  shapes?: CvatSerializedTrackShape[];
+}
+
+export interface CvatObjectStateLike {
+  clientID?: number | null;
+  frame?: number;
+  objectType?: string;
+  shapeType?: string;
+  points?: number[] | null;
+  attributes?: Record<number | string, string>;
+  lock?: boolean;
+  hidden?: boolean;
+  outside?: boolean;
+  keyframe?: boolean;
+  updateFlags?: {
+    reset?: () => void;
+    points?: boolean;
+  };
+  __internal?: {
+    save?: (frame: number, data: CvatObjectStateLike) => CvatObjectStateLike;
+    export?: () => CvatSerializedTrack;
+  };
+  save?: () => Promise<CvatObjectStateLike> | CvatObjectStateLike;
+  export?: () => Promise<CvatSerializedTrack> | CvatSerializedTrack;
+}
+
 export interface CvatDrawnObjectEntry {
   data: {
     clientID: number;
@@ -102,14 +140,10 @@ export interface CvatDrawnObjectEntry {
     hidden?: boolean;
     outside?: boolean;
   };
-  state?: {
-    clientID?: number;
-    points?: number[];
-    hidden?: boolean;
-    outside?: boolean;
-  };
+  state?: CvatObjectStateLike;
   cuboid: {
     setColor?: (hexColor: string) => void;
+    setScale?: (x: number, y: number, z: number) => void;
     perspective?: CvatCuboidViewMeshLike;
     top?: CvatCuboidViewMeshLike;
     side?: CvatCuboidViewMeshLike;
@@ -1313,4 +1347,412 @@ export function injectCvatWorkspaceSettingsControls(
 
   container.appendChild(wrapper);
   return true;
+}
+
+export type CuboidDimensionKey = 'H' | 'W' | 'L';
+
+export const CUBOID_DIMENSION_INDEX: Readonly<Record<CuboidDimensionKey, number>> = Object.freeze({
+  L: 6, // scale.x (Length / Dài)
+  W: 7, // scale.y (Width / Rộng)
+  H: 8, // scale.z (Height / Cao)
+});
+
+export interface DimensionSyncResult {
+  readonly clientID: number;
+  readonly dimension: CuboidDimensionKey;
+  readonly targetValue: number | null;
+  readonly syncedFrames: number;
+  readonly skippedAttributeMismatchFrames: number;
+}
+
+/**
+ * Mandatory 100% attribute equality check between the current frame and any candidate frame.
+ * Returns `true` ONLY if every attribute key and value matches 100%.
+ */
+export function haveIdenticalAttributes(
+  attrsA: Record<number | string, unknown> | undefined | null,
+  attrsB: Record<number | string, unknown> | undefined | null
+): boolean {
+  const a = attrsA ?? {};
+  const b = attrsB ?? {};
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) {
+    return false;
+  }
+  for (const key of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) {
+      return false;
+    }
+    if (String(a[key] ?? '').trim() !== String(b[key] ?? '').trim()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Synchronizes a single 3D cuboid dimension (`H`, `W`, or `L`) from the current frame
+ * across all keyframes of the same track (`clientID`) in real-time on CVAT, strictly
+ * updating ONLY frames whose attributes 100% match the current frame's attributes.
+ */
+export async function syncTrackCuboidDimension(
+  clientID: number,
+  dimension: CuboidDimensionKey,
+  options: {
+    drawnEntry?: CvatDrawnObjectEntry | null;
+    stateOnCurrentFrame?: CvatObjectStateLike | null;
+    perspectiveCanvas?:
+      | (HTMLCanvasElement & {
+          updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+        })
+      | null;
+    onAfterSync?: () => void;
+  }
+): Promise<DimensionSyncResult> {
+  const dimIndex = CUBOID_DIMENSION_INDEX[dimension];
+  const entry = options.drawnEntry ?? null;
+  const currentState = options.stateOnCurrentFrame ?? entry?.state ?? null;
+
+  if (!currentState || currentState.lock) {
+    return {
+      clientID,
+      dimension,
+      targetValue: null,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  const currentPoints =
+    Array.isArray(currentState.points) && currentState.points.length >= 9
+      ? currentState.points
+      : Array.isArray(entry?.data?.points) && entry.data.points.length >= 9
+        ? entry.data.points
+        : null;
+
+  if (!currentPoints) {
+    return {
+      clientID,
+      dimension,
+      targetValue: null,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  const targetValue = Number(currentPoints[dimIndex]);
+  if (!Number.isFinite(targetValue) || targetValue <= 0) {
+    return {
+      clientID,
+      dimension,
+      targetValue: null,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  const currentFrame = Number(currentState.frame ?? 0);
+  const currentAttributes: Record<number | string, string> = {
+    ...(currentState.attributes ?? {}),
+  };
+
+  let serializedTrack: CvatSerializedTrack | null = null;
+  if (typeof currentState.__internal?.export === 'function') {
+    serializedTrack = currentState.__internal.export();
+  } else if (typeof currentState.export === 'function') {
+    serializedTrack = await currentState.export();
+  }
+
+  const rawShapes = Array.isArray(serializedTrack?.shapes)
+    ? [...serializedTrack.shapes].sort((a, b) => Number(a.frame) - Number(b.frame))
+    : [];
+
+  if (rawShapes.length === 0) {
+    return {
+      clientID,
+      dimension,
+      targetValue,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  // Build cumulative attribute table (matching CVAT's Track.prototype.getAttributes) as fallback
+  const rollingAttrs: Record<number | string, string> = {};
+  for (const k of Object.keys(currentAttributes)) {
+    rollingAttrs[k] = String(currentAttributes[k] ?? '');
+  }
+  if (Array.isArray(serializedTrack?.attributes)) {
+    for (const attr of serializedTrack.attributes) {
+      rollingAttrs[attr.spec_id] = String(attr.value);
+    }
+  }
+
+  let syncedFrames = 0;
+  let skippedAttributeMismatchFrames = 0;
+  let stateToDispatchForCanvasUpdate: CvatObjectStateLike | null = null;
+  let pointsToDispatchForCanvasUpdate: number[] | null = null;
+
+  const internalSave = currentState.__internal?.save;
+
+  for (const shape of rawShapes) {
+    const kfFrame = Number(shape.frame);
+    if (!Number.isInteger(kfFrame)) {
+      continue;
+    }
+
+    if (Array.isArray(shape.attributes)) {
+      for (const attr of shape.attributes) {
+        rollingAttrs[attr.spec_id] = String(attr.value);
+      }
+    }
+
+    let kfState: CvatObjectStateLike | null = null;
+    if (typeof internalSave === 'function') {
+      currentState.updateFlags?.reset?.();
+      kfState = internalSave(kfFrame, currentState);
+    }
+
+    const effectiveKfAttrs = kfState?.attributes ?? { ...rollingAttrs };
+
+    // MANDATORY CHECK: 100% attribute match with current frame
+    if (!haveIdenticalAttributes(currentAttributes, effectiveKfAttrs)) {
+      skippedAttributeMismatchFrames += 1;
+      continue;
+    }
+
+    const existingKfPoints =
+      Array.isArray(kfState?.points) && kfState.points.length >= 9
+        ? kfState.points
+        : Array.isArray(shape.points) && shape.points.length >= 9
+          ? shape.points
+          : null;
+
+    if (!existingKfPoints) {
+      continue;
+    }
+
+    const updatedPoints = [...existingKfPoints];
+    updatedPoints[dimIndex] = targetValue;
+    shape.points = updatedPoints;
+
+    if (kfState) {
+      kfState.points = updatedPoints;
+      if (kfState.updateFlags) {
+        kfState.updateFlags.points = true;
+      }
+      if (typeof internalSave === 'function') {
+        const saved = internalSave(kfFrame, kfState);
+        if (kfFrame === currentFrame || stateToDispatchForCanvasUpdate === null) {
+          stateToDispatchForCanvasUpdate = saved;
+          pointsToDispatchForCanvasUpdate = updatedPoints;
+        }
+      } else if (typeof kfState.save === 'function') {
+        const saved = await kfState.save();
+        if (kfFrame === currentFrame || stateToDispatchForCanvasUpdate === null) {
+          stateToDispatchForCanvasUpdate = saved;
+          pointsToDispatchForCanvasUpdate = updatedPoints;
+        }
+      }
+    }
+
+    syncedFrames += 1;
+  }
+
+  // Also ensure currentFrame state & cuboid scale reflect the synced dimension in real-time
+  const nextCurrentPoints = [...currentPoints];
+  nextCurrentPoints[dimIndex] = targetValue;
+  if (entry?.data?.points && entry.data.points.length >= 9) {
+    entry.data.points[dimIndex] = targetValue;
+  }
+  if (typeof entry?.cuboid?.setScale === 'function') {
+    entry.cuboid.setScale(nextCurrentPoints[6]!, nextCurrentPoints[7]!, nextCurrentPoints[8]!);
+  }
+
+  const perspCanvas = options.perspectiveCanvas ?? null;
+  const dispatchState = stateToDispatchForCanvasUpdate ?? currentState;
+  const dispatchPoints = pointsToDispatchForCanvasUpdate ?? nextCurrentPoints;
+
+  if (perspCanvas && dispatchState && syncedFrames > 0) {
+    if (typeof perspCanvas.updatePosition === 'function') {
+      perspCanvas.updatePosition(dispatchState, [...dispatchPoints]);
+    } else {
+      perspCanvas.dispatchEvent(
+        new CustomEvent('canvas.edited', {
+          bubbles: false,
+          cancelable: true,
+          detail: {
+            state: dispatchState,
+            points: [...dispatchPoints],
+          },
+        })
+      );
+    }
+  }
+
+  options.onAfterSync?.();
+
+  return {
+    clientID,
+    dimension,
+    targetValue,
+    syncedFrames,
+    skippedAttributeMismatchFrames,
+  };
+}
+
+const OBJECT_ITEM_DIM_SYNC_ROW_CLASS = 'cvat-3d-enhancer-dim-sync-row';
+
+const DIMENSION_BUTTON_CONFIGS: readonly {
+  readonly key: CuboidDimensionKey;
+  readonly className: string;
+  readonly title: string;
+  readonly svgPath: string;
+}[] = [
+  {
+    key: 'H',
+    className: 'cvat-object-item-button-sync-h',
+    title: 'Sync Height (H) across frames with 100% identical attributes',
+    svgPath:
+      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM7.5 6H10.2V10.7H13.8V6H16.5V18H13.8V13.1H10.2V18H7.5V6Z',
+  },
+  {
+    key: 'W',
+    className: 'cvat-object-item-button-sync-w',
+    title: 'Sync Width (W) across frames with 100% identical attributes',
+    svgPath:
+      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM5.5 6H8.1L9.6 13.8L11.2 6H13.4L15 13.8L16.5 6H19.1L16.4 18H13.9L12.3 10.6L10.7 18H8.2L5.5 6Z',
+  },
+  {
+    key: 'L',
+    className: 'cvat-object-item-button-sync-l',
+    title: 'Sync Length (L) across frames with 100% identical attributes',
+    svgPath:
+      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM8.5 6H11.3V15.5H16.8V18H8.5V6Z',
+  },
+];
+
+function resolveObjectItemClientId(col20: Element): number | null {
+  const card = col20.closest('[id^="cvat-objects-sidebar-state-item-"]');
+  if (card?.id) {
+    const match = /cvat-objects-sidebar-state-item-(\d+)/.exec(card.id);
+    if (match?.[1]) {
+      return Number(match[1]);
+    }
+  }
+  const stateItem = col20.closest('.cvat-objects-sidebar-state-item');
+  if (stateItem) {
+    const idAttr = stateItem.getAttribute('data-client-id') ?? stateItem.id;
+    const match = /(\d+)/.exec(idAttr);
+    if (match?.[1]) {
+      return Number(match[1]);
+    }
+  }
+  return null;
+}
+
+/**
+ * Injects the 3 native-styled dimension sync icons (`H`, `W`, `L`) into each 3D Track's
+ * Object Item card in the CVAT sidebar (right inside `.ant-col-20` alongside CVAT's keyframe
+ * and state buttons).
+ */
+export function injectCvatObjectDimensionSyncControls(
+  doc: Document,
+  onSyncDimension: (
+    clientID: number,
+    dimension: CuboidDimensionKey
+  ) => Promise<DimensionSyncResult> | DimensionSyncResult
+): number {
+  const keyframeButtons = doc.querySelectorAll('.cvat-object-item-button-first-keyframe');
+  let mountedCount = 0;
+
+  for (const kfBtn of keyframeButtons) {
+    const col20 = kfBtn.closest('.ant-col-20');
+    if (!col20) {
+      continue;
+    }
+
+    const isLocked = Boolean(col20.querySelector('.cvat-object-item-button-lock-enabled'));
+    const existingRow = col20.querySelector<HTMLElement>(`.${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`);
+    if (existingRow) {
+      const icons = existingRow.querySelectorAll<HTMLElement>('.cvat-object-item-button-sync-dim');
+      for (const icon of icons) {
+        icon.style.opacity = isLocked ? '0.5' : '';
+        icon.style.pointerEvents = isLocked ? 'none' : '';
+      }
+      continue;
+    }
+
+    const sampleRow = col20.querySelector('.ant-row');
+    const sampleCol = sampleRow?.querySelector('.ant-col');
+    const rowClassName = sampleRow?.className
+      ? `${sampleRow.className} ${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`
+      : `ant-row ant-row-space-around ${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`;
+    const colClassName = sampleCol?.className || 'ant-col';
+
+    const syncRow = doc.createElement('div');
+    syncRow.className = rowClassName;
+
+    for (const cfg of DIMENSION_BUTTON_CONFIGS) {
+      const col = doc.createElement('div');
+      col.className = colClassName;
+
+      const span = doc.createElement('span');
+      span.setAttribute('role', 'img');
+      span.setAttribute('aria-label', `sync-${cfg.key.toLowerCase()}`);
+      span.setAttribute('tabindex', '-1');
+      span.className = `anticon cvat-object-item-button-sync-dim ${cfg.className}`;
+      span.title = cfg.title;
+      span.dataset.enhancerSyncDim = cfg.key;
+      if (isLocked) {
+        span.style.opacity = '0.5';
+        span.style.pointerEvents = 'none';
+      }
+
+      const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('focusable', 'false');
+      svg.setAttribute('data-icon', `sync-${cfg.key.toLowerCase()}`);
+      svg.setAttribute('width', '1em');
+      svg.setAttribute('height', '1em');
+      svg.setAttribute('fill', 'currentColor');
+      svg.setAttribute('aria-hidden', 'true');
+
+      const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', cfg.svgPath);
+      svg.appendChild(path);
+      span.appendChild(svg);
+
+      span.addEventListener('click', (e: MouseEvent) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (col20.querySelector('.cvat-object-item-button-lock-enabled')) {
+          return;
+        }
+        const resolvedId = resolveObjectItemClientId(col20);
+        if (resolvedId === null || !Number.isFinite(resolvedId)) {
+          return;
+        }
+        void Promise.resolve(onSyncDimension(resolvedId, cfg.key)).then((res) => {
+          if (res && res.syncedFrames > 0) {
+            span.style.color = '#52c41a';
+            const valStr = res.targetValue !== null ? res.targetValue.toFixed(2) : '';
+            span.title = `${cfg.key} = ${valStr} synced to ${res.syncedFrames} keyframe(s) (${res.skippedAttributeMismatchFrames} skipped due to different attributes)`;
+            window.setTimeout(() => {
+              span.style.color = '';
+            }, 900);
+          }
+        });
+      });
+
+      col.appendChild(span);
+      syncRow.appendChild(col);
+    }
+
+    col20.appendChild(syncRow);
+    mountedCount += 1;
+  }
+
+  return mountedCount;
 }
