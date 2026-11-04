@@ -155,6 +155,43 @@ const Visualization3DTab: React.FC = () => {
 
       <div className="enhancer-card">
         <div className="enhancer-row">
+          <span className="enhancer-card-title">Pre-Render 3D Point Cloud Options</span>
+          <CapabilityBadge status={caps.cuboidAppearance.status} />
+        </div>
+        <div className="enhancer-muted" style={{ fontSize: '10px' }}>
+          Synced with CVAT Settings → Workspace (`localStorage.clientSettings`) & executed once per frame change.
+        </div>
+
+        <label className="enhancer-row">
+          <span>White 3D Background (Nền trắng)</span>
+          <input
+            type="checkbox"
+            checked={Boolean(config.visualization3d.whiteBackground)}
+            onChange={(e) => updateVis({ whiteBackground: e.target.checked })}
+          />
+        </label>
+
+        <label className="enhancer-row">
+          <span>Point Scattering Control (Độ tán xạ)</span>
+          <input
+            type="checkbox"
+            checked={Boolean(config.visualization3d.enableScattering)}
+            onChange={(e) => updateVis({ enableScattering: e.target.checked })}
+          />
+        </label>
+
+        <label className="enhancer-row">
+          <span>Color Points Inside Box (Màu point theo box)</span>
+          <input
+            type="checkbox"
+            checked={Boolean(config.visualization3d.colorPointsByCuboid)}
+            onChange={(e) => updateVis({ colorPointsByCuboid: e.target.checked })}
+          />
+        </label>
+      </div>
+
+      <div className="enhancer-card">
+        <div className="enhancer-row">
           <span className="enhancer-card-title">Point Cloud WebGL Filter</span>
           <CapabilityBadge status={caps.pointCloudAppearance.status} />
         </div>

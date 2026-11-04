@@ -4,13 +4,21 @@ import type {
   PageRuntimeProbeResult,
 } from '../integration/cvat/runtime';
 import {
+  type Cvat3dWorkspaceRenderOptions,
+  type CvatInternalCanvas3dLike,
+  Cvat3dPreRenderEnhancer,
+  injectCvatWorkspaceSettingsControls,
+  readRenderOptionsFromClientSettings,
+  writeRenderOptionsToClientSettings,
+} from '../integration/cvat/runtime/pre-render-enhancer';
+import {
   BRIDGE_CHANNEL,
   type CameraPresetAction,
   CVAT_DOM_SELECTORS,
 } from '../shared/constants';
 import type { BridgeRequestEnvelope } from '../shared/types';
 
-interface CvatCanvas3dLike {
+interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
   keyControls?: (event: KeyboardEvent) => void;
   fit?: () => void;
@@ -19,6 +27,7 @@ interface CvatCanvas3dLike {
 interface CvatReduxStoreLike {
   getState: () => Record<string, unknown>;
   dispatch: (action: { type: string; payload?: Record<string, unknown> }) => void;
+  subscribe?: (listener: () => void) => () => void;
 }
 
 interface CvatWindowGlobals {
@@ -27,6 +36,7 @@ interface CvatWindowGlobals {
       builder: (args: { store: CvatReduxStoreLike }) => {
         name: string;
         destructor: () => void;
+        globalStateDidUpdate?: (state: Record<string, unknown>) => void;
       }
     ) => void;
   };
@@ -52,8 +62,10 @@ export class PageBridgeRuntimeHost {
   private readonly win: Window & CvatWindowGlobals;
   private readonly doc: Document;
   private readonly sessionToken: string;
+  private readonly preRenderEnhancer: Cvat3dPreRenderEnhancer;
   private reduxStore: CvatReduxStoreLike | null = null;
   private pluginRegistered = false;
+  private settingsObserver: MutationObserver | null = null;
 
   public constructor(
     sessionToken: string,
@@ -63,6 +75,8 @@ export class PageBridgeRuntimeHost {
     this.sessionToken = sessionToken;
     this.win = win;
     this.doc = doc;
+    const savedOptions = readRenderOptionsFromClientSettings(this.win.localStorage);
+    this.preRenderEnhancer = new Cvat3dPreRenderEnhancer(savedOptions);
     this.tryHookCvatUIPlugin();
   }
 
@@ -73,10 +87,41 @@ export class PageBridgeRuntimeHost {
     this.doc.addEventListener('plugins.ready', onPluginReady);
     this.win.addEventListener('message', this.handleMessage);
 
+    // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
+    if (this.doc.documentElement) {
+      this.settingsObserver = new MutationObserver(() => {
+        this.tryMountWorkspaceSettingsCheckboxes();
+        const instance = this.getActiveCanvas3dInstance();
+        if (instance) {
+          this.preRenderEnhancer.ensureHooked(instance);
+        }
+      });
+      this.settingsObserver.observe(this.doc.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
+    this.tryMountWorkspaceSettingsCheckboxes();
+
     return () => {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
       this.win.removeEventListener('message', this.handleMessage);
+      this.settingsObserver?.disconnect();
+      this.settingsObserver = null;
     };
+  }
+
+  private tryMountWorkspaceSettingsCheckboxes(): void {
+    injectCvatWorkspaceSettingsControls(
+      this.doc,
+      () => this.preRenderEnhancer.getOptions(),
+      (next: Cvat3dWorkspaceRenderOptions) => {
+        const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
+        const canvasInstance = this.getActiveCanvas3dInstance();
+        this.preRenderEnhancer.setOptions(persisted, canvasInstance);
+      }
+    );
   }
 
   private tryHookCvatUIPlugin(): void {
@@ -88,16 +133,38 @@ export class PageBridgeRuntimeHost {
       try {
         cvatUI.registerComponent(({ store }) => {
           this.reduxStore = store;
+          const instance = this.getActiveCanvas3dInstance();
+          if (instance) {
+            this.preRenderEnhancer.ensureHooked(instance);
+          }
+
           return {
             name: 'cvat-3d-enhancer-runtime-bridge',
             destructor: () => {
               this.reduxStore = null;
             },
+            globalStateDidUpdate: () => {
+              // Ensure clientSettings key isn't wiped when CVAT's SettingsModal calls updateCachedSettings()
+              const currentOpts = this.preRenderEnhancer.getOptions();
+              const inStorage = readRenderOptionsFromClientSettings(this.win.localStorage);
+              if (
+                inStorage.whiteBackground !== currentOpts.whiteBackground ||
+                inStorage.enableScattering !== currentOpts.enableScattering ||
+                inStorage.colorPointsByCuboid !== currentOpts.colorPointsByCuboid
+              ) {
+                writeRenderOptionsToClientSettings(currentOpts, this.win.localStorage);
+              }
+
+              const activeInstance = this.getActiveCanvas3dInstance();
+              if (activeInstance) {
+                this.preRenderEnhancer.ensureHooked(activeInstance);
+              }
+            },
           };
         });
         this.pluginRegistered = true;
       } catch {
-        // Ignore if CVAT plugin registry already initialized or rejected duplicate registration
+        // Ignore if CVAT plugin registry rejected duplicate registration
       }
     }
   }
@@ -129,6 +196,9 @@ export class PageBridgeRuntimeHost {
     const orthoViews =
       this.doc.querySelectorAll(CVAT_DOM_SELECTORS.ORTHOGRAPHIC_VIEW).length >= 3;
     const canvasInstance = this.getActiveCanvas3dInstance();
+    if (canvasInstance) {
+      this.preRenderEnhancer.ensureHooked(canvasInstance);
+    }
 
     return {
       hasCvatUIPluginHook: Boolean(this.win.cvatUI?.registerComponent),
@@ -137,10 +207,32 @@ export class PageBridgeRuntimeHost {
       hasPerspectiveDom: perspectiveDom,
       hasPerspectiveCanvas: perspectiveCanvas,
       hasOrthographicViews: orthoViews,
+      renderOptions: this.preRenderEnhancer.getOptions(),
     };
   }
 
   private applyCanvasVisualConfig(config: CanvasVisualConfigInput): void {
+    const canvasInstance = this.getActiveCanvas3dInstance();
+    if (canvasInstance) {
+      this.preRenderEnhancer.ensureHooked(canvasInstance);
+    }
+
+    if (
+      config.whiteBackground !== undefined ||
+      config.enableScattering !== undefined ||
+      config.colorPointsByCuboid !== undefined
+    ) {
+      const current = this.preRenderEnhancer.getOptions();
+      const next: Cvat3dWorkspaceRenderOptions = {
+        whiteBackground: config.whiteBackground ?? current.whiteBackground,
+        enableScattering: config.enableScattering ?? current.enableScattering,
+        colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
+      };
+      writeRenderOptionsToClientSettings(next, this.win.localStorage);
+      this.preRenderEnhancer.setOptions(next, canvasInstance);
+      this.tryMountWorkspaceSettingsCheckboxes();
+    }
+
     if (this.reduxStore) {
       if (config.shapeOpacity !== undefined) {
         this.reduxStore.dispatch({
@@ -189,7 +281,6 @@ export class PageBridgeRuntimeHost {
       }
     }
 
-    const canvasInstance = this.getActiveCanvas3dInstance();
     if (canvasInstance?.configure) {
       const directPatch: Record<string, unknown> = {};
       if (config.shapeOpacity !== undefined) directPatch.shapeOpacity = config.shapeOpacity;
@@ -245,6 +336,9 @@ export class PageBridgeRuntimeHost {
       colorBy: 'Label',
       controlPointsSize: 5,
       focusedObjectPadding: 50,
+      whiteBackground: false,
+      enableScattering: false,
+      colorPointsByCuboid: false,
     });
     const canvasInstance = this.getActiveCanvas3dInstance();
     if (canvasInstance?.fit) {
@@ -304,7 +398,7 @@ export class PageBridgeRuntimeHost {
           break;
         case 'APPLY_CANVAS_VISUAL_CONFIG':
           this.applyCanvasVisualConfig(request.payload as CanvasVisualConfigInput);
-          result = { applied: true };
+          result = { applied: true, renderOptions: this.preRenderEnhancer.getOptions() };
           break;
         case 'DISPATCH_CAMERA_ACTION': {
           const payload = request.payload as { readonly action: CameraPresetAction };

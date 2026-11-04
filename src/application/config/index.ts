@@ -49,6 +49,9 @@ export const SYSTEM_DEFAULT_CONFIG: EnhancerConfig = Object.freeze({
     pointSizeValue: 0.05,
     gridVisible: true,
     axesVisible: true,
+    whiteBackground: false,
+    enableScattering: false,
+    colorPointsByCuboid: false,
   }),
   annotation: Object.freeze({
     colorBy: 'Label',

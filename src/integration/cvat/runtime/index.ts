@@ -23,6 +23,9 @@ export interface CanvasVisualConfigInput {
   readonly canvasBackgroundColor?: string;
   readonly pointCloudCssBrightness?: number;
   readonly pointCloudCssContrast?: number;
+  readonly whiteBackground?: boolean;
+  readonly enableScattering?: boolean;
+  readonly colorPointsByCuboid?: boolean;
 }
 
 export interface PageRuntimeProbeResult {
@@ -32,6 +35,11 @@ export interface PageRuntimeProbeResult {
   readonly hasPerspectiveDom: boolean;
   readonly hasPerspectiveCanvas: boolean;
   readonly hasOrthographicViews: boolean;
+  readonly renderOptions?: {
+    readonly whiteBackground: boolean;
+    readonly enableScattering: boolean;
+    readonly colorPointsByCuboid: boolean;
+  };
 }
 
 export function createInitialCapabilityMap(): CapabilityMap {
@@ -156,6 +164,26 @@ export class CapabilityRegistry {
         verifiedBy: 'runtime-bridge',
         reason: 'Verified CVAT shapes colorBy (Label/Instance/Group) runtime configuration hook.',
       };
+
+      if (probe.hasActive3DCanvasInstance) {
+        next.pointSize = {
+          id: 'pointSize',
+          name: '3D Point Cloud Scattering & Point Size',
+          status: 'supported',
+          verifiedBy: 'runtime-bridge',
+          reason:
+            'Verified pre-render hook on Canvas3dViewImpl.views.*.scene PointsMaterial (scattering & size attenuation).',
+        };
+
+        next.colorMode = {
+          id: 'colorMode',
+          name: 'Per-Cuboid Point Cloud Coloring (OBB Filter)',
+          status: 'supported',
+          verifiedBy: 'runtime-bridge',
+          reason:
+            'Verified single-pass pre-render OBB point cloud buffer coloring inside Canvas3dViewImpl.',
+        };
+      }
     }
 
     this.capabilities = next;
@@ -282,10 +310,18 @@ export class CvatV2RuntimeAdapter implements Cvat3DRuntimeAdapter {
       config.orientationVisibility !== undefined ||
       config.colorBy !== undefined ||
       config.controlPointsSize !== undefined ||
-      config.focusedObjectPadding !== undefined;
+      config.focusedObjectPadding !== undefined ||
+      config.whiteBackground !== undefined ||
+      config.enableScattering !== undefined ||
+      config.colorPointsByCuboid !== undefined;
 
     if (needsBridge) {
-      if (!this.capabilityRegistry.isSupported('cuboidAppearance')) {
+      if (
+        !this.capabilityRegistry.isSupported('cuboidAppearance') &&
+        config.whiteBackground === undefined &&
+        config.enableScattering === undefined &&
+        config.colorPointsByCuboid === undefined
+      ) {
         throw new Error('Capability "cuboidAppearance" is not verified on the current runtime.');
       }
       await this.bridge.sendCommand('APPLY_CANVAS_VISUAL_CONFIG', config);

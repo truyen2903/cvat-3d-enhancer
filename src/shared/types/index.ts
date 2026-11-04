@@ -92,6 +92,9 @@ export interface Visualization3DConfig {
   readonly pointSizeValue: number;
   readonly gridVisible: boolean;
   readonly axesVisible: boolean;
+  readonly whiteBackground?: boolean;
+  readonly enableScattering?: boolean;
+  readonly colorPointsByCuboid?: boolean;
 }
 
 export interface AnnotationToolsConfig {

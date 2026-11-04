@@ -72,10 +72,10 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     expect(snapshot.capabilities.labelColors.status).toBe('supported');
     expect(snapshot.capabilities.cameraPresets.status).toBe('supported');
     expect(snapshot.capabilities.pointCloudAppearance.status).toBe('supported');
+    expect(snapshot.capabilities.pointSize.status).toBe('supported');
+    expect(snapshot.capabilities.colorMode.status).toBe('supported');
 
     // Verify unsupported internal Three.js scene capabilities are honestly reported as unsupported
-    expect(snapshot.capabilities.pointSize.status).toBe('unsupported');
-    expect(snapshot.capabilities.colorMode.status).toBe('unsupported');
     expect(snapshot.capabilities.gridVisibility.status).toBe('unsupported');
     expect(snapshot.capabilities.coordinateAxes.status).toBe('unsupported');
 
