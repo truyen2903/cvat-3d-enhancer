@@ -690,11 +690,7 @@ export function compileOrientedCuboids(
         ? data.labelColor.trim()
         : undefined;
 
-    // Ensure the 3D cuboid box itself always keeps its native CVAT label color
-    if (labelColor && typeof entry?.cuboid?.setColor === 'function') {
-      entry.cuboid.setColor(labelColor);
-    }
-
+    // Never call `entry.cuboid.setColor(...)` here — leave the cuboid box 100% untouched at CVAT's native default/configured color!
     const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry) ?? labelColor;
     const [r, g, b] = getDistinctCuboidColor(
       clientID,

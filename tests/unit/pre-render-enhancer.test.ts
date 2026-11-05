@@ -171,9 +171,9 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const expectedBox1 = getDistinctCuboidColor(1, 0, true, '#ff0000');
     const expectedBox2 = getDistinctCuboidColor(2, 1, true, '#ff0000');
 
-    // Cuboid boxes themselves must keep their labelColor (#ff0000)
-    expect(box1SetColorSpy).toHaveBeenCalledWith('#ff0000');
-    expect(box2SetColorSpy).toHaveBeenCalledWith('#ff0000');
+    // Cuboid boxes themselves must NOT be overridden or re-configured by enhancer (left at CVAT default)
+    expect(box1SetColorSpy).not.toHaveBeenCalled();
+    expect(box2SetColorSpy).not.toHaveBeenCalled();
 
     // Box #1 and Box #2 must have distinct colors even though both share the same labelColor
     expect(expectedBox1).not.toEqual(expectedBox2);
