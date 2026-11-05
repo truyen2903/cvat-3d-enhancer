@@ -7,6 +7,7 @@ import {
   extractSidebarDomLabelAndAttributes,
   QA_OVERLAY_ELEMENT_ID,
   renderActiveObjectQaOverlayDom,
+  renderActiveObjectQaOverlayLoadingDom,
   resolveDimensionThresholdRule,
 } from '../../src/integration/cvat/runtime/active-object-qa-overlay';
 
@@ -433,10 +434,16 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     expect(report).not.toBeNull();
     expect(report?.warnings.some((w) => w.code === 'K')).toBe(true);
 
-    renderActiveObjectQaOverlayDom(document, report, true);
-
+    // First verify spinning loading state renders on the right side without claiming "Không có lỗi"
+    renderActiveObjectQaOverlayLoadingDom(document, { clientID: 7, labelName: 'vehicles' }, true);
     const overlayEl = document.getElementById(QA_OVERLAY_ELEMENT_ID);
     expect(overlayEl).not.toBeNull();
+    expect(overlayEl?.style.right).toBe('12px');
+    expect(overlayEl?.textContent).toContain('Đang kiểm tra...');
+    expect(overlayEl?.textContent).not.toContain('Không có lỗi');
+
+    renderActiveObjectQaOverlayDom(document, report, true);
+
     expect(overlayEl?.style.display).toBe('block');
     expect(overlayEl?.textContent).toContain('ID #7');
     expect(overlayEl?.textContent).toContain('K');

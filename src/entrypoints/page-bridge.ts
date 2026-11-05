@@ -42,6 +42,7 @@ import {
   extractSidebarDomLabelAndAttributes,
   getPerspectivePointCloudPositions,
   renderActiveObjectQaOverlayDom,
+  renderActiveObjectQaOverlayLoadingDom,
 } from '../integration/cvat/runtime/active-object-qa-overlay';
 import { OrthoViewMaximizer, type OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
 import {
@@ -107,6 +108,7 @@ export class PageBridgeRuntimeHost {
   );
   private cachedInstance: CvatCanvas3dLike | null = null;
   private lastQaSignature = '';
+  private qaEvalTimer: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(
     sessionToken: string,
@@ -275,9 +277,17 @@ export class PageBridgeRuntimeHost {
     return null;
   }
 
+  private clearQaEvalTimer(): void {
+    if (this.qaEvalTimer !== null) {
+      clearTimeout(this.qaEvalTimer);
+      this.qaEvalTimer = null;
+    }
+  }
+
   private syncActiveObjectQaOverlay(force = false): void {
     const enabled = this.preRenderEnhancer.getOptions().enableActiveObjectWarnings ?? true;
     if (!enabled) {
+      this.clearQaEvalTimer();
       if (this.lastQaSignature !== 'disabled') {
         this.lastQaSignature = 'disabled';
         renderActiveObjectQaOverlayDom(this.doc, null, false);
@@ -288,6 +298,7 @@ export class PageBridgeRuntimeHost {
     const instance = this.getActiveCanvas3dInstance();
     const activeIdStr = this.getActiveObjectClientId(instance);
     if (!activeIdStr || !instance?.view) {
+      this.clearQaEvalTimer();
       if (this.lastQaSignature !== 'none') {
         this.lastQaSignature = 'none';
         renderActiveObjectQaOverlayDom(this.doc, null, true);
@@ -297,6 +308,7 @@ export class PageBridgeRuntimeHost {
 
     const clientID = Number(activeIdStr);
     if (!Number.isFinite(clientID)) {
+      this.clearQaEvalTimer();
       renderActiveObjectQaOverlayDom(this.doc, null, true);
       return;
     }
@@ -350,6 +362,7 @@ export class PageBridgeRuntimeHost {
       Boolean(drawnEntry?.state?.outside);
 
     if (isOutside) {
+      this.clearQaEvalTimer();
       const outsideSig = `${clientID}@${frame}::outside`;
       if (force || this.lastQaSignature !== outsideSig) {
         this.lastQaSignature = outsideSig;
@@ -375,21 +388,37 @@ export class PageBridgeRuntimeHost {
       return;
     }
     this.lastQaSignature = sig;
+    this.clearQaEvalTimer();
 
-    const report = evaluateActiveObjectQaReport({
-      clientID,
-      frame: Number.isFinite(frame) ? frame : 0,
-      drawnEntry,
-      stateOnCurrentFrame,
-      drawnObjects,
-      positionArray: posArray,
-      fallbackLabelName: domLabelName,
-      domAttributes,
-      isOutsideOnCurrentFrame: isOutside,
-      fallbackPos: domPos,
-    });
+    const previewLabel =
+      (stateOnCurrentFrame as { label?: { name?: string } } | null)?.label?.name ?? domLabelName;
 
-    renderActiveObjectQaOverlayDom(this.doc, report, true);
+    // Show spinning loading indicator while scanning so we never flash "Không có lỗi" prematurely
+    renderActiveObjectQaOverlayLoadingDom(
+      this.doc,
+      { clientID, labelName: previewLabel },
+      true
+    );
+
+    const delayMs = !posArray || posArray.length === 0 ? 220 : 120;
+    this.qaEvalTimer = setTimeout(() => {
+      this.qaEvalTimer = null;
+      const latestPosArray = getPerspectivePointCloudPositions(instance.view) ?? posArray;
+      const report = evaluateActiveObjectQaReport({
+        clientID,
+        frame: Number.isFinite(frame) ? frame : 0,
+        drawnEntry,
+        stateOnCurrentFrame,
+        drawnObjects,
+        positionArray: latestPosArray,
+        fallbackLabelName: domLabelName,
+        domAttributes,
+        isOutsideOnCurrentFrame: isOutside,
+        fallbackPos: domPos,
+      });
+
+      renderActiveObjectQaOverlayDom(this.doc, report, true);
+    }, delayMs);
   }
 
   private tryMountWorkspaceSettingsCheckboxes(): void {

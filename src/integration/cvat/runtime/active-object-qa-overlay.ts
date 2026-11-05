@@ -1406,9 +1406,123 @@ export function evaluateActiveObjectQaReport(params: {
 }
 
 export const QA_OVERLAY_ELEMENT_ID = 'cvat-3d-enhancer-active-qa-overlay';
+const QA_OVERLAY_STYLE_ID = 'cvat-3d-enhancer-active-qa-style';
+
+function ensureQaOverlayElement(doc: Document): HTMLDivElement | null {
+  const perspectiveContainer =
+    doc.querySelector<HTMLElement>('.cvat-canvas3d-perspective .cvat-canvas-container') ??
+    doc.querySelector<HTMLElement>('.cvat-canvas3d-perspective');
+
+  if (!perspectiveContainer) {
+    return null;
+  }
+
+  if (doc.head && !doc.getElementById(QA_OVERLAY_STYLE_ID)) {
+    const styleEl = doc.createElement('style');
+    styleEl.id = QA_OVERLAY_STYLE_ID;
+    styleEl.textContent = `@keyframes cvat3dQaSpin { to { transform: rotate(360deg); } }`;
+    doc.head.appendChild(styleEl);
+  }
+
+  const computedPos = doc.defaultView?.getComputedStyle(perspectiveContainer)?.position;
+  if (!computedPos || computedPos === 'static') {
+    perspectiveContainer.style.position = 'relative';
+  }
+
+  const existing = doc.getElementById(QA_OVERLAY_ELEMENT_ID) as HTMLDivElement | null;
+  let overlay = existing;
+  if (!overlay) {
+    overlay = doc.createElement('div');
+    overlay.id = QA_OVERLAY_ELEMENT_ID;
+    overlay.style.cssText = [
+      'position: absolute',
+      'top: 12px',
+      'right: 12px',
+      'left: auto',
+      'z-index: 25',
+      'max-width: min(350px, calc(100% - 24px))',
+      'padding: 7px 11px',
+      'border-radius: 8px',
+      'background: rgba(255, 255, 255, 0.94)',
+      'backdrop-filter: blur(8px)',
+      'color: #1e293b',
+      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif',
+      'font-size: 11.5px',
+      'line-height: 1.4',
+      'pointer-events: none',
+      'user-select: none',
+      'box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08)',
+      'border: 1px solid #e2e8f0',
+    ].join('; ');
+    perspectiveContainer.appendChild(overlay);
+  } else if (overlay.parentElement !== perspectiveContainer) {
+    perspectiveContainer.appendChild(overlay);
+  }
+
+  return overlay;
+}
 
 /**
- * Renders or hides the non-intrusive QA Warning HUD overlay directly over the 3D perspective
+ * Renders a minimal light loading state with a spinning indicator on the right side of the
+ * 3D perspective `<canvas>` while scanning the active object.
+ */
+export function renderActiveObjectQaOverlayLoadingDom(
+  doc: Document,
+  info: { readonly clientID: number; readonly labelName?: string } | null,
+  enabled = true
+): void {
+  const existing = doc.getElementById(QA_OVERLAY_ELEMENT_ID);
+  if (!enabled || !info) {
+    if (existing) {
+      existing.style.display = 'none';
+    }
+    return;
+  }
+
+  const overlay = ensureQaOverlayElement(doc);
+  if (!overlay) {
+    return;
+  }
+
+  overlay.style.borderColor = '#cbd5e1';
+  overlay.style.borderLeft = '3px solid #3b82f6';
+  overlay.style.display = 'block';
+  overlay.replaceChildren();
+
+  const row = doc.createElement('div');
+  row.style.cssText = 'display: flex; align-items: center; gap: 7px; font-weight: 500;';
+
+  const spinner = doc.createElement('span');
+  spinner.style.cssText = [
+    'display: inline-block',
+    'width: 12px',
+    'height: 12px',
+    'border: 2px solid #cbd5e1',
+    'border-top-color: #2563eb',
+    'border-radius: 50%',
+    'animation: cvat3dQaSpin 0.6s linear infinite',
+    'flex-shrink: 0',
+  ].join('; ');
+
+  const idBadge = doc.createElement('span');
+  idBadge.style.cssText =
+    'background: #f1f5f9; color: #334155; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600;';
+  idBadge.textContent = `ID #${info.clientID}`;
+
+  const statusSpan = doc.createElement('span');
+  statusSpan.style.cssText = 'color: #64748b; font-size: 11.5px;';
+  statusSpan.textContent = info.labelName
+    ? `${info.labelName} • Đang kiểm tra...`
+    : 'Đang kiểm tra...';
+
+  row.appendChild(spinner);
+  row.appendChild(idBadge);
+  row.appendChild(statusSpan);
+  overlay.appendChild(row);
+}
+
+/**
+ * Renders or hides the minimal light QA Warning HUD overlay on the right side of the 3D perspective
  * `<canvas>` container (`.cvat-canvas3d-perspective`).
  */
 export function renderActiveObjectQaOverlayDom(
@@ -1424,90 +1538,41 @@ export function renderActiveObjectQaOverlayDom(
     return;
   }
 
-  const perspectiveContainer =
-    doc.querySelector<HTMLElement>('.cvat-canvas3d-perspective .cvat-canvas-container') ??
-    doc.querySelector<HTMLElement>('.cvat-canvas3d-perspective');
-
-  if (!perspectiveContainer) {
+  const overlay = ensureQaOverlayElement(doc);
+  if (!overlay) {
     return;
   }
 
-  const computedPos = doc.defaultView?.getComputedStyle(perspectiveContainer)?.position;
-  if (!computedPos || computedPos === 'static') {
-    perspectiveContainer.style.position = 'relative';
-  }
-
-  let overlay = existing as HTMLDivElement | null;
-  if (!overlay) {
-    overlay = doc.createElement('div');
-    overlay.id = QA_OVERLAY_ELEMENT_ID;
-    overlay.style.cssText = [
-      'position: absolute',
-      'top: 10px',
-      'left: 10px',
-      'z-index: 25',
-      'max-width: min(440px, calc(100% - 20px))',
-      'padding: 8px 11px',
-      'border-radius: 6px',
-      'background: rgba(15, 23, 42, 0.86)',
-      'backdrop-filter: blur(4px)',
-      'color: #f8fafc',
-      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      'font-size: 12px',
-      'line-height: 1.4',
-      'pointer-events: none',
-      'user-select: none',
-      'box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35)',
-      'border: 1px solid rgba(148, 163, 184, 0.3)',
-    ].join('; ');
-    perspectiveContainer.appendChild(overlay);
-  } else if (overlay.parentElement !== perspectiveContainer) {
-    perspectiveContainer.appendChild(overlay);
-  }
-
   const hasWarnings = report.warnings.length > 0;
-  overlay.style.borderColor = hasWarnings
-    ? 'rgba(248, 113, 113, 0.85)'
-    : 'rgba(52, 211, 153, 0.75)';
+  overlay.style.borderColor = hasWarnings ? '#fecaca' : '#d1fae5';
+  overlay.style.borderLeft = hasWarnings ? '3px solid #ef4444' : '3px solid #10b981';
   overlay.style.display = 'block';
 
   const ptsBadge =
     report.lidarPointCount !== null ? ` • ${report.lidarPointCount} pts` : '';
-  const ruleBoundsParts: string[] = [];
-  const r = report.thresholdRule;
-  if (r.minL !== undefined || r.maxL !== undefined) {
-    ruleBoundsParts.push(`L:${r.minL ?? '–'}..${r.maxL ?? '∞'}`);
-  }
-  if (r.minW !== undefined || r.maxW !== undefined) {
-    ruleBoundsParts.push(`W:${r.minW ?? '–'}..${r.maxW ?? '∞'}`);
-  }
-  if (r.minH !== undefined || r.maxH !== undefined) {
-    ruleBoundsParts.push(`H:${r.minH ?? '–'}..${r.maxH ?? '∞'}`);
-  }
-  const ruleSummary = ruleBoundsParts.length > 0 ? ` (${ruleBoundsParts.join(', ')})` : '';
 
   overlay.replaceChildren();
 
-  // Header line: ID + Label (Attribute Subtype) + Current Dimensions
+  // Header line: ID + Label [Subtype] + Compact Dimensions & Distance
   const headerDiv = doc.createElement('div');
   headerDiv.style.cssText =
-    'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; margin-bottom: 4px;';
+    'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; margin-bottom: 3px;';
 
   const idBadge = doc.createElement('span');
   idBadge.style.cssText =
-    'background: #2563eb; color: #ffffff; padding: 1px 6px; border-radius: 4px; font-size: 11px;';
+    'background: #f1f5f9; color: #1e293b; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600;';
   idBadge.textContent = `ID #${report.clientID}`;
 
   const attrBadge = doc.createElement('span');
-  attrBadge.style.cssText = 'color: #38bdf8; font-weight: 600;';
+  attrBadge.style.cssText = 'color: #0284c7; font-weight: 600;';
   attrBadge.textContent = `${report.labelName} [${report.subtypeLabel}]`;
 
   const dimSpan = doc.createElement('span');
-  dimSpan.style.cssText = 'color: #e2e8f0; font-weight: 500;';
+  dimSpan.style.cssText = 'color: #64748b; font-weight: 500; font-size: 11px;';
   const distText = ` • d:${report.distanceMeters.toFixed(1)}m`;
   dimSpan.textContent =
     report.dimensions.L > 0 || report.dimensions.W > 0 || report.dimensions.H > 0
-      ? `L:${report.dimensions.L.toFixed(2)} W:${report.dimensions.W.toFixed(2)} H:${report.dimensions.H.toFixed(2)}m${distText}${ptsBadge}`
+      ? `${report.dimensions.L.toFixed(2)}×${report.dimensions.W.toFixed(2)}×${report.dimensions.H.toFixed(2)}m${distText}${ptsBadge}`
       : `d:${report.distanceMeters.toFixed(1)}m${ptsBadge}`;
 
   headerDiv.appendChild(idBadge);
@@ -1517,14 +1582,14 @@ export function renderActiveObjectQaOverlayDom(
 
   if (!hasWarnings) {
     const okDiv = doc.createElement('div');
-    okDiv.style.cssText = 'color: #4ade80; font-weight: 600; font-size: 11.5px;';
-    okDiv.textContent = `✓ Đạt chuẩn kích thước & vị trí${ruleSummary}`;
+    okDiv.style.cssText = 'color: #059669; font-weight: 600; font-size: 11.5px;';
+    okDiv.textContent = '✓ Không có lỗi';
     overlay.appendChild(okDiv);
     return;
   }
 
   const listDiv = doc.createElement('div');
-  listDiv.style.cssText = 'display: flex; flex-direction: column; gap: 3px; margin-top: 3px;';
+  listDiv.style.cssText = 'display: flex; flex-direction: column; gap: 3px; margin-top: 2px;';
 
   for (const w of report.warnings) {
     const row = doc.createElement('div');
@@ -1534,20 +1599,22 @@ export function renderActiveObjectQaOverlayDom(
     const isErr = w.severity === 'error';
     codeBadge.style.cssText = [
       'display: inline-block',
-      'min-width: 22px',
+      'min-width: 20px',
       'text-align: center',
       'padding: 0 4px',
-      'border-radius: 3px',
+      'border-radius: 4px',
       'font-weight: 700',
-      'font-size: 11px',
+      'font-size: 10.5px',
       isErr
-        ? 'background: #ef4444; color: #ffffff;'
-        : 'background: #f59e0b; color: #0f172a;',
+        ? 'background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;'
+        : 'background: #fffbeb; color: #d97706; border: 1px solid #fde68a;',
     ].join('; ');
     codeBadge.textContent = w.code;
 
     const textSpan = doc.createElement('span');
-    textSpan.style.cssText = isErr ? 'color: #fca5a5;' : 'color: #fde68a;';
+    textSpan.style.cssText = isErr
+      ? 'color: #b91c1c; font-weight: 500;'
+      : 'color: #b45309; font-weight: 500;';
     textSpan.textContent = `${w.title}: ${w.detail}`;
 
     row.appendChild(codeBadge);
