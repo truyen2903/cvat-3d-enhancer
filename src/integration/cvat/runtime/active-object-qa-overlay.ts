@@ -26,6 +26,7 @@ import {
   type CvatSerializedTrack,
   type CvatSerializedTrackShape,
   findPointsObjectsInScene,
+  getOriginalGeometryPositions,
   haveIdenticalAttributes,
 } from './pre-render-enhancer';
 
@@ -1634,6 +1635,6 @@ export function getPerspectivePointCloudPositions(
 ): Float32Array | number[] | null {
   const perspectiveScene = view?.views?.perspective?.scene;
   const pointsList = findPointsObjectsInScene(perspectiveScene);
-  const posAttr = pointsList[0]?.geometry?.attributes?.position;
-  return posAttr?.array ?? null;
+  const geom = pointsList[0]?.geometry;
+  return getOriginalGeometryPositions(geom) ?? geom?.attributes?.position?.array ?? null;
 }

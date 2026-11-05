@@ -41,6 +41,7 @@ import {
   evaluateActiveObjectQaReport,
   extractSidebarDomLabelAndAttributes,
   getPerspectivePointCloudPositions,
+  QA_OVERLAY_ELEMENT_ID,
   renderActiveObjectQaOverlayDom,
   renderActiveObjectQaOverlayLoadingDom,
 } from '../integration/cvat/runtime/active-object-qa-overlay';
@@ -109,6 +110,12 @@ export class PageBridgeRuntimeHost {
   private cachedInstance: CvatCanvas3dLike | null = null;
   private lastQaSignature = '';
   private qaEvalTimer: ReturnType<typeof setTimeout> | null = null;
+  private domSyncRafId: number | null = null;
+  private globalStateUpdateRafId: number | null = null;
+  private cachedPerspCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike; getDrawnObjects?: () => CvatDrawnObjectEntry[] }) | null = null;
+  private cachedTopCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
+  private cachedSideCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
+  private cachedFrontCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
 
   public constructor(
     sessionToken: string,
@@ -171,22 +178,58 @@ export class PageBridgeRuntimeHost {
 
     // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
     if (this.doc.documentElement) {
-      this.settingsObserver = new MutationObserver(() => {
-        syncEarlyViewportBackgroundDom(
-          this.doc,
-          this.preRenderEnhancer.getOptions().whiteBackground
-        );
-        this.tryMountWorkspaceSettingsCheckboxes();
-        this.tryMountObjectItemDimensionSyncControls();
-        if (this.checkForNewlyMountedCanvases()) {
-          this.preRenderEnhancer.markViewStructureChanged();
+      let pendingChildListChange = false;
+      const runDomSync = () => {
+        this.domSyncRafId = null;
+        const hadChildList = pendingChildListChange;
+        pendingChildListChange = false;
+        if (hadChildList) {
+          syncEarlyViewportBackgroundDom(
+            this.doc,
+            this.preRenderEnhancer.getOptions().whiteBackground
+          );
+          this.tryMountWorkspaceSettingsCheckboxes();
+          if (this.checkForNewlyMountedCanvases()) {
+            this.preRenderEnhancer.markViewStructureChanged();
+          }
         }
+        this.tryMountObjectItemDimensionSyncControls();
         const instance = this.getActiveCanvas3dInstance();
         if (instance) {
           this.preRenderEnhancer.ensureHooked(instance);
           this.ensureActiveObjectHoverLock(instance);
         }
         this.syncActiveObjectQaOverlay();
+      };
+
+      this.settingsObserver = new MutationObserver((records) => {
+        let hasRelevantMutation = false;
+        for (let i = 0; i < records.length; i += 1) {
+          const rec = records[i]!;
+          const targetNode = rec.target as Element | null;
+          if (
+            targetNode &&
+            (targetNode.id === QA_OVERLAY_ELEMENT_ID ||
+              targetNode.parentElement?.id === QA_OVERLAY_ELEMENT_ID)
+          ) {
+            continue;
+          }
+          hasRelevantMutation = true;
+          if (rec.type === 'childList') {
+            pendingChildListChange = true;
+          }
+        }
+        if (!hasRelevantMutation) {
+          return;
+        }
+        if (this.domSyncRafId === null) {
+          const raf = this.win.requestAnimationFrame?.bind(this.win);
+          if (typeof raf === 'function') {
+            this.domSyncRafId = raf(runDomSync);
+          } else {
+            runDomSync();
+          }
+        }
       });
       this.settingsObserver.observe(this.doc.documentElement, {
         childList: true,
@@ -214,6 +257,11 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('keyup', onInteractiveChange, true);
       uninstallOrthoMaximizer();
       uninstallOrthoEditor();
+      if (this.domSyncRafId !== null) {
+        this.win.cancelAnimationFrame?.(this.domSyncRafId);
+        this.domSyncRafId = null;
+      }
+      this.clearQaEvalTimer();
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
@@ -661,32 +709,25 @@ export class PageBridgeRuntimeHost {
           return {
             name: 'cvat-3d-enhancer-runtime-bridge',
             destructor: () => {
+              if (this.globalStateUpdateRafId !== null) {
+                this.win.cancelAnimationFrame?.(this.globalStateUpdateRafId);
+                this.globalStateUpdateRafId = null;
+              }
               this.reduxStore = null;
             },
             globalStateDidUpdate: () => {
-              // Ensure clientSettings key isn't wiped when CVAT's SettingsModal calls updateCachedSettings()
-              const currentOpts = this.preRenderEnhancer.getOptions();
-              const inStorage = readRenderOptionsFromClientSettings(this.win.localStorage);
-              if (
-                inStorage.whiteBackground !== currentOpts.whiteBackground ||
-                inStorage.enableScattering !== currentOpts.enableScattering ||
-                inStorage.colorPointsByCuboid !== currentOpts.colorPointsByCuboid ||
-                (inStorage.fixedOrthoPointSize ?? true) !==
-                  (currentOpts.fixedOrthoPointSize ?? true) ||
-                (inStorage.followActiveObject ?? true) !==
-                  (currentOpts.followActiveObject ?? true) ||
-                (inStorage.enableActiveObjectWarnings ?? true) !==
-                  (currentOpts.enableActiveObjectWarnings ?? true)
-              ) {
-                writeRenderOptionsToClientSettings(currentOpts, this.win.localStorage);
+              if (this.globalStateUpdateRafId !== null) {
+                return;
               }
-
-              const activeInstance = this.getActiveCanvas3dInstance();
-              if (activeInstance) {
-                this.preRenderEnhancer.ensureHooked(activeInstance);
-                this.ensureActiveObjectHoverLock(activeInstance);
+              const raf = this.win.requestAnimationFrame?.bind(this.win);
+              if (typeof raf === 'function') {
+                this.globalStateUpdateRafId = raf(() => {
+                  this.globalStateUpdateRafId = null;
+                  this.handleGlobalStateUpdate();
+                });
+              } else {
+                this.handleGlobalStateUpdate();
               }
-              this.syncActiveObjectQaOverlay();
             },
           };
         });
@@ -697,9 +738,16 @@ export class PageBridgeRuntimeHost {
     }
   }
 
-  private getActiveCanvas3dInstance(): CvatCanvas3dLike | null {
-    const domInstance = this.resolveDomBackedCanvas3dInstance();
+  private handleGlobalStateUpdate(): void {
+    const activeInstance = this.getActiveCanvas3dInstance();
+    if (activeInstance) {
+      this.preRenderEnhancer.ensureHooked(activeInstance);
+      this.ensureActiveObjectHoverLock(activeInstance);
+    }
+    this.syncActiveObjectQaOverlay();
+  }
 
+  private getActiveCanvas3dInstance(): CvatCanvas3dLike | null {
     if (this.reduxStore) {
       try {
         const state = this.reduxStore.getState();
@@ -707,7 +755,11 @@ export class PageBridgeRuntimeHost {
         const canvas = annotation?.canvas as Record<string, unknown> | undefined;
         const instance = canvas?.instance as CvatCanvas3dLike | undefined;
         if (instance && (typeof instance.configure === 'function' || instance.view)) {
-          if (!instance.view?.views?.perspective?.scene && domInstance?.view) {
+          if (instance.view?.views?.perspective?.scene) {
+            return instance;
+          }
+          const domInstance = this.resolveDomBackedCanvas3dInstance();
+          if (domInstance?.view) {
             return {
               configure: instance.configure?.bind(instance),
               keyControls: instance.keyControls?.bind(instance),
@@ -716,13 +768,6 @@ export class PageBridgeRuntimeHost {
               model: instance.model ?? domInstance.model,
             };
           }
-          if (instance.view?.views && domInstance?.view?.views) {
-            for (const [k, v] of Object.entries(domInstance.view.views)) {
-              if (k.startsWith('ortho_zoom_') && v) {
-                instance.view.views[k] = v;
-              }
-            }
-          }
           return instance;
         }
       } catch {
@@ -730,7 +775,7 @@ export class PageBridgeRuntimeHost {
       }
     }
 
-    return domInstance;
+    return this.resolveDomBackedCanvas3dInstance();
   }
 
   private checkForNewlyMountedCanvases(): boolean {
@@ -752,14 +797,19 @@ export class PageBridgeRuntimeHost {
     return foundNew;
   }
 
-  private bindDomPerspectiveCanvasEvents(): HTMLCanvasElement | null {
-    this.checkForNewlyMountedCanvases();
-    const perspCanvas = this.doc.querySelector<
-      HTMLCanvasElement & {
-        scene?: ThreeSceneLike;
-        getDrawnObjects?: () => CvatDrawnObjectEntry[];
-      }
-    >('.cvat-canvas3d-perspective canvas');
+  private bindDomPerspectiveCanvasEvents(): (HTMLCanvasElement & {
+    scene?: ThreeSceneLike;
+    getDrawnObjects?: () => CvatDrawnObjectEntry[];
+  }) | null {
+    if (!this.cachedPerspCanvas || !this.cachedPerspCanvas.isConnected) {
+      this.cachedPerspCanvas = this.doc.querySelector<
+        HTMLCanvasElement & {
+          scene?: ThreeSceneLike;
+          getDrawnObjects?: () => CvatDrawnObjectEntry[];
+        }
+      >('.cvat-canvas3d-perspective canvas');
+    }
+    const perspCanvas = this.cachedPerspCanvas;
 
     if (!perspCanvas) {
       return null;
@@ -783,18 +833,76 @@ export class PageBridgeRuntimeHost {
     return perspCanvas;
   }
 
+  private getViewsMap(): NonNullable<CvatInternalViewLike['views']> {
+    if (!this.cachedPerspCanvas?.isConnected) {
+      this.cachedPerspCanvas = this.doc.querySelector<
+        HTMLCanvasElement & {
+          scene?: ThreeSceneLike;
+          getDrawnObjects?: () => CvatDrawnObjectEntry[];
+        }
+      >('.cvat-canvas3d-perspective canvas');
+    }
+    if (!this.cachedTopCanvas?.isConnected) {
+      this.cachedTopCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+        '.cvat-canvas3d-topview canvas'
+      );
+    }
+    if (!this.cachedSideCanvas?.isConnected) {
+      this.cachedSideCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+        '.cvat-canvas3d-sideview canvas'
+      );
+    }
+    if (!this.cachedFrontCanvas?.isConnected) {
+      this.cachedFrontCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
+        '.cvat-canvas3d-frontview canvas'
+      );
+    }
+
+    const p = this.cachedPerspCanvas;
+    const t = this.cachedTopCanvas;
+    const s = this.cachedSideCanvas;
+    const f = this.cachedFrontCanvas;
+
+    const viewsMap: NonNullable<CvatInternalViewLike['views']> = {
+      perspective: p?.scene ? { scene: p.scene, renderer: { domElement: p } } : undefined,
+      top: t?.scene ? { scene: t.scene, renderer: { domElement: t } } : undefined,
+      side: s?.scene ? { scene: s.scene, renderer: { domElement: s } } : undefined,
+      front: f?.scene ? { scene: f.scene, renderer: { domElement: f } } : undefined,
+    };
+
+    // Also include any zoomed/expanded Top/Side/Front canvas mounted anywhere in the DOM
+    // (must have its own distinct THREE.Scene so we never alias the perspective scene!)
+    const allSceneCanvases = this.doc.querySelectorAll<
+      HTMLCanvasElement & { scene?: ThreeSceneLike }
+    >('canvas');
+    let extraIdx = 0;
+    for (const c of allSceneCanvases) {
+      if (
+        c !== p &&
+        c !== t &&
+        c !== s &&
+        c !== f &&
+        c.scene &&
+        c.scene !== p?.scene
+      ) {
+        viewsMap[`ortho_zoom_${extraIdx}`] = {
+          scene: c.scene,
+          renderer: { domElement: c },
+        };
+        extraIdx += 1;
+      }
+    }
+
+    return viewsMap;
+  }
+
   /**
    * Fallback/direct bridge that reads CVAT's `canvas.scene` (`THREE.Scene`) and
    * `canvas.getDrawnObjects()` defined directly on `.cvat-canvas3d-perspective canvas`,
    * `.cvat-canvas3d-orthographic-view canvas`, and any newly opened zoom/modal `<canvas>`.
    */
   private resolveDomBackedCanvas3dInstance(): CvatCanvas3dLike | null {
-    const perspCanvas = this.bindDomPerspectiveCanvasEvents() as
-      | (HTMLCanvasElement & {
-          scene?: ThreeSceneLike;
-          getDrawnObjects?: () => CvatDrawnObjectEntry[];
-        })
-      | null;
+    const perspCanvas = this.bindDomPerspectiveCanvasEvents();
 
     if (!perspCanvas?.scene) {
       return null;
@@ -803,52 +911,10 @@ export class PageBridgeRuntimeHost {
     if (!this.domBackedViewRef || this.lastDomCanvasRef !== perspCanvas) {
       this.lastDomCanvasRef = perspCanvas;
       const docRef = this.doc;
+      const getViews = () => this.getViewsMap();
       this.domBackedViewRef = {
         get views() {
-          const p = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-            '.cvat-canvas3d-perspective canvas'
-          );
-          const t = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-            '.cvat-canvas3d-topview canvas'
-          );
-          const s = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-            '.cvat-canvas3d-sideview canvas'
-          );
-          const f = docRef.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-            '.cvat-canvas3d-frontview canvas'
-          );
-
-          const viewsMap: NonNullable<CvatInternalViewLike['views']> = {
-            perspective: p?.scene ? { scene: p.scene, renderer: { domElement: p } } : undefined,
-            top: t?.scene ? { scene: t.scene, renderer: { domElement: t } } : undefined,
-            side: s?.scene ? { scene: s.scene, renderer: { domElement: s } } : undefined,
-            front: f?.scene ? { scene: f.scene, renderer: { domElement: f } } : undefined,
-          };
-
-          // Also include any zoomed/expanded Top/Side/Front canvas mounted anywhere in the DOM
-          // (must have its own distinct THREE.Scene so we never alias the perspective scene!)
-          const allSceneCanvases = docRef.querySelectorAll<
-            HTMLCanvasElement & { scene?: ThreeSceneLike }
-          >('canvas');
-          let extraIdx = 0;
-          for (const c of allSceneCanvases) {
-            if (
-              c !== p &&
-              c !== t &&
-              c !== s &&
-              c !== f &&
-              c.scene &&
-              c.scene !== p?.scene
-            ) {
-              viewsMap[`ortho_zoom_${extraIdx}`] = {
-                scene: c.scene,
-                renderer: { domElement: c },
-              };
-              extraIdx += 1;
-            }
-          }
-
-          return viewsMap;
+          return getViews();
         },
         get drawnObjects() {
           const map: Record<number, CvatDrawnObjectEntry> = {};
@@ -1070,17 +1136,22 @@ export class PageBridgeRuntimeHost {
     try {
       request = MessageProtocol.validateIncomingRequest(raw, this.sessionToken);
     } catch (err) {
-      const fallbackReqId =
-        typeof candidate.requestId === 'string' && candidate.requestId.length >= 8
-          ? candidate.requestId
-          : 'invalid_req_id';
-      const errResp = MessageProtocol.createErrorResponse(
-        fallbackReqId,
-        this.sessionToken,
-        'VALIDATION_ERROR',
-        err instanceof Error ? err.message : 'Invalid bridge request'
-      );
-      this.win.postMessage(errResp, this.win.location.origin);
+      // Only reply with a signed error envelope if the sender already presented our valid
+      // sessionToken (e.g. schema/payload validation failed). Never echo this.sessionToken
+      // back to an unauthenticated/forged caller!
+      if (candidate.sessionToken === this.sessionToken) {
+        const fallbackReqId =
+          typeof candidate.requestId === 'string' && candidate.requestId.length >= 8
+            ? candidate.requestId
+            : 'invalid_req_id';
+        const errResp = MessageProtocol.createErrorResponse(
+          fallbackReqId,
+          this.sessionToken,
+          'VALIDATION_ERROR',
+          err instanceof Error ? err.message : 'Invalid bridge request'
+        );
+        this.win.postMessage(errResp, this.win.location.origin);
+      }
       return;
     }
 
@@ -1140,8 +1211,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       'script[data-cvat-enhancer-bridge-token]'
     );
     const token =
-      scriptEl?.dataset.cvatEnhancerBridgeToken ||
-      `standalone_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+      scriptEl?.dataset.cvatEnhancerBridgeToken || MessageProtocol.generateSessionToken();
     if (scriptEl?.dataset.cvatEnhancerBridgeToken) {
       // Immediately remove token attribute from DOM so page scripts cannot scrape it later
       delete scriptEl.dataset.cvatEnhancerBridgeToken;

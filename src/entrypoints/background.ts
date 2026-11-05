@@ -34,16 +34,33 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+    // Reject messages from other extensions
+    if (chrome.runtime?.id && sender.id && sender.id !== chrome.runtime.id) {
+      sendResponse({ ok: false, error: 'Unauthorized sender extension' });
+      return false;
+    }
+
     if (
       typeof message === 'object' &&
       message !== null &&
       (message as Record<string, unknown>).type === 'ACTIVATE_ON_TAB'
     ) {
+      // Only trusted extension pages (e.g. popup, where sender.tab is undefined) may trigger script injection
+      if (sender.tab !== undefined) {
+        sendResponse({ ok: false, error: 'ACTIVATE_ON_TAB requires a trusted extension page context' });
+        return false;
+      }
       const msg = message as { tabId?: number; origin?: string };
       void (async () => {
         try {
           await syncDynamicContentScripts();
-          if (typeof msg.tabId === 'number' && chrome.scripting && chrome.runtime?.getManifest) {
+          if (
+            typeof msg.tabId === 'number' &&
+            Number.isInteger(msg.tabId) &&
+            msg.tabId >= 0 &&
+            chrome.scripting &&
+            chrome.runtime?.getManifest
+          ) {
             const manifest = chrome.runtime.getManifest();
             const files = manifest.content_scripts?.[0]?.js ?? [];
             if (files.length > 0) {

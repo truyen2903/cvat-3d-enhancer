@@ -29,6 +29,12 @@ export const ORTHO_VIEW_KEY_MAPPING: Readonly<Record<string, OrthoViewName>> = {
   Numpad3: 'front',
 };
 
+const ORTHO_VIEW_CHAR_MAPPING: Readonly<Record<string, OrthoViewName>> = {
+  '1': 'top',
+  '2': 'side',
+  '3': 'front',
+};
+
 const VIEW_SELECTORS: Readonly<Record<OrthoViewName, string>> = {
   top: CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER,
   side: CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER,
@@ -60,7 +66,7 @@ export function resolveOrthoViewFromKeyEvent(event: KeyboardEvent): OrthoViewNam
   if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || event.repeat) {
     return null;
   }
-  return ORTHO_VIEW_KEY_MAPPING[event.code] ?? null;
+  return ORTHO_VIEW_KEY_MAPPING[event.code] ?? ORTHO_VIEW_CHAR_MAPPING[event.key] ?? null;
 }
 
 export function isEditableEventTarget(target: EventTarget | null): boolean {
@@ -103,10 +109,16 @@ export class OrthoViewMaximizer {
   private workspaceEl: HTMLElement | null = null;
   private savedStyles: SavedInlineStyle[] = [];
   private resizeObserver: ResizeObserver | null = null;
+  private readonly onChange: ((view: OrthoViewName | null) => void) | undefined;
 
-  public constructor(doc: Document = document, win: Window = window) {
+  public constructor(
+    doc: Document = document,
+    win: Window = window,
+    onChange?: (view: OrthoViewName | null) => void
+  ) {
     this.doc = doc;
     this.win = win;
+    this.onChange = onChange;
   }
 
   public getMaximizedView(): OrthoViewName | null {
@@ -115,18 +127,23 @@ export class OrthoViewMaximizer {
 
   /** Installs the global keyboard shortcuts. Returns an uninstall function. */
   public install(): () => void {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      this.handleKeyDown(event);
-    };
+    const onKeyDown = Object.assign(
+      (event: KeyboardEvent): void => {
+        this.handleKeyDown(event);
+      },
+      { __cvat3dEnhancerInternalKeyListener: true }
+    );
     const onWindowResize = (event: Event): void => {
       // Ignore our own synthetic resize events
       if (event.isTrusted) {
         this.updateGeometry();
       }
     };
+    this.win.addEventListener('keydown', onKeyDown, true);
     this.doc.addEventListener('keydown', onKeyDown, true);
     this.win.addEventListener('resize', onWindowResize);
     return () => {
+      this.win.removeEventListener('keydown', onKeyDown, true);
       this.doc.removeEventListener('keydown', onKeyDown, true);
       this.win.removeEventListener('resize', onWindowResize);
       this.restore();
@@ -154,6 +171,7 @@ export class OrthoViewMaximizer {
     this.toggle(view);
     event.preventDefault();
     event.stopPropagation();
+    event.stopImmediatePropagation();
     return true;
   }
 
@@ -204,6 +222,7 @@ export class OrthoViewMaximizer {
     }
 
     this.notifyResize();
+    this.onChange?.(view);
     return true;
   }
 
@@ -223,6 +242,7 @@ export class OrthoViewMaximizer {
     this.workspaceEl = null;
     this.maximized = null;
     this.notifyResize();
+    this.onChange?.(null);
   }
 
   private updateGeometry(): void {

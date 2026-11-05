@@ -40,6 +40,18 @@ const UNSAFE_EXECUTION_PATTERNS = [
     name: 'Direct dangerouslySetInnerHTML usage',
     regex: /\bdangerouslySetInnerHTML\b/g,
   },
+  {
+    name: 'Direct innerHTML / outerHTML / insertAdjacentHTML assignment',
+    regex: /\.(?:innerHTML|outerHTML)\s*=|\.insertAdjacentHTML\s*\(/g,
+  },
+  {
+    name: 'Wildcard postMessage targetOrigin ("*")',
+    regex: /\.postMessage\s*\([^,]+,\s*['"`]\*['"`]\s*\)/g,
+  },
+  {
+    name: 'Unauthorized data exfiltration API (sendBeacon / WebSocket / XMLHttpRequest)',
+    regex: /\b(?:navigator\.sendBeacon|new\s+WebSocket|new\s+XMLHttpRequest)\b/g,
+  },
 ];
 
 function walkFiles(dirPath, collected = []) {

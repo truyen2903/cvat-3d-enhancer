@@ -23,6 +23,11 @@ import { VersionDetector } from '../integration/cvat/compatibility';
 import { RuntimeDetector } from '../integration/cvat/detector';
 import { CvatDomAdapter } from '../integration/cvat/dom';
 import {
+  detectActiveZoomedOrthoView,
+  isEditableEventTarget,
+  resolveNudgeKeyCode,
+} from '../integration/cvat/runtime/ortho-cuboid-editor';
+import {
   CapabilityRegistry,
   CvatV2RuntimeAdapter,
   RuntimeManager,
@@ -76,6 +81,33 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   const bridge = new PageBridge(window);
   lifecycle.registerCleanup(bridge.attach());
   lifecycle.registerCleanup(injectPageBridgeScript(document, bridge.getSessionToken()));
+
+  // Also register a synchronous window capture listener at document_start so that even if a page
+  // listener was attached before page-bridge ES module finished loading, W/A/S/D/Q/E are suppressed
+  // whenever an orthographic view is maximized.
+  const onEarlyZoomKeyCapture = (event: KeyboardEvent): void => {
+    const code = resolveNudgeKeyCode(event);
+    if (!code || event.ctrlKey || event.altKey || event.metaKey) {
+      return;
+    }
+    if (isEditableEventTarget(event.target)) {
+      return;
+    }
+    if (detectActiveZoomedOrthoView(document, null)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  };
+  for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+    window.addEventListener(type, onEarlyZoomKeyCapture, true);
+    document.addEventListener(type, onEarlyZoomKeyCapture, true);
+  }
+  lifecycle.registerCleanup(() => {
+    for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+      window.removeEventListener(type, onEarlyZoomKeyCapture, true);
+      document.removeEventListener(type, onEarlyZoomKeyCapture, true);
+    }
+  });
 
   const authorizedOrigins = await loadAuthorizedOrigins();
   const runtimeDetector = new RuntimeDetector(authorizedOrigins);

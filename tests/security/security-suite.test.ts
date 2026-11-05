@@ -272,6 +272,39 @@ describe('Mandatory Security Test Suite (Section 8)', () => {
       expect(code).not.toMatch(/\bnew\s+Function\s*\(/);
       expect(code).not.toMatch(/\bdocument\.cookie\b/);
       expect(code).not.toMatch(/\bdangerouslySetInnerHTML\b/);
+      expect(code).not.toMatch(/\.(?:innerHTML|outerHTML)\s*=|\.insertAdjacentHTML\s*\(/);
+      expect(code).not.toMatch(/\.postMessage\s*\([^,]+,\s*['"`]\*['"`]\s*\)/);
+      expect(code).not.toMatch(/\b(?:navigator\.sendBeacon|new\s+WebSocket|new\s+XMLHttpRequest)\b/);
     }
+  });
+
+  it('14. Never leaks sessionToken in PageBridge error responses when a forged message is sent', () => {
+    const validToken = 'super_secret_bridge_session_token_99887766';
+    const host = new PageBridgeRuntimeHost(validToken, window as never, document);
+    const stop = host.start();
+    const postMessageSpy = vi.spyOn(window, 'postMessage');
+
+    // Attacker script in page dispatches a forged bridge request with wrong token
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          channel: BRIDGE_CHANNEL,
+          direction: 'CONTENT_TO_PAGE',
+          requestId: 'attacker_probe_req_1234',
+          sessionToken: 'wrong_guessed_token_00000000',
+          command: 'DETECT_RUNTIME',
+          timestamp: Date.now(),
+          payload: {},
+        },
+      })
+    );
+
+    // PageBridgeRuntimeHost must drop unauthenticated messages silently without echoing validToken
+    expect(postMessageSpy).not.toHaveBeenCalled();
+
+    postMessageSpy.mockRestore();
+    stop();
   });
 });

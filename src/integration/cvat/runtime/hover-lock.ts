@@ -89,7 +89,7 @@ export function lockRaycasterHoverToActiveObject(
   const original = rayCaster.intersectObjects.bind(rayCaster);
   rayCaster.intersectObjects = (objects: unknown[], recursive?: boolean, ...rest: unknown[]) => {
     const hits = original(objects, recursive, ...rest);
-    if (!isEnabled() || isInsidePointerButtonEvent()) {
+    if (!Array.isArray(hits) || hits.length === 0 || !isEnabled() || isInsidePointerButtonEvent()) {
       return hits;
     }
     return filterHoverIntersections(hits, getActiveClientId());

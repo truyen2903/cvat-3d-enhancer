@@ -35,7 +35,7 @@ export default defineManifest({
   ],
   web_accessible_resources: [
     {
-      resources: ['assets/*', 'src/*'],
+      resources: ['assets/*'],
       matches: ['https://*/*', 'http://*/*'],
     },
   ],

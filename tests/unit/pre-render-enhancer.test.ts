@@ -8,6 +8,7 @@ import {
   computeWcagContrastRatio,
   Cvat3dPreRenderEnhancer,
   getDistinctCuboidColor,
+  getOriginalGeometryPositions,
   injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   optimizeOrthographicRaycastPlanes,
@@ -46,6 +47,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       whiteBackground: true,
       enableScattering: true,
       colorPointsByCuboid: false,
+      hideGroundPoints: false,
       fixedOrthoPointSize: true,
       followActiveObject: true,
       enableActiveObjectWarnings: true,
@@ -72,6 +74,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       whiteBackground: true,
       enableScattering: false,
       colorPointsByCuboid: true,
+      hideGroundPoints: false,
       fixedOrthoPointSize: false,
       followActiveObject: true,
       enableActiveObjectWarnings: true,
@@ -788,5 +791,95 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     // Subsequent calls on the same plane mesh are a fast no-op
     const count2 = optimizeOrthographicRaycastPlanes(sideScene, optimizedPlanes);
     expect(count2).toBe(0);
+  });
+
+  it('hides ground points when hideGroundPoints is enabled while preserving points inside boxes and elevated points, and restores all points when disabled', () => {
+    // 4 points:
+    // - Point 0: (0, 0, -1.6) -> Inside Box #1 centered at (0, 0, -1.5) with height 0.6. Even though z=-1.6 is near ground, it MUST BE KEPT!
+    // - Point 1: (10, 0, -1.6) -> Outside all boxes, at ground level (z=-1.6) -> MUST BE HIDDEN
+    // - Point 2: (10, 0, 0.5) -> Outside all boxes, but elevated (z=0.5m) -> MUST BE KEPT
+    // - Point 3: (12, 0, -1.62) -> Outside all boxes, at ground level (z=-1.62) -> MUST BE HIDDEN
+    const posArr = new Float32Array([
+      0, 0, -1.6,
+      10, 0, -1.6,
+      10, 0, 0.5,
+      12, 0, -1.62,
+    ]);
+    const colArr = new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+
+    let drawRangeCount = 4;
+    const geom = {
+      attributes: {
+        position: { array: posArr, needsUpdate: false },
+        color: { array: colArr, needsUpdate: false },
+      },
+      drawRange: { start: 0, count: 4 },
+      setDrawRange(start: number, count: number) {
+        this.drawRange.start = start;
+        this.drawRange.count = count;
+        drawRangeCount = count;
+      },
+    };
+
+    const canvas3d: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 10 } },
+      view: {
+        views: {
+          perspective: {
+            scene: {
+              background: null,
+              children: [{ type: 'Points', geometry: geom, material: { size: 0.05, sizeAttenuation: true, color: { r: 1, g: 1, b: 1, set: vi.fn() } } }],
+            },
+          },
+        },
+        drawnObjects: {
+          1: {
+            data: {
+              clientID: 1,
+              points: [0, 0, -1.5, 0, 0, 0, 2, 2, 0.6], // wraps Point 0
+              hidden: false,
+              outside: false,
+            },
+            cuboid: {},
+          },
+        },
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: false,
+      enableScattering: false,
+      colorPointsByCuboid: true,
+      hideGroundPoints: true,
+    });
+
+    enhancer.ensureHooked(canvas3d);
+
+    // Kept points: Point 0 (inside Box #1) and Point 2 (elevated point). Point 1 and Point 3 (ground) are hidden.
+    expect(drawRangeCount).toBe(2);
+    expect(geom.drawRange.count).toBe(2);
+
+    // Verify original positions can still be inspected by QA overlay via getOriginalGeometryPositions
+    const orig = getOriginalGeometryPositions(geom);
+    expect(orig).not.toBeNull();
+    expect(orig!.length).toBe(12);
+    expect(orig![3]).toBeCloseTo(10, 3);
+    expect(orig![5]).toBeCloseTo(-1.6, 3); // Point 1 preserved in original cache
+
+    // Now toggle hideGroundPoints to false -> all 4 points must be restored
+    enhancer.setOptions(
+      {
+        whiteBackground: false,
+        enableScattering: false,
+        colorPointsByCuboid: true,
+        hideGroundPoints: false,
+      },
+      canvas3d
+    );
+
+    expect(drawRangeCount).toBe(4);
+    expect(geom.drawRange.count).toBe(4);
+    expect(posArr[3]).toBeCloseTo(10, 3);
+    expect(posArr[5]).toBeCloseTo(-1.6, 3);
   });
 });
