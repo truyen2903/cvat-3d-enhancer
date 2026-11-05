@@ -150,6 +150,7 @@ export interface CvatDrawnObjectEntry {
   cuboid: {
     setColor?: (hexColor: string) => void;
     setScale?: (x: number, y: number, z: number) => void;
+    setRotation?: (x: number, y: number, z: number) => void;
     perspective?: CvatCuboidViewMeshLike;
     top?: CvatCuboidViewMeshLike;
     side?: CvatCuboidViewMeshLike;
@@ -1835,13 +1836,26 @@ export function injectCvatWorkspaceSettingsControls(
   return mountedAny;
 }
 
-export type CuboidDimensionKey = 'H' | 'W' | 'L';
+export type CuboidDimensionKey = 'H' | 'W' | 'L' | 'FLIP_180';
 
 export const CUBOID_DIMENSION_INDEX: Readonly<Record<CuboidDimensionKey, number>> = Object.freeze({
+  FLIP_180: 5, // rotation.z (Yaw / Hướng đầu xe)
   L: 6, // scale.x (Length / Dài)
   W: 7, // scale.y (Width / Rộng)
   H: 8, // scale.z (Height / Cao)
 });
+
+/**
+ * Normalizes `rz + Math.PI` (180-degree heading flip) into `[-Math.PI, Math.PI)`.
+ */
+export function flipYawAngle180Rad(rz: number): number {
+  const raw = (Number(rz) || 0) + Math.PI;
+  let wrapped = (raw + Math.PI) % (2 * Math.PI);
+  if (wrapped < 0) {
+    wrapped += 2 * Math.PI;
+  }
+  return wrapped - Math.PI;
+}
 
 export interface DimensionSyncResult {
   readonly clientID: number;
@@ -1849,6 +1863,113 @@ export interface DimensionSyncResult {
   readonly targetValue: number | null;
   readonly syncedFrames: number;
   readonly skippedAttributeMismatchFrames: number;
+}
+
+/**
+ * Flips the 3D cuboid's heading (Yaw / `points[5]`) by 180 degrees (`+Math.PI` rad)
+ * on the current frame only.
+ */
+export async function flipCuboidYaw180OnCurrentFrame(
+  clientID: number,
+  options: {
+    drawnEntry?: CvatDrawnObjectEntry | null;
+    stateOnCurrentFrame?: CvatObjectStateLike | null;
+    perspectiveCanvas?:
+      | (HTMLCanvasElement & {
+          updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+        })
+      | null;
+    onAfterSync?: () => void;
+  }
+): Promise<DimensionSyncResult> {
+  const entry = options.drawnEntry ?? null;
+  const currentState = options.stateOnCurrentFrame ?? entry?.state ?? null;
+
+  if (!currentState || currentState.lock) {
+    return {
+      clientID,
+      dimension: 'FLIP_180',
+      targetValue: null,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  const currentPoints =
+    Array.isArray(currentState.points) && currentState.points.length >= 9
+      ? currentState.points
+      : Array.isArray(entry?.data?.points) && entry.data.points.length >= 9
+        ? entry.data.points
+        : null;
+
+  if (!currentPoints) {
+    return {
+      clientID,
+      dimension: 'FLIP_180',
+      targetValue: null,
+      syncedFrames: 0,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
+
+  const nextYaw = flipYawAngle180Rad(Number(currentPoints[5]));
+  const updatedPoints = [...currentPoints];
+  updatedPoints[5] = nextYaw;
+
+  const currentFrame = Number(currentState.frame ?? 0);
+  currentState.points = updatedPoints;
+  if (currentState.updateFlags) {
+    currentState.updateFlags.points = true;
+  }
+
+  let dispatchState: CvatObjectStateLike = currentState;
+  const internalSave = currentState.__internal?.save;
+  if (typeof internalSave === 'function') {
+    dispatchState = internalSave(currentFrame, currentState);
+  } else if (typeof currentState.save === 'function') {
+    dispatchState = await currentState.save();
+  }
+
+  if (entry?.data?.points && entry.data.points.length >= 9) {
+    entry.data.points[5] = nextYaw;
+  }
+  if (typeof entry?.cuboid?.setRotation === 'function') {
+    entry.cuboid.setRotation(updatedPoints[3]!, updatedPoints[4]!, nextYaw);
+  }
+  for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
+    const rot = entry?.cuboid?.[viewKey]?.rotation;
+    if (rot && typeof rot === 'object') {
+      rot.z = nextYaw;
+    }
+  }
+
+  const perspCanvas = options.perspectiveCanvas ?? null;
+  if (perspCanvas && dispatchState) {
+    if (typeof perspCanvas.updatePosition === 'function') {
+      perspCanvas.updatePosition(dispatchState, [...updatedPoints]);
+    } else {
+      perspCanvas.dispatchEvent(
+        new CustomEvent('canvas.edited', {
+          bubbles: false,
+          cancelable: true,
+          detail: {
+            state: dispatchState,
+            points: [...updatedPoints],
+          },
+        })
+      );
+    }
+  }
+
+  options.onAfterSync?.();
+
+  return {
+    clientID,
+    dimension: 'FLIP_180',
+    targetValue: nextYaw,
+    syncedFrames: 1,
+    skippedAttributeMismatchFrames: 0,
+  };
 }
 
 /**
@@ -1896,6 +2017,9 @@ export async function syncTrackCuboidDimension(
     onAfterSync?: () => void;
   }
 ): Promise<DimensionSyncResult> {
+  if (dimension === 'FLIP_180') {
+    return flipCuboidYaw180OnCurrentFrame(clientID, options);
+  }
   const dimIndex = CUBOID_DIMENSION_INDEX[dimension];
   const entry = options.drawnEntry ?? null;
   const currentState = options.stateOnCurrentFrame ?? entry?.state ?? null;
@@ -2117,6 +2241,13 @@ const DIMENSION_BUTTON_CONFIGS: readonly {
     svgPath:
       'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM8.5 6H11.3V15.5H16.8V18H8.5V6Z',
   },
+  {
+    key: 'FLIP_180',
+    className: 'cvat-object-item-button-flip-180',
+    title: 'Flip heading 180° on current frame (Lật đầu xe 180° ở frame hiện tại)',
+    svgPath:
+      'M12 2L16 6H13V11H11V6H8L12 2ZM12 22L8 18H11V13H13V18H16L12 22ZM5.64 5.64L7.05 7.05C5.17 8.93 4.69 11.74 5.62 14.12L3.77 14.9C2.5 11.74 3.16 8.12 5.64 5.64ZM18.36 18.36L16.95 16.95C18.83 15.07 19.31 12.26 18.38 9.88L20.23 9.1C21.5 12.26 20.84 15.88 18.36 18.36Z',
+  },
 ];
 
 function resolveObjectItemClientId(col20: Element): number | null {
@@ -2223,8 +2354,14 @@ export function injectCvatObjectDimensionSyncControls(
         void Promise.resolve(onSyncDimension(resolvedId, cfg.key)).then((res) => {
           if (res && res.syncedFrames > 0) {
             span.style.color = '#52c41a';
-            const valStr = res.targetValue !== null ? res.targetValue.toFixed(2) : '';
-            span.title = `${cfg.key} = ${valStr} synced to ${res.syncedFrames} keyframe(s) (${res.skippedAttributeMismatchFrames} skipped due to different attributes)`;
+            if (cfg.key === 'FLIP_180') {
+              const degStr =
+                res.targetValue !== null ? `${((res.targetValue * 180) / Math.PI).toFixed(1)}°` : '';
+              span.title = `Flipped 180° on current frame (Yaw = ${degStr})`;
+            } else {
+              const valStr = res.targetValue !== null ? res.targetValue.toFixed(2) : '';
+              span.title = `${cfg.key} = ${valStr} synced to ${res.syncedFrames} keyframe(s) (${res.skippedAttributeMismatchFrames} skipped due to different attributes)`;
+            }
             window.setTimeout(() => {
               span.style.color = '';
             }, 900);

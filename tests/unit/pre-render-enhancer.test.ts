@@ -673,9 +673,13 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const syncLBtn = document.querySelector<HTMLElement>(
       '#cvat-objects-sidebar-state-item-1 [data-enhancer-sync-dim="L"]'
     );
+    const flip180Btn = document.querySelector<HTMLElement>(
+      '#cvat-objects-sidebar-state-item-1 [data-enhancer-sync-dim="FLIP_180"]'
+    );
     expect(syncHBtn).not.toBeNull();
     expect(syncWBtn).not.toBeNull();
     expect(syncLBtn).not.toBeNull();
+    expect(flip180Btn).not.toBeNull();
 
     // 1. Click [H] -> syncs Height (index 8 = 1.75) to frames 0, 5, 15, but SKIPS frame 10 (different attribute!)
     syncHBtn!.click();
@@ -698,6 +702,14 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(trackShapes[0]!.points[6]).toBeCloseTo(4.8, 4);
     expect(trackShapes[15]!.points[6]).toBeCloseTo(4.8, 4);
     expect(trackShapes[10]!.points[6]).toBeCloseTo(4.0, 4);
+
+    // 3. Click [FLIP_180] -> flips Yaw (index 5) by 180° (0 -> -Math.PI) on current frame 5 ONLY
+    flip180Btn!.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(Math.abs(trackShapes[5]!.points[5]!)).toBeCloseTo(Math.PI, 4);
+    expect(trackShapes[0]!.points[5]).toBeCloseTo(0, 4);
+    expect(trackShapes[15]!.points[5]).toBeCloseTo(0, 4);
   });
 
   it('guarantees high contrast against both background and cuboid labelColor for internal box points and caches color per clientID across frames', () => {

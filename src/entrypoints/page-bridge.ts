@@ -394,6 +394,12 @@ export class PageBridgeRuntimeHost {
       stateOnCurrentFrame,
       perspectiveCanvas: perspCanvas,
       onAfterSync: () => {
+        this.preRenderEnhancer.markDirty();
+        const inst = this.getActiveCanvas3dInstance();
+        if (inst?.view) {
+          this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
+          this.preRenderEnhancer.requestViewsRedraw();
+        }
         this.syncActiveObjectQaOverlay(true);
       },
     });
