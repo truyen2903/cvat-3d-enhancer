@@ -49,6 +49,39 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     });
   });
 
+  it('restores enhancer options even after CVAT SettingsModal overwrites clientSettings without cvat3dEnhancer', () => {
+    window.localStorage.clear();
+    writeRenderOptionsToClientSettings({
+      whiteBackground: true,
+      enableScattering: false,
+      colorPointsByCuboid: true,
+      fixedOrthoPointSize: false,
+    });
+
+    // Simulate CVAT saving its own Redux settings snapshot (drops our key)
+    window.localStorage.setItem(
+      'clientSettings',
+      JSON.stringify({ player: { frameStep: 5 }, workspace: { autoSave: false } })
+    );
+
+    const restored = readRenderOptionsFromClientSettings();
+    expect(restored).toEqual({
+      whiteBackground: true,
+      enableScattering: false,
+      colorPointsByCuboid: true,
+      fixedOrthoPointSize: false,
+    });
+
+    // clientSettings must be healed while keeping CVAT's own values
+    const healed = JSON.parse(window.localStorage.getItem('clientSettings') ?? '{}') as {
+      player?: { frameStep?: number };
+      workspace?: { autoSave?: boolean; cvat3dEnhancer?: { colorPointsByCuboid?: boolean } };
+    };
+    expect(healed.player?.frameStep).toBe(5);
+    expect(healed.workspace?.autoSave).toBe(false);
+    expect(healed.workspace?.cvat3dEnhancer?.colorPointsByCuboid).toBe(true);
+  });
+
   it('injects native checkboxes into .cvat-workspace-settings and triggers callback on tick', () => {
     document.body.innerHTML = `<div class="cvat-workspace-settings"></div>`;
     let current = {

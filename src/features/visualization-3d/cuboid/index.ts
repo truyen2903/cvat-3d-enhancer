@@ -41,9 +41,6 @@ export class CuboidVisualizationFeature implements FeatureModule {
       orientationVisibility: vis.cuboidOrientationVisibility,
       controlPointsSize: vis.controlPointsSize,
       focusedObjectPadding: vis.focusedObjectPadding,
-      whiteBackground: vis.whiteBackground,
-      enableScattering: vis.enableScattering,
-      colorPointsByCuboid: vis.colorPointsByCuboid,
     });
   }
 }

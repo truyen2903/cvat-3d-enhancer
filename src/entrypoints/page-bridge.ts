@@ -467,6 +467,7 @@ export class PageBridgeRuntimeHost {
         whiteBackground: config.whiteBackground ?? current.whiteBackground,
         enableScattering: config.enableScattering ?? current.enableScattering,
         colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
+        fixedOrthoPointSize: current.fixedOrthoPointSize ?? true,
       };
       writeRenderOptionsToClientSettings(next, this.win.localStorage);
       this.preRenderEnhancer.setOptions(next, canvasInstance);

@@ -27,6 +27,7 @@ export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Obje
 });
 
 export const CLIENT_SETTINGS_STORAGE_KEY = 'clientSettings' as const;
+export const ENHANCER_STANDALONE_STORAGE_KEY = 'cvat3dEnhancerSettings' as const;
 
 export interface ThreeBufferAttributeLike {
   array: Float32Array | number[];
@@ -79,6 +80,7 @@ export interface CvatRenderViewLike {
   renderer?: {
     domElement?: HTMLCanvasElement;
     setClearColor?: (color: number | string, alpha?: number) => void;
+    render?: (scene: unknown, camera: unknown) => void;
   };
 }
 
@@ -177,45 +179,105 @@ export interface CvatInternalCanvas3dLike {
   };
 }
 
+function normalizeRenderOptionsRecord(obj: Record<string, unknown>): Cvat3dWorkspaceRenderOptions {
+  return {
+    whiteBackground: Boolean(obj.whiteBackground),
+    enableScattering: Boolean(obj.enableScattering),
+    colorPointsByCuboid: Boolean(obj.colorPointsByCuboid),
+    fixedOrthoPointSize:
+      typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
+  };
+}
+
 /**
- * Reads `workspace.cvat3dEnhancer` from CVAT's native `localStorage['clientSettings']`.
+ * Reads `workspace.cvat3dEnhancer` from CVAT's native `localStorage['clientSettings']`
+ * (with authoritative fallback/sync from `localStorage['cvat3dEnhancerSettings']` so CVAT's
+ * SettingsModal close handler can never wipe or revert user-configured 3D enhancer options).
  */
 export function readRenderOptionsFromClientSettings(
-  storage: Pick<Storage, 'getItem'> = window.localStorage
+  storage: Pick<Storage, 'getItem'> & Partial<Pick<Storage, 'setItem'>> = window.localStorage
 ): Cvat3dWorkspaceRenderOptions {
+  let standaloneOptions: Cvat3dWorkspaceRenderOptions | null = null;
+  try {
+    const rawStandalone = storage.getItem(ENHANCER_STANDALONE_STORAGE_KEY);
+    if (rawStandalone) {
+      const parsedStandalone: unknown = JSON.parse(rawStandalone);
+      if (
+        typeof parsedStandalone === 'object' &&
+        parsedStandalone !== null &&
+        !Array.isArray(parsedStandalone)
+      ) {
+        standaloneOptions = normalizeRenderOptionsRecord(
+          parsedStandalone as Record<string, unknown>
+        );
+      }
+    }
+  } catch {
+    standaloneOptions = null;
+  }
+
+  let clientSettingsOptions: Cvat3dWorkspaceRenderOptions | null = null;
   try {
     const raw = storage.getItem(CLIENT_SETTINGS_STORAGE_KEY);
-    if (!raw) {
-      return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        const workspace = (parsed as Record<string, unknown>).workspace;
+        if (typeof workspace === 'object' && workspace !== null && !Array.isArray(workspace)) {
+          const enhancer = (workspace as Record<string, unknown>).cvat3dEnhancer;
+          if (typeof enhancer === 'object' && enhancer !== null && !Array.isArray(enhancer)) {
+            clientSettingsOptions = normalizeRenderOptionsRecord(
+              enhancer as Record<string, unknown>
+            );
+          }
+        }
+      }
     }
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
-    }
-    const workspace = (parsed as Record<string, unknown>).workspace;
-    if (typeof workspace !== 'object' || workspace === null) {
-      return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
-    }
-    const enhancer = (workspace as Record<string, unknown>).cvat3dEnhancer;
-    if (typeof enhancer !== 'object' || enhancer === null) {
-      return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
-    }
-    const obj = enhancer as Record<string, unknown>;
-    return {
-      whiteBackground: Boolean(obj.whiteBackground),
-      enableScattering: Boolean(obj.enableScattering),
-      colorPointsByCuboid: Boolean(obj.colorPointsByCuboid),
-      fixedOrthoPointSize:
-        typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
-    };
   } catch {
-    return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
+    clientSettingsOptions = null;
   }
+
+  if (standaloneOptions) {
+    // If CVAT's SettingsModal overwrote `clientSettings` with stale Redux state, heal `clientSettings`
+    if (
+      typeof storage.setItem === 'function' &&
+      (!clientSettingsOptions ||
+        clientSettingsOptions.whiteBackground !== standaloneOptions.whiteBackground ||
+        clientSettingsOptions.enableScattering !== standaloneOptions.enableScattering ||
+        clientSettingsOptions.colorPointsByCuboid !== standaloneOptions.colorPointsByCuboid ||
+        (clientSettingsOptions.fixedOrthoPointSize ?? true) !==
+          (standaloneOptions.fixedOrthoPointSize ?? true))
+    ) {
+      try {
+        writeRenderOptionsToClientSettings(
+          standaloneOptions,
+          storage as Pick<Storage, 'getItem' | 'setItem'>
+        );
+      } catch {
+        // Ignore storage write errors in restricted contexts
+      }
+    }
+    return standaloneOptions;
+  }
+
+  if (clientSettingsOptions) {
+    if (typeof storage.setItem === 'function') {
+      try {
+        storage.setItem(ENHANCER_STANDALONE_STORAGE_KEY, JSON.stringify(clientSettingsOptions));
+      } catch {
+        // Ignore storage write errors
+      }
+    }
+    return clientSettingsOptions;
+  }
+
+  return { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
 }
 
 /**
  * Writes `workspace.cvat3dEnhancer` into CVAT's native `localStorage['clientSettings']`
- * while preserving `player`, `workspace`, `shortcuts`, and `imageFilters`.
+ * AND `localStorage['cvat3dEnhancerSettings']` while preserving `player`, `workspace`,
+ * `shortcuts`, and `imageFilters`.
  */
 export function writeRenderOptionsToClientSettings(
   options: Cvat3dWorkspaceRenderOptions,
@@ -251,6 +313,11 @@ export function writeRenderOptionsToClientSettings(
     cvat3dEnhancer: normalized,
   };
 
+  try {
+    storage.setItem(ENHANCER_STANDALONE_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {
+    // Ignore standalone write error if quota exceeded
+  }
   storage.setItem(CLIENT_SETTINGS_STORAGE_KEY, JSON.stringify(root));
   return normalized;
 }
@@ -798,13 +865,20 @@ export class Cvat3dPreRenderEnhancer {
   private readonly primaryPerspectiveMaterials = new WeakSet<object>();
   private readonly geometrySignatureMap = new WeakMap<object, string>();
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
+  private readonly sceneRenderContext = new Map<
+    ThreeSceneLike,
+    { renderer: NonNullable<CvatRenderViewLike['renderer']>; camera: unknown }
+  >();
   private primaryPerspectiveScene: ThreeSceneLike | null = null;
   private primaryPerspectiveCanvas: HTMLCanvasElement | null = null;
+  private activeView: CvatInternalViewLike | null = null;
+  private activeModel: CvatInternalCanvas3dLike['model'] | null = null;
   private lastCompiledBoxes: OrientedBoxBounds[] = [];
   private lastExecutionSignature = '';
   private lastGeometryColorSignature = '';
   private dirty = true;
   private pendingFrameObjectsLoad = true;
+  private isRedrawingViews = false;
 
   public constructor(initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS) {
     this.options = {
@@ -837,10 +911,31 @@ export class Cvat3dPreRenderEnhancer {
     if (changed) {
       this.dirty = true;
       this.pendingFrameObjectsLoad = true;
-      if (canvas3d?.view) {
-        this.appliedViewBackground.delete(canvas3d.view);
-        this.applyOnceIfNeeded(canvas3d.view, canvas3d.model);
+      const targetView = canvas3d?.view ?? this.activeView;
+      const targetModel = canvas3d?.model ?? this.activeModel ?? undefined;
+      if (targetView) {
+        this.appliedViewBackground.delete(targetView);
+        this.applyOnceIfNeeded(targetView, targetModel);
+        this.requestViewsRedraw();
       }
+    }
+  }
+
+  public requestViewsRedraw(): void {
+    if (this.isRedrawingViews) {
+      return;
+    }
+    this.isRedrawingViews = true;
+    try {
+      for (const [scene, ctx] of this.sceneRenderContext.entries()) {
+        if (typeof ctx.renderer?.render === 'function' && ctx.camera) {
+          ctx.renderer.render(scene, ctx.camera);
+        }
+      }
+    } catch {
+      // Ignore WebGL render errors if a view was disposed
+    } finally {
+      this.isRedrawingViews = false;
     }
   }
 
@@ -931,6 +1026,14 @@ export class Cvat3dPreRenderEnhancer {
             sceneObj.background.set(targetBgHex);
           }
           const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
+          if (sceneObj && renObj && typeof renObj.render === 'function' && camera) {
+            // Remember (renderer, camera) per scene so option toggles can force an immediate redraw
+            this.sceneRenderContext.set(sceneObj, { renderer: renObj, camera });
+            if (this.sceneRenderContext.size > 16) {
+              const oldestKey = this.sceneRenderContext.keys().next().value;
+              if (oldestKey) this.sceneRenderContext.delete(oldestKey);
+            }
+          }
           if (renObj?.domElement && renObj.domElement.style.backgroundColor !== targetBgCss) {
             renObj.domElement.style.backgroundColor = targetBgCss;
             if (typeof renObj.setClearColor === 'function') {
@@ -1135,6 +1238,10 @@ export class Cvat3dPreRenderEnhancer {
   ): boolean {
     if (!view.views) {
       return false;
+    }
+    this.activeView = view;
+    if (model) {
+      this.activeModel = model;
     }
 
     // Set WebGL scene background BEFORE checking whether point cloud has loaded so frame 0 never flashes black
