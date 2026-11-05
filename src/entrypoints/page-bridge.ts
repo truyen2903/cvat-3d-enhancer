@@ -37,6 +37,12 @@ import {
   type FollowModelLike,
   type FollowViewLike,
 } from '../integration/cvat/runtime/camera-follow';
+import {
+  evaluateActiveObjectQaReport,
+  extractSidebarDomLabelAndAttributes,
+  getPerspectivePointCloudPositions,
+  renderActiveObjectQaOverlayDom,
+} from '../integration/cvat/runtime/active-object-qa-overlay';
 
 interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
@@ -95,6 +101,7 @@ export class PageBridgeRuntimeHost {
     () => this.preRenderEnhancer.getOptions().followActiveObject ?? true
   );
   private cachedInstance: CvatCanvas3dLike | null = null;
+  private lastQaSignature = '';
 
   public constructor(
     sessionToken: string,
@@ -118,6 +125,13 @@ export class PageBridgeRuntimeHost {
     this.win.addEventListener('message', this.handleMessage);
     installPointerButtonEventTracking(this.win);
 
+    const onInteractiveChange = () => {
+      this.syncActiveObjectQaOverlay(true);
+    };
+    this.doc.addEventListener('change', onInteractiveChange, true);
+    this.doc.addEventListener('pointerup', onInteractiveChange, true);
+    this.doc.addEventListener('keyup', onInteractiveChange, true);
+
     // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
     if (this.doc.documentElement) {
       this.settingsObserver = new MutationObserver(() => {
@@ -135,6 +149,7 @@ export class PageBridgeRuntimeHost {
           this.preRenderEnhancer.ensureHooked(instance);
           this.ensureActiveObjectHoverLock(instance);
         }
+        this.syncActiveObjectQaOverlay();
       });
       this.settingsObserver.observe(this.doc.documentElement, {
         childList: true,
@@ -152,10 +167,14 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.ensureHooked(initialInstance);
       this.ensureActiveObjectHoverLock(initialInstance);
     }
+    this.syncActiveObjectQaOverlay(true);
 
     return () => {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
       this.win.removeEventListener('message', this.handleMessage);
+      this.doc.removeEventListener('change', onInteractiveChange, true);
+      this.doc.removeEventListener('pointerup', onInteractiveChange, true);
+      this.doc.removeEventListener('keyup', onInteractiveChange, true);
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
@@ -203,9 +222,108 @@ export class PageBridgeRuntimeHost {
       | { data?: { activeElement?: { clientID?: string | number | null } } }
       | undefined)?.data;
     const fallback = modelData?.activeElement?.clientID;
-    return fallback !== undefined && fallback !== null && String(fallback) !== ''
-      ? String(fallback)
-      : null;
+    if (fallback !== undefined && fallback !== null && String(fallback) !== '') {
+      return String(fallback);
+    }
+
+    const activeSidebarEl = this.doc.querySelector<HTMLElement>(
+      '.cvat-objects-sidebar-state-active-item[id^="cvat-objects-sidebar-state-item-"]'
+    );
+    if (activeSidebarEl) {
+      const match = /^cvat-objects-sidebar-state-item-(\d+)$/.exec(activeSidebarEl.id);
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+    return null;
+  }
+
+  private syncActiveObjectQaOverlay(force = false): void {
+    const enabled = this.preRenderEnhancer.getOptions().enableActiveObjectWarnings ?? true;
+    if (!enabled) {
+      if (this.lastQaSignature !== 'disabled') {
+        this.lastQaSignature = 'disabled';
+        renderActiveObjectQaOverlayDom(this.doc, null, false);
+      }
+      return;
+    }
+
+    const instance = this.getActiveCanvas3dInstance();
+    const activeIdStr = this.getActiveObjectClientId(instance);
+    if (!activeIdStr || !instance?.view) {
+      if (this.lastQaSignature !== 'none') {
+        this.lastQaSignature = 'none';
+        renderActiveObjectQaOverlayDom(this.doc, null, true);
+      }
+      return;
+    }
+
+    const clientID = Number(activeIdStr);
+    if (!Number.isFinite(clientID)) {
+      renderActiveObjectQaOverlayDom(this.doc, null, true);
+      return;
+    }
+
+    const drawnObjects = instance.view.drawnObjects ?? {};
+    const drawnEntry = drawnObjects[clientID] ?? null;
+    let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
+
+    if (!stateOnCurrentFrame && this.reduxStore) {
+      try {
+        const state = this.reduxStore.getState();
+        const annotation = state.annotation as Record<string, unknown> | undefined;
+        const annotations = annotation?.annotations as Record<string, unknown> | undefined;
+        const states = annotations?.states as CvatObjectStateLike[] | undefined;
+        if (Array.isArray(states)) {
+          stateOnCurrentFrame =
+            states.find((s) => Number(s?.clientID) === clientID) ?? null;
+        }
+      } catch {
+        // Ignore fallback lookup errors
+      }
+    }
+
+    const pts = stateOnCurrentFrame?.points ?? drawnEntry?.data?.points ?? [];
+    const domFrameAttr =
+      instance.view.views?.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ??
+      null;
+    const frame = Number(
+      stateOnCurrentFrame?.frame ?? instance.model?.data?.imageID ?? domFrameAttr ?? 0
+    );
+
+    const { labelName: domLabelName, domAttributes } = extractSidebarDomLabelAndAttributes(
+      this.doc,
+      clientID
+    );
+    const attrSig = JSON.stringify({
+      s: stateOnCurrentFrame?.attributes ?? {},
+      d: domAttributes,
+      l: domLabelName ?? '',
+    });
+    const ptsSig = pts
+      .slice(0, 9)
+      .map((n) => Number(n).toFixed(3))
+      .join(',');
+    const posArray = getPerspectivePointCloudPositions(instance.view);
+    const sig = `${clientID}@${frame}::${ptsSig}::${attrSig}::p${posArray?.length ?? 0}`;
+
+    if (!force && sig === this.lastQaSignature) {
+      return;
+    }
+    this.lastQaSignature = sig;
+
+    const report = evaluateActiveObjectQaReport({
+      clientID,
+      frame: Number.isFinite(frame) ? frame : 0,
+      drawnEntry,
+      stateOnCurrentFrame,
+      drawnObjects,
+      positionArray: posArray,
+      fallbackLabelName: domLabelName,
+      domAttributes,
+    });
+
+    renderActiveObjectQaOverlayDom(this.doc, report, true);
   }
 
   private tryMountWorkspaceSettingsCheckboxes(): void {
@@ -217,6 +335,7 @@ export class PageBridgeRuntimeHost {
         syncEarlyViewportBackgroundDom(this.doc, persisted.whiteBackground);
         const canvasInstance = this.getActiveCanvas3dInstance();
         this.preRenderEnhancer.setOptions(persisted, canvasInstance);
+        this.syncActiveObjectQaOverlay(true);
       }
     );
   }
@@ -262,6 +381,9 @@ export class PageBridgeRuntimeHost {
       drawnEntry,
       stateOnCurrentFrame,
       perspectiveCanvas: perspCanvas,
+      onAfterSync: () => {
+        this.syncActiveObjectQaOverlay(true);
+      },
     });
   }
 
@@ -295,7 +417,9 @@ export class PageBridgeRuntimeHost {
                 (inStorage.fixedOrthoPointSize ?? true) !==
                   (currentOpts.fixedOrthoPointSize ?? true) ||
                 (inStorage.followActiveObject ?? true) !==
-                  (currentOpts.followActiveObject ?? true)
+                  (currentOpts.followActiveObject ?? true) ||
+                (inStorage.enableActiveObjectWarnings ?? true) !==
+                  (currentOpts.enableActiveObjectWarnings ?? true)
               ) {
                 writeRenderOptionsToClientSettings(currentOpts, this.win.localStorage);
               }
@@ -305,6 +429,7 @@ export class PageBridgeRuntimeHost {
                 this.preRenderEnhancer.ensureHooked(activeInstance);
                 this.ensureActiveObjectHoverLock(activeInstance);
               }
+              this.syncActiveObjectQaOverlay();
             },
           };
         });
@@ -391,6 +516,10 @@ export class PageBridgeRuntimeHost {
         if (inst?.view) {
           this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
         }
+        this.syncActiveObjectQaOverlay(true);
+      });
+      perspCanvas.addEventListener('canvas.edited', () => {
+        this.syncActiveObjectQaOverlay(true);
       });
     }
 
@@ -538,6 +667,7 @@ export class PageBridgeRuntimeHost {
         colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
         fixedOrthoPointSize: current.fixedOrthoPointSize ?? true,
         followActiveObject: current.followActiveObject ?? true,
+        enableActiveObjectWarnings: current.enableActiveObjectWarnings ?? true,
       };
       writeRenderOptionsToClientSettings(next, this.win.localStorage);
       this.preRenderEnhancer.setOptions(next, canvasInstance);

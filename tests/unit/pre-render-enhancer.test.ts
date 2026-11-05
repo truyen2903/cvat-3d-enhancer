@@ -47,6 +47,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       colorPointsByCuboid: false,
       fixedOrthoPointSize: true,
       followActiveObject: true,
+      enableActiveObjectWarnings: true,
     });
   });
 
@@ -72,6 +73,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       colorPointsByCuboid: true,
       fixedOrthoPointSize: false,
       followActiveObject: true,
+      enableActiveObjectWarnings: true,
     });
 
     // clientSettings must be healed while keeping CVAT's own values

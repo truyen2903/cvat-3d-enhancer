@@ -18,6 +18,7 @@ export interface Cvat3dWorkspaceRenderOptions {
   readonly colorPointsByCuboid: boolean;
   readonly fixedOrthoPointSize?: boolean;
   readonly followActiveObject?: boolean;
+  readonly enableActiveObjectWarnings?: boolean;
 }
 
 export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Object.freeze({
@@ -26,6 +27,7 @@ export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Obje
   colorPointsByCuboid: false,
   fixedOrthoPointSize: true,
   followActiveObject: true,
+  enableActiveObjectWarnings: true,
 });
 
 export const CLIENT_SETTINGS_STORAGE_KEY = 'clientSettings' as const;
@@ -190,6 +192,8 @@ function normalizeRenderOptionsRecord(obj: Record<string, unknown>): Cvat3dWorks
       typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
     followActiveObject:
       typeof obj.followActiveObject === 'boolean' ? obj.followActiveObject : true,
+    enableActiveObjectWarnings:
+      typeof obj.enableActiveObjectWarnings === 'boolean' ? obj.enableActiveObjectWarnings : true,
   };
 }
 
@@ -252,7 +256,9 @@ export function readRenderOptionsFromClientSettings(
         (clientSettingsOptions.fixedOrthoPointSize ?? true) !==
           (standaloneOptions.fixedOrthoPointSize ?? true) ||
         (clientSettingsOptions.followActiveObject ?? true) !==
-          (standaloneOptions.followActiveObject ?? true))
+          (standaloneOptions.followActiveObject ?? true) ||
+        (clientSettingsOptions.enableActiveObjectWarnings ?? true) !==
+          (standaloneOptions.enableActiveObjectWarnings ?? true))
     ) {
       try {
         writeRenderOptionsToClientSettings(
@@ -313,6 +319,7 @@ export function writeRenderOptionsToClientSettings(
     colorPointsByCuboid: Boolean(options.colorPointsByCuboid),
     fixedOrthoPointSize: options.fixedOrthoPointSize ?? true,
     followActiveObject: options.followActiveObject ?? true,
+    enableActiveObjectWarnings: options.enableActiveObjectWarnings ?? true,
   };
 
   root.workspace = {
@@ -893,6 +900,7 @@ export class Cvat3dPreRenderEnhancer {
       ...initialOptions,
       fixedOrthoPointSize: initialOptions.fixedOrthoPointSize ?? true,
       followActiveObject: initialOptions.followActiveObject ?? true,
+      enableActiveObjectWarnings: initialOptions.enableActiveObjectWarnings ?? true,
     };
   }
 
@@ -916,6 +924,7 @@ export class Cvat3dPreRenderEnhancer {
       ...next,
       fixedOrthoPointSize: nextOrthoFixed,
       followActiveObject: next.followActiveObject ?? true,
+      enableActiveObjectWarnings: next.enableActiveObjectWarnings ?? true,
     };
     if (changed) {
       this.dirty = true;
@@ -1608,6 +1617,10 @@ export function injectCvatWorkspaceSettingsControls(
       'input[data-enhancer-opt="followActiveObject"]'
     );
     if (followInput) syncCheckboxVisualState(followInput, opts.followActiveObject ?? true);
+    const warnInput = existing.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="enableActiveObjectWarnings"]'
+    );
+    if (warnInput) syncCheckboxVisualState(warnInput, opts.enableActiveObjectWarnings ?? true);
     return true;
   }
 
@@ -1652,13 +1665,22 @@ export function injectCvatWorkspaceSettingsControls(
       description:
         'Move the 3D perspective camera with the active object so it stays at the same screen position on Next/Previous frame',
     },
+    {
+      key: 'enableActiveObjectWarnings',
+      rowClass: 'cvat-workspace-settings-3d-active-object-warnings',
+      title: 'Show QA warnings on 3D canvas for active object',
+      description:
+        'Validate attribute dimension thresholds (K), dimension sync (S), height (Z), heading (H), jump (J), and LiDAR fit (T, P, F, D, M) on the 3D canvas',
+    },
   ];
 
   const initialOpts = getOptions();
 
   for (const item of items) {
     const isChecked =
-      item.key === 'fixedOrthoPointSize' || item.key === 'followActiveObject'
+      item.key === 'fixedOrthoPointSize' ||
+      item.key === 'followActiveObject' ||
+      item.key === 'enableActiveObjectWarnings'
         ? (initialOpts[item.key] ?? true)
         : Boolean(initialOpts[item.key]);
 
