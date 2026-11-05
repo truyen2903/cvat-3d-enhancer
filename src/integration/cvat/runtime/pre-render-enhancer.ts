@@ -491,17 +491,17 @@ export function getDistinctCuboidColor(
       boxDist >= MIN_BOX_PERCEPTUAL_DIST &&
       hueDiff >= MIN_HUE_SEPARATION_DEG &&
       bgContrast >= MIN_BG_CONTRAST_RATIO &&
-      interiorDist >= 0.42
+      interiorDist >= 0.35
     ) {
       return [candidate[0], candidate[1], candidate[2]];
     }
 
     const score =
-      boxDist * 3.0 +
-      (hueDiff / 180) * 2.5 +
-      interiorDist * 2.0 +
-      Math.min(bgContrast, 10) * 0.15 +
-      Math.min(interiorContrast, 10) * 0.15;
+      boxDist * 4.5 +
+      (hueDiff / 180) * 3.0 +
+      interiorDist * 1.5 +
+      Math.min(bgContrast, 10) * 0.1 +
+      Math.min(interiorContrast, 10) * 0.1;
     if (score > bestScore) {
       bestScore = score;
       bestEntry = candidate;
