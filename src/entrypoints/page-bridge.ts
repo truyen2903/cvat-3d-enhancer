@@ -26,6 +26,11 @@ import {
   CVAT_DOM_SELECTORS,
 } from '../shared/constants';
 import type { BridgeRequestEnvelope } from '../shared/types';
+import {
+  installPointerButtonEventTracking,
+  lockRaycasterHoverToActiveObject,
+  type RaycasterLike,
+} from '../integration/cvat/runtime/hover-lock';
 
 interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
@@ -100,6 +105,7 @@ export class PageBridgeRuntimeHost {
     };
     this.doc.addEventListener('plugins.ready', onPluginReady);
     this.win.addEventListener('message', this.handleMessage);
+    installPointerButtonEventTracking(this.win);
 
     // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
     if (this.doc.documentElement) {
@@ -116,6 +122,7 @@ export class PageBridgeRuntimeHost {
         const instance = this.getActiveCanvas3dInstance();
         if (instance) {
           this.preRenderEnhancer.ensureHooked(instance);
+          this.ensureActiveObjectHoverLock(instance);
         }
       });
       this.settingsObserver.observe(this.doc.documentElement, {
@@ -132,6 +139,7 @@ export class PageBridgeRuntimeHost {
     const initialInstance = this.getActiveCanvas3dInstance();
     if (initialInstance) {
       this.preRenderEnhancer.ensureHooked(initialInstance);
+      this.ensureActiveObjectHoverLock(initialInstance);
     }
 
     return () => {
@@ -140,6 +148,41 @@ export class PageBridgeRuntimeHost {
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
+  }
+
+  private ensureActiveObjectHoverLock(instance: CvatCanvas3dLike): void {
+    const perspective = instance.view?.views?.perspective as
+      | { rayCaster?: { renderer?: RaycasterLike } }
+      | undefined;
+    lockRaycasterHoverToActiveObject(perspective?.rayCaster?.renderer, () =>
+      this.getActiveObjectClientId(instance)
+    );
+  }
+
+  private getActiveObjectClientId(instance?: CvatCanvas3dLike | null): string | null {
+    if (this.reduxStore) {
+      try {
+        const annotation = this.reduxStore.getState().annotation as
+          | { annotations?: { activatedStateID?: number | null } }
+          | undefined;
+        const activated = annotation?.annotations?.activatedStateID;
+        if (typeof activated === 'number' && Number.isFinite(activated)) {
+          return String(activated);
+        }
+        if (activated === null) {
+          return null;
+        }
+      } catch {
+        // Fall back to Canvas3d model state
+      }
+    }
+    const modelData = (instance?.model as
+      | { data?: { activeElement?: { clientID?: string | number | null } } }
+      | undefined)?.data;
+    const fallback = modelData?.activeElement?.clientID;
+    return fallback !== undefined && fallback !== null && String(fallback) !== ''
+      ? String(fallback)
+      : null;
   }
 
   private tryMountWorkspaceSettingsCheckboxes(): void {
@@ -235,6 +278,7 @@ export class PageBridgeRuntimeHost {
               const activeInstance = this.getActiveCanvas3dInstance();
               if (activeInstance) {
                 this.preRenderEnhancer.ensureHooked(activeInstance);
+                this.ensureActiveObjectHoverLock(activeInstance);
               }
             },
           };
