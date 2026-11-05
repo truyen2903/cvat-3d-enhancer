@@ -693,7 +693,10 @@ export function evaluateTrackHistoryWarnings(
     }
   }
 
-  const maxSpeedPerFrame = category === 'pedestrian' ? 2.5 : 6.5;
+  // In VinFast dataset, frames are spaced far apart in time (ego + target relative shift is commonly 6m–25m/frame).
+  // Only flag [J] when displacement between adjacent frames is an extreme outlier indicating a swapped/jumped ID.
+  const maxSpeedPerFrame =
+    category === 'pedestrian' ? 16 : category === 'two-wheels' ? 28 : 36;
   const neighborForJump = prevKf ?? nextKf;
   if (neighborForJump) {
     const dt = Math.max(1, Math.abs(currentFrame - neighborForJump.frame));
@@ -706,46 +709,35 @@ export function evaluateTrackHistoryWarnings(
         code: 'J',
         severity: 'error',
         title: 'Nhảy ID / Nhảy vị trí đột ngột',
-        detail: `Dịch chuyển ${distPerFrame.toFixed(2)}m/frame giữa frame ${neighborForJump.frame} và ${currentFrame}`,
+        detail: `Dịch chuyển ${distPerFrame.toFixed(1)}m/frame giữa frame ${neighborForJump.frame} và ${currentFrame} (> ${maxSpeedPerFrame}m/frame)`,
       });
     }
   }
 
-  // 3. [H] Sai hướng (sudden yaw flip or heading opposite to motion trajectory)
-  let headingWarned = false;
-  if (prevKf && Math.abs(currentFrame - prevKf.frame) <= 3) {
-    const yawDiffDeg = radToDeg(normalizeAngleRad(curYaw - Number(prevKf.points[5])));
-    if (yawDiffDeg > 105) {
-      headingWarned = true;
-      warnings.push({
-        code: 'H',
-        severity: 'error',
-        title: 'Sai hướng (lật góc Yaw đột ngột)',
-        detail: `Góc hướng lệch ${yawDiffDeg.toFixed(0)}° so với frame ${prevKf.frame}`,
-      });
+  // 3. [H] Sai hướng: chỉ cần tính hướng Yaw lệch quá 90° so với frame trước hoặc frame sau
+  const yawJumpNeighbors: { frame: number; diffDeg: number }[] = [];
+  if (prevKf) {
+    const prevDiffDeg = radToDeg(normalizeAngleRad(curYaw - Number(prevKf.points[5])));
+    if (prevDiffDeg > 90) {
+      yawJumpNeighbors.push({ frame: prevKf.frame, diffDeg: prevDiffDeg });
     }
   }
-
-  if (!headingWarned) {
-    const startRef = prevKf ?? activeKeyframes.find((k) => k.frame === currentFrame) ?? null;
-    const endRef = nextKf ?? (prevKf ? { frame: currentFrame, points: currentPoints } : null);
-    if (startRef && endRef && endRef.frame > startRef.frame) {
-      const mvX = Number(endRef.points[0]) - Number(startRef.points[0]);
-      const mvY = Number(endRef.points[1]) - Number(startRef.points[1]);
-      const mvDist = Math.hypot(mvX, mvY);
-      if (mvDist >= 0.65) {
-        const moveAngle = Math.atan2(mvY, mvX);
-        const diffDeg = radToDeg(normalizeAngleRad(curYaw - moveAngle));
-        if (diffDeg > 110) {
-          warnings.push({
-            code: 'H',
-            severity: 'warning',
-            title: 'Sai hướng (ngược chiều di chuyển)',
-            detail: `Hướng box lệch ${diffDeg.toFixed(0)}° so với quỹ đạo di chuyển (${mvDist.toFixed(2)}m)`,
-          });
-        }
-      }
+  if (nextKf) {
+    const nextDiffDeg = radToDeg(normalizeAngleRad(curYaw - Number(nextKf.points[5])));
+    if (nextDiffDeg > 90) {
+      yawJumpNeighbors.push({ frame: nextKf.frame, diffDeg: nextDiffDeg });
     }
+  }
+  if (yawJumpNeighbors.length > 0) {
+    const detailParts = yawJumpNeighbors.map(
+      (n) => `${n.diffDeg.toFixed(0)}° so với frame ${n.frame}`
+    );
+    warnings.push({
+      code: 'H',
+      severity: 'error',
+      title: 'Sai hướng (lệch góc Yaw > 90°)',
+      detail: `Góc hướng lệch ${detailParts.join(', ')}`,
+    });
   }
 
   return warnings;

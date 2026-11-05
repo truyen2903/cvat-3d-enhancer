@@ -106,10 +106,10 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
         outside: false,
         occluded: false,
       },
-      // Frame 1: standing (same attributes!), moved +15m along +X (jump > 2.5m/f -> [J]), L=0.92 (unsynced -> [S]), yaw=Math.PI (180 deg flip -> [H])
+      // Frame 1: standing (same attributes!), moved +22m along +X (extreme jump > 16m/f -> [J]), L=0.92 (unsynced -> [S]), yaw=Math.PI (180 deg > 90 deg flip -> [H])
       {
         frame: 1,
-        points: [15.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
+        points: [22.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
         attributes: { 6258: 'adult', 6259: 'standing' },
         outside: false,
         occluded: false,
@@ -117,7 +117,7 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
       // Frame 2: short missing gap (outside=true for frames 2..3 -> [M])
       {
         frame: 2,
-        points: [15.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
+        points: [22.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
         attributes: { 6258: 'adult', 6259: 'standing' },
         outside: true,
         occluded: false,
@@ -125,7 +125,7 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
       // Frame 4: reappears with pose changed to sitting and H=1.1 (should NOT count as [S] against frame 0's H=1.7!)
       {
         frame: 4,
-        points: [16.0, 0, 0, 0, 0, 0, 0.8, 0.8, 1.1],
+        points: [25.0, 0, 0, 0, 0, 0, 0.8, 0.8, 1.1],
         attributes: { 6258: 'adult', 6259: 'sitting' },
         outside: false,
         occluded: false,
@@ -134,7 +134,7 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
 
     const warningsAtFrame1 = evaluateTrackHistoryWarnings(
       1,
-      [15.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
+      [22.0, 0, 0, 0, 0, Math.PI, 0.92, 0.8, 1.7],
       { 6258: 'adult', 6259: 'standing' },
       keyframes,
       'pedestrian'
@@ -144,6 +144,34 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     expect(codesAtFrame1).toContain('H');
     expect(codesAtFrame1).toContain('J');
     expect(codesAtFrame1).toContain('M');
+
+    // Verify normal VinFast multi-meter shift between frames (e.g. 12m/frame on vehicles) does NOT trigger [J],
+    // and moving opposite to sensor ego vector with yaw diff <= 90° does NOT trigger [H]:
+    const normalVinFastVehicleKfs = [
+      {
+        frame: 10,
+        points: [25.0, 0, 0, 0, 0, 0, 4.4, 1.85, 1.65],
+        attributes: { 6257: 'car' },
+        outside: false,
+        occluded: false,
+      },
+      {
+        frame: 11,
+        points: [13.0, 0, 0, 0, 0, 0.2, 4.4, 1.85, 1.65], // shifted 12m in sensor frame, yaw diff ~11.5° <= 90°
+        attributes: { 6257: 'car' },
+        outside: false,
+        occluded: false,
+      },
+    ];
+    const normalWarnings = evaluateTrackHistoryWarnings(
+      11,
+      [13.0, 0, 0, 0, 0, 0.2, 4.4, 1.85, 1.65],
+      { 6257: 'car' },
+      normalVinFastVehicleKfs,
+      'vehicles'
+    );
+    expect(normalWarnings.some((w) => w.code === 'J')).toBe(false);
+    expect(normalWarnings.some((w) => w.code === 'H')).toBe(false);
 
     const missingWarning = warningsAtFrame1.find((w) => w.code === 'M');
     expect(missingWarning?.detail).toContain('2..3');
