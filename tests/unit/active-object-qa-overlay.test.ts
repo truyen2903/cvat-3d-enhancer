@@ -4,6 +4,7 @@ import {
   evaluateActiveObjectQaReport,
   evaluateSpatialAndPointCloudWarnings,
   evaluateTrackHistoryWarnings,
+  extractSidebarDomLabelAndAttributes,
   QA_OVERLAY_ELEMENT_ID,
   renderActiveObjectQaOverlayDom,
   resolveDimensionThresholdRule,
@@ -306,5 +307,69 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     // Disabling or passing null hides the overlay
     renderActiveObjectQaOverlayDom(document, null, true);
     expect(overlayEl?.style.display).toBe('none');
+  });
+
+  it('skips all QA checks and returns null when outside is enabled (directly, inherited from preceding keyframe, or in sidebar DOM)', () => {
+    const violatingPoints = [70, 0, 5, 0, 0, 0, 9.0, 3.0, 3.0];
+
+    // 1. Direct outside=true on state
+    expect(
+      evaluateActiveObjectQaReport({
+        clientID: 9,
+        frame: 10,
+        stateOnCurrentFrame: {
+          clientID: 9,
+          frame: 10,
+          outside: true,
+          label: { name: 'vehicles' },
+          attributes: { 6257: 'car' },
+          points: violatingPoints,
+        },
+      })
+    ).toBeNull();
+
+    // 2. Inherited outside=true on non-keyframe frame 11 after outside=true keyframe at frame 10
+    expect(
+      evaluateActiveObjectQaReport({
+        clientID: 9,
+        frame: 11,
+        stateOnCurrentFrame: {
+          clientID: 9,
+          frame: 11,
+          outside: false,
+          label: { name: 'vehicles' },
+          attributes: { 6257: 'car' },
+          points: violatingPoints,
+          keyframes: {
+            0: { frame: 0, points: violatingPoints, outside: false },
+            10: { frame: 10, points: violatingPoints, outside: true },
+          },
+        } as unknown as Record<string, unknown>,
+      })
+    ).toBeNull();
+
+    // 3. Sidebar DOM .cvat-object-item-button-outside-enabled
+    document.body.innerHTML = `
+      <div id="cvat-objects-sidebar-state-item-9">
+        <span class="cvat-object-item-button-outside cvat-object-item-button-outside-enabled"></span>
+      </div>
+    `;
+    const domExtracted = extractSidebarDomLabelAndAttributes(document, 9);
+    expect(domExtracted.isOutsideInDom).toBe(true);
+    expect(
+      evaluateActiveObjectQaReport({
+        clientID: 9,
+        frame: 5,
+        stateOnCurrentFrame: {
+          clientID: 9,
+          frame: 5,
+          outside: false,
+          label: { name: 'vehicles' },
+          attributes: { 6257: 'car' },
+          points: violatingPoints,
+        },
+        isOutsideOnCurrentFrame: domExtracted.isOutsideInDom,
+      })
+    ).toBeNull();
   });
 });

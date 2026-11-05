@@ -118,7 +118,9 @@ export function extractSidebarDomLabelAndAttributes(
   }
 
   const isOutsideInDom = Boolean(
-    itemEl.querySelector('.cvat-object-item-button-outside-enabled')
+    itemEl.querySelector(
+      '.cvat-object-item-button-outside-enabled, [class*="button-outside-enabled"]'
+    )
   );
 
   const labelSelectText = itemEl
@@ -469,9 +471,22 @@ export function extractTrackKeyframes(
     }
   }
 
-  const rawShapes: CvatSerializedTrackShape[] = Array.isArray(track?.shapes)
+  let rawShapes: CvatSerializedTrackShape[] = Array.isArray(track?.shapes)
     ? [...track.shapes].sort((a, b) => Number(a.frame) - Number(b.frame))
     : [];
+
+  if (rawShapes.length === 0) {
+    const fallbackKeyframes = (state as { keyframes?: Record<string, CvatSerializedTrackShape> })
+      .keyframes;
+    if (fallbackKeyframes && typeof fallbackKeyframes === 'object') {
+      rawShapes = Object.entries(fallbackKeyframes)
+        .map(([frameKey, val]) => ({
+          ...val,
+          frame: Number(val?.frame ?? frameKey),
+        }))
+        .sort((a, b) => Number(a.frame) - Number(b.frame));
+    }
+  }
 
   if (rawShapes.length === 0) {
     return [];
@@ -1007,16 +1022,26 @@ export function evaluateActiveObjectQaReport(params: {
   } = params;
 
   const state = stateOnCurrentFrame ?? drawnEntry?.state ?? null;
-  const keyframes = state ? extractTrackKeyframes(state) : [];
-  const kfAtCurrentFrame = keyframes.find((k) => k.frame === frame);
-  const isOutside =
+  if (
     Boolean(isOutsideOnCurrentFrame) ||
     Boolean(state?.outside) ||
     Boolean(drawnEntry?.data?.outside) ||
-    Boolean(drawnEntry?.state?.outside) ||
-    Boolean(kfAtCurrentFrame?.outside);
+    Boolean(drawnEntry?.state?.outside)
+  ) {
+    return null;
+  }
 
-  if (isOutside) {
+  const keyframes = state ? extractTrackKeyframes(state) : [];
+  let effectiveKf: ResolvedKeyframeShape | undefined;
+  for (const k of keyframes) {
+    if (k.frame <= frame) {
+      effectiveKf = k;
+    } else {
+      break;
+    }
+  }
+  const firstKf = keyframes[0];
+  if (effectiveKf?.outside || (firstKf !== undefined && frame < firstKf.frame)) {
     return null;
   }
   const points =
@@ -1073,7 +1098,7 @@ export function evaluateActiveObjectQaReport(params: {
     clientID,
     currentPoints: points,
     occluded,
-    outside: isOutside,
+    outside: false,
     drawnObjects,
     positionArray,
   });

@@ -309,11 +309,20 @@ export class PageBridgeRuntimeHost {
       Boolean(stateOnCurrentFrame?.outside) ||
       Boolean(drawnEntry?.data?.outside) ||
       Boolean(drawnEntry?.state?.outside);
+
+    if (isOutside) {
+      const outsideSig = `${clientID}@${frame}::outside`;
+      if (force || this.lastQaSignature !== outsideSig) {
+        this.lastQaSignature = outsideSig;
+        renderActiveObjectQaOverlayDom(this.doc, null, true);
+      }
+      return;
+    }
+
     const attrSig = JSON.stringify({
       s: stateOnCurrentFrame?.attributes ?? {},
       d: domAttributes,
       l: domLabelName ?? '',
-      o: isOutside ? 1 : 0,
     });
     const ptsSig = pts
       .slice(0, 9)
