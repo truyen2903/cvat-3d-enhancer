@@ -17,6 +17,7 @@ export interface Cvat3dWorkspaceRenderOptions {
   readonly enableScattering: boolean;
   readonly colorPointsByCuboid: boolean;
   readonly fixedOrthoPointSize?: boolean;
+  readonly followActiveObject?: boolean;
 }
 
 export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Object.freeze({
@@ -24,6 +25,7 @@ export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Obje
   enableScattering: false,
   colorPointsByCuboid: false,
   fixedOrthoPointSize: true,
+  followActiveObject: true,
 });
 
 export const CLIENT_SETTINGS_STORAGE_KEY = 'clientSettings' as const;
@@ -186,6 +188,8 @@ function normalizeRenderOptionsRecord(obj: Record<string, unknown>): Cvat3dWorks
     colorPointsByCuboid: Boolean(obj.colorPointsByCuboid),
     fixedOrthoPointSize:
       typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
+    followActiveObject:
+      typeof obj.followActiveObject === 'boolean' ? obj.followActiveObject : true,
   };
 }
 
@@ -246,7 +250,9 @@ export function readRenderOptionsFromClientSettings(
         clientSettingsOptions.enableScattering !== standaloneOptions.enableScattering ||
         clientSettingsOptions.colorPointsByCuboid !== standaloneOptions.colorPointsByCuboid ||
         (clientSettingsOptions.fixedOrthoPointSize ?? true) !==
-          (standaloneOptions.fixedOrthoPointSize ?? true))
+          (standaloneOptions.fixedOrthoPointSize ?? true) ||
+        (clientSettingsOptions.followActiveObject ?? true) !==
+          (standaloneOptions.followActiveObject ?? true))
     ) {
       try {
         writeRenderOptionsToClientSettings(
@@ -306,6 +312,7 @@ export function writeRenderOptionsToClientSettings(
     enableScattering: Boolean(options.enableScattering),
     colorPointsByCuboid: Boolean(options.colorPointsByCuboid),
     fixedOrthoPointSize: options.fixedOrthoPointSize ?? true,
+    followActiveObject: options.followActiveObject ?? true,
   };
 
   root.workspace = {
@@ -885,6 +892,7 @@ export class Cvat3dPreRenderEnhancer {
       ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
       ...initialOptions,
       fixedOrthoPointSize: initialOptions.fixedOrthoPointSize ?? true,
+      followActiveObject: initialOptions.followActiveObject ?? true,
     };
   }
 
@@ -907,6 +915,7 @@ export class Cvat3dPreRenderEnhancer {
     this.options = {
       ...next,
       fixedOrthoPointSize: nextOrthoFixed,
+      followActiveObject: next.followActiveObject ?? true,
     };
     if (changed) {
       this.dirty = true;
@@ -1628,6 +1637,10 @@ export function injectCvatWorkspaceSettingsControls(
     if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
     if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
     if (orthoInput) syncCheckboxVisualState(orthoInput, opts.fixedOrthoPointSize ?? true);
+    const followInput = existing.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="followActiveObject"]'
+    );
+    if (followInput) syncCheckboxVisualState(followInput, opts.followActiveObject ?? true);
     return true;
   }
 
@@ -1664,14 +1677,21 @@ export function injectCvatWorkspaceSettingsControls(
       title: 'Fixed 3.5px point size in Top/Side/Front views',
       description: 'Lock point size to 3.5px in orthographic views (uncheck to follow CVAT default)',
     },
+    {
+      key: 'followActiveObject',
+      rowClass: 'cvat-workspace-settings-3d-follow-active-object',
+      title: 'Keep active object fixed on screen when changing frames',
+      description:
+        'Move the 3D perspective camera with the active object so it stays at the same screen position on Next/Previous frame',
+    },
   ];
 
   const initialOpts = getOptions();
 
   for (const item of items) {
     const isChecked =
-      item.key === 'fixedOrthoPointSize'
-        ? (initialOpts.fixedOrthoPointSize ?? true)
+      item.key === 'fixedOrthoPointSize' || item.key === 'followActiveObject'
+        ? (initialOpts[item.key] ?? true)
         : Boolean(initialOpts[item.key]);
 
     const row = doc.createElement('div');

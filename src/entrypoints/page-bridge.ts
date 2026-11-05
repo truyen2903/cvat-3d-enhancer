@@ -31,6 +31,12 @@ import {
   lockRaycasterHoverToActiveObject,
   type RaycasterLike,
 } from '../integration/cvat/runtime/hover-lock';
+import {
+  ActiveObjectCameraFollower,
+  attachActiveObjectCameraFollow,
+  type FollowModelLike,
+  type FollowViewLike,
+} from '../integration/cvat/runtime/camera-follow';
 
 interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
@@ -84,6 +90,11 @@ export class PageBridgeRuntimeHost {
   private readonly knownDomCanvases = new WeakSet<HTMLCanvasElement>();
   private domBackedViewRef: CvatInternalViewLike | null = null;
   private lastDomCanvasRef: HTMLCanvasElement | null = null;
+  private readonly cameraFollower = new ActiveObjectCameraFollower(
+    () => this.getActiveObjectClientId(this.cachedInstance),
+    () => this.preRenderEnhancer.getOptions().followActiveObject ?? true
+  );
+  private cachedInstance: CvatCanvas3dLike | null = null;
 
   public constructor(
     sessionToken: string,
@@ -151,12 +162,24 @@ export class PageBridgeRuntimeHost {
   }
 
   private ensureActiveObjectHoverLock(instance: CvatCanvas3dLike): void {
+    this.cachedInstance = instance;
     const perspective = instance.view?.views?.perspective as
       | { rayCaster?: { renderer?: RaycasterLike } }
       | undefined;
     lockRaycasterHoverToActiveObject(perspective?.rayCaster?.renderer, () =>
       this.getActiveObjectClientId(instance)
     );
+
+    // Keep the active object pinned at the same screen position across frame changes
+    const perspCamera = (instance.view?.views?.perspective as { camera?: unknown } | undefined)
+      ?.camera;
+    if (perspCamera) {
+      attachActiveObjectCameraFollow(
+        instance.view as unknown as FollowViewLike,
+        this.cameraFollower,
+        () => instance.model as FollowModelLike | undefined
+      );
+    }
   }
 
   private getActiveObjectClientId(instance?: CvatCanvas3dLike | null): string | null {
@@ -270,7 +293,9 @@ export class PageBridgeRuntimeHost {
                 inStorage.enableScattering !== currentOpts.enableScattering ||
                 inStorage.colorPointsByCuboid !== currentOpts.colorPointsByCuboid ||
                 (inStorage.fixedOrthoPointSize ?? true) !==
-                  (currentOpts.fixedOrthoPointSize ?? true)
+                  (currentOpts.fixedOrthoPointSize ?? true) ||
+                (inStorage.followActiveObject ?? true) !==
+                  (currentOpts.followActiveObject ?? true)
               ) {
                 writeRenderOptionsToClientSettings(currentOpts, this.win.localStorage);
               }
@@ -512,6 +537,7 @@ export class PageBridgeRuntimeHost {
         enableScattering: config.enableScattering ?? current.enableScattering,
         colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
         fixedOrthoPointSize: current.fixedOrthoPointSize ?? true,
+        followActiveObject: current.followActiveObject ?? true,
       };
       writeRenderOptionsToClientSettings(next, this.win.localStorage);
       this.preRenderEnhancer.setOptions(next, canvasInstance);

@@ -46,6 +46,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       enableScattering: true,
       colorPointsByCuboid: false,
       fixedOrthoPointSize: true,
+      followActiveObject: true,
     });
   });
 
@@ -70,6 +71,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       enableScattering: false,
       colorPointsByCuboid: true,
       fixedOrthoPointSize: false,
+      followActiveObject: true,
     });
 
     // clientSettings must be healed while keeping CVAT's own values
@@ -485,6 +487,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       enableScattering: false,
       colorPointsByCuboid: false,
       fixedOrthoPointSize: true,
+      followActiveObject: true,
     });
     enhancer.ensureHooked(canvas3d);
     expect(perspPoints.material.size).toBe(0.05);
