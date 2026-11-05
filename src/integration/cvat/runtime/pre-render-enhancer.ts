@@ -441,15 +441,39 @@ export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): str
   return undefined;
 }
 
+/**
+ * Persistent per-session / per-background cache mapping each cuboid's `clientID` (or `serverID`)
+ * to its assigned internal point cloud RGB color (`[r, g, b]`), so that switching across frames
+ * (Next/Prev frame) ALWAYS renders the exact same cached point color for the same box ID.
+ */
+const cuboidPointColorCacheWhiteBg = new Map<number, [number, number, number]>();
+const cuboidPointColorCacheBlackBg = new Map<number, [number, number, number]>();
+
+export function clearCuboidPointColorCache(): void {
+  cuboidPointColorCacheWhiteBg.clear();
+  cuboidPointColorCacheBlackBg.clear();
+}
+
 export function getDistinctCuboidColor(
   clientID: number,
   fallbackIndex: number,
   whiteBackground: boolean,
   labelColorHex?: string
 ): [number, number, number] {
+  const hasStableId = Number.isFinite(clientID) && clientID >= 0;
+  const stableId = hasStableId ? Math.floor(clientID) : -1;
+  const cache = whiteBackground ? cuboidPointColorCacheWhiteBg : cuboidPointColorCacheBlackBg;
+
+  if (hasStableId) {
+    const cached = cache.get(stableId);
+    if (cached) {
+      return [cached[0], cached[1], cached[2]];
+    }
+  }
+
   const palette = whiteBackground ? WHITE_BG_BOX_PALETTE : BLACK_BG_BOX_PALETTE;
   const bgRgb: readonly [number, number, number] = whiteBackground ? [1, 1, 1] : [0, 0, 0];
-  const idNum = Number.isFinite(clientID) && clientID >= 0 ? Math.floor(clientID) : fallbackIndex;
+  const idNum = hasStableId ? stableId : fallbackIndex;
   // Knuth multiplicative hash for pseudo-random per-cuboid color distribution
   const hashedIndex = Math.abs((idNum * 2654435761) >>> 0) % palette.length;
 
@@ -457,7 +481,11 @@ export function getDistinctCuboidColor(
     typeof labelColorHex === 'string' && /^#?[0-9a-fA-F]{6}$/.test(labelColorHex.trim());
   if (!hasValidLabelColor) {
     const entry = palette[hashedIndex]!;
-    return [entry[0], entry[1], entry[2]];
+    const chosen: [number, number, number] = [entry[0], entry[1], entry[2]];
+    if (hasStableId) {
+      cache.set(stableId, chosen);
+    }
+    return [chosen[0], chosen[1], chosen[2]];
   }
 
   const labelRgb = parseHexColorToNormalizedRgb(labelColorHex!);
@@ -486,14 +514,18 @@ export function getDistinctCuboidColor(
     const bgContrast = computeWcagContrastRatio(candidate, bgRgb);
 
     // If the candidate has strong perceptual distance, distinct hue family (>= 65°),
-    // and clear contrast against both background and the box's translucent interior, return it.
+    // and clear contrast against both background and the box's translucent interior, lock & cache it.
     if (
       boxDist >= MIN_BOX_PERCEPTUAL_DIST &&
       hueDiff >= MIN_HUE_SEPARATION_DEG &&
       bgContrast >= MIN_BG_CONTRAST_RATIO &&
       interiorDist >= 0.35
     ) {
-      return [candidate[0], candidate[1], candidate[2]];
+      const chosen: [number, number, number] = [candidate[0], candidate[1], candidate[2]];
+      if (hasStableId) {
+        cache.set(stableId, chosen);
+      }
+      return [chosen[0], chosen[1], chosen[2]];
     }
 
     const score =
@@ -508,7 +540,11 @@ export function getDistinctCuboidColor(
     }
   }
 
-  return [bestEntry[0], bestEntry[1], bestEntry[2]];
+  const chosen: [number, number, number] = [bestEntry[0], bestEntry[1], bestEntry[2]];
+  if (hasStableId) {
+    cache.set(stableId, chosen);
+  }
+  return [chosen[0], chosen[1], chosen[2]];
 }
 
 export function normalizedRgbToHex(r: number, g: number, b: number): string {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
   type CvatObjectStateLike,
+  clearCuboidPointColorCache,
   computeHueSeparationDegrees,
   computePerceptualColorDistance,
   computeWcagContrastRatio,
@@ -592,12 +593,13 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(trackShapes[10]!.points[6]).toBeCloseTo(4.0, 4);
   });
 
-  it('guarantees high contrast against both background and cuboid labelColor for internal box points', () => {
+  it('guarantees high contrast against both background and cuboid labelColor for internal box points and caches color per clientID across frames', () => {
     const labelColors = ['#0047c7', '#40ff73', '#ff0000', '#c794ff', '#ffd11a', '#008040'];
 
     for (const whiteBackground of [true, false]) {
       const bgRgb: readonly [number, number, number] = whiteBackground ? [1, 1, 1] : [0, 0, 0];
       for (const labelHex of labelColors) {
+        clearCuboidPointColorCache();
         const labelRgb = parseHexColorToNormalizedRgb(labelHex);
         for (let id = 1; id <= 24; id += 1) {
           const pointRgb = getDistinctCuboidColor(id, id, whiteBackground, labelHex);
@@ -608,6 +610,11 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
           expect(bgContrast).toBeGreaterThanOrEqual(4.2);
           expect(boxDist).toBeGreaterThanOrEqual(0.5);
           expect(hueDiff).toBeGreaterThanOrEqual(65);
+
+          // Subsequent lookups for the same clientID on later frames MUST return the exact cached color
+          // even if fallbackIndex or transient labelColorHex differs
+          const cachedOnNextFrame = getDistinctCuboidColor(id, id + 99, whiteBackground, undefined);
+          expect(cachedOnNextFrame).toEqual(pointRgb);
         }
       }
     }
