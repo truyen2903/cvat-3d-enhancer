@@ -401,11 +401,21 @@ export function computeHueSeparationDegrees(
 }
 
 /**
- * Extracts the actual rendered color of a 3D cuboid box in normalized RGB or hex string.
- * Checks `cuboid.perspective.material.color` first (which reflects CVAT's active ColorBy mode:
- * Label, Instance, or Group), then `data.labelColor`, `state.label.color`, `data.color`, `state.color`.
+ * Extracts the native CVAT Label color of a 3D cuboid box (`data.labelColor` or `state.label.color`).
+ * Also checks `cuboid.perspective.material.color` as fallback if labelColor is not directly populated.
  */
 export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): string | undefined {
+  const stateLabelColor = (
+    entry?.state as { label?: { color?: string }; color?: string } | undefined
+  )?.label?.color;
+
+  for (const labelCandidate of [entry?.data?.labelColor, stateLabelColor]) {
+    if (typeof labelCandidate === 'string' && /^#?[0-9a-fA-F]{6}$/.test(labelCandidate.trim())) {
+      const clean = labelCandidate.trim();
+      return clean.startsWith('#') ? clean : `#${clean}`;
+    }
+  }
+
   const meshColor = entry?.cuboid?.perspective?.material?.color;
   if (
     meshColor &&
@@ -419,26 +429,44 @@ export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): str
     return normalizedRgbToHex(meshColor.r, meshColor.g, meshColor.b);
   }
 
-  const stateLabelColor = (
-    entry?.state as { label?: { color?: string }; color?: string } | undefined
-  )?.label?.color;
   const stateColor = (entry?.state as { color?: string } | undefined)?.color;
-
-  const candidates = [
-    entry?.data?.labelColor,
-    stateLabelColor,
-    entry?.data?.color,
-    stateColor,
-    entry?.data?.groupColor,
-  ];
-
-  for (const c of candidates) {
+  for (const c of [entry?.data?.color, stateColor, entry?.data?.groupColor]) {
     if (typeof c === 'string' && /^#?[0-9a-fA-F]{6}$/.test(c.trim())) {
       const clean = c.trim();
       return clean.startsWith('#') ? clean : `#${clean}`;
     }
   }
   return undefined;
+}
+
+/**
+ * Ensures the 3D cuboid box mesh (`perspective`, `top`, `side`, `front`) keeps its native CVAT
+ * Label color (`data.labelColor` / `state.label.color`) WITHOUT calling `cuboid.setColor()`,
+ * because `cuboid.setColor()` in CVAT overwrites `this.wireframe.material.color` (which would
+ * destroy CVAT's white/configured `outlinedBorders`).
+ */
+export function ensureCuboidKeepsLabelColor(entry?: CvatDrawnObjectEntry): string | undefined {
+  const stateLabelColor = (
+    entry?.state as { label?: { color?: string } } | undefined
+  )?.label?.color;
+  const rawLabelColor = entry?.data?.labelColor ?? stateLabelColor;
+  const labelColor =
+    typeof rawLabelColor === 'string' && /^#?[0-9a-fA-F]{6}$/.test(rawLabelColor.trim())
+      ? rawLabelColor.trim().startsWith('#')
+        ? rawLabelColor.trim()
+        : `#${rawLabelColor.trim()}`
+      : undefined;
+
+  if (labelColor && entry?.cuboid) {
+    for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
+      const matColor = entry.cuboid[viewKey]?.material?.color;
+      if (matColor && typeof matColor.set === 'function') {
+        matColor.set(labelColor);
+      }
+    }
+  }
+
+  return labelColor;
 }
 
 /**
@@ -685,13 +713,11 @@ export function compileOrientedCuboids(
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
     const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
-    const labelColor =
-      typeof data?.labelColor === 'string' && data.labelColor.trim().startsWith('#')
-        ? data.labelColor.trim()
-        : undefined;
-
-    // Never call `entry.cuboid.setColor(...)` here — leave the cuboid box 100% untouched at CVAT's native default/configured color!
-    const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry) ?? labelColor;
+    // Keep the 3D cuboid box face material at its native CVAT Label color (`data.labelColor`)
+    // without touching `cuboid.wireframe` (outlinedBorders), while assigning each box ID
+    // its own distinct, cached internal point color!
+    const labelColor = ensureCuboidKeepsLabelColor(entry);
+    const renderedBoxColorHex = labelColor ?? resolveRenderedCuboidColorHex(entry);
     const [r, g, b] = getDistinctCuboidColor(
       clientID,
       boxIdx,

@@ -110,6 +110,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     const box1SetColorSpy = vi.fn();
     const box2SetColorSpy = vi.fn();
+    const box1MatColorSetSpy = vi.fn();
+    const box2MatColorSetSpy = vi.fn();
 
     const mockCanvas3d: CvatInternalCanvas3dLike = {
       model: {
@@ -139,6 +141,11 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
             },
             cuboid: {
               setColor: box1SetColorSpy,
+              perspective: {
+                material: {
+                  color: { r: 1, g: 0, b: 0, set: box1MatColorSetSpy },
+                },
+              },
             },
           },
           2: {
@@ -152,6 +159,11 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
             },
             cuboid: {
               setColor: box2SetColorSpy,
+              perspective: {
+                material: {
+                  color: { r: 1, g: 0, b: 0, set: box2MatColorSetSpy },
+                },
+              },
             },
           },
         },
@@ -171,9 +183,12 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const expectedBox1 = getDistinctCuboidColor(1, 0, true, '#ff0000');
     const expectedBox2 = getDistinctCuboidColor(2, 1, true, '#ff0000');
 
-    // Cuboid boxes themselves must NOT be overridden or re-configured by enhancer (left at CVAT default)
+    // Cuboid boxes keep their Label color (#ff0000) via mesh material.color.set('#ff0000')
+    // without calling cuboid.setColor() (which would overwrite CVAT's wireframe outlinedBorders)
     expect(box1SetColorSpy).not.toHaveBeenCalled();
     expect(box2SetColorSpy).not.toHaveBeenCalled();
+    expect(box1MatColorSetSpy).toHaveBeenCalledWith('#ff0000');
+    expect(box2MatColorSetSpy).toHaveBeenCalledWith('#ff0000');
 
     // Box #1 and Box #2 must have distinct colors even though both share the same labelColor
     expect(expectedBox1).not.toEqual(expectedBox2);
