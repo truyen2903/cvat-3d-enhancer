@@ -269,7 +269,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(setClearColorSpy).toHaveBeenCalledWith(0xffffff, 1);
   });
 
-  it('defaults Top/Side/Front orthographic views to fixed 2.5px point size and reverts to CVAT 0.5px when unchecked', () => {
+  it('defaults Top/Side/Front orthographic views to fixed 3.5px point size and reverts to CVAT 0.5px when unchecked', () => {
     const perspPoints = {
       type: 'Points',
       geometry: {
@@ -316,8 +316,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const enhancer = new Cvat3dPreRenderEnhancer();
     enhancer.ensureHooked(canvas3d);
 
-    // By default (fixedOrthoPointSize: true), orthographic view point size is fixed at 2.5px
-    expect(topPoints.material.size).toBe(2.5);
+    // By default (fixedOrthoPointSize: true), orthographic view point size is fixed at 3.5px
+    expect(topPoints.material.size).toBe(3.5);
     expect(topPoints.material.sizeAttenuation).toBe(false);
     expect(perspPoints.material.size).toBe(0.05);
 
@@ -390,7 +390,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(activeCuboidTopMat.depthWrite).toBe(false);
   });
 
-  it('applies 2.5px fixed point size to newly opened zoomed Top/Side/Front canvases (both via views and via THREE.Points.prototype.onBeforeRender)', () => {
+  it('applies 3.5px fixed point size to newly opened zoomed Top/Side/Front canvases (both via views and via THREE.Points.prototype.onBeforeRender)', () => {
     class MockThreePoints {
       public type = 'Points';
       public geometry = {
@@ -458,7 +458,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       zoomPointsStandalone.material
     );
 
-    expect(zoomPointsStandalone.material.size).toBe(2.5);
+    expect(zoomPointsStandalone.material.size).toBe(3.5);
     expect(zoomPointsStandalone.material.sizeAttenuation).toBe(false);
 
     // 2. Also simulate a zoom canvas mounted into view.views['ortho_zoom_0'] on the same frame
@@ -470,7 +470,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     };
     enhancer.ensureHooked(canvas3d);
 
-    expect(zoomPointsInViews.material.size).toBe(2.5);
+    expect(zoomPointsInViews.material.size).toBe(3.5);
     expect(zoomPointsInViews.material.sizeAttenuation).toBe(false);
   });
 

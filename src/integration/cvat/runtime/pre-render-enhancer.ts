@@ -1196,9 +1196,9 @@ export class Cvat3dPreRenderEnhancer {
       ptsObj.material = mat;
     }
 
-    const useFixedOrtho25px = this.options.fixedOrthoPointSize ?? true;
-    const targetSize = isPerspective ? 0.05 : useFixedOrtho25px ? 2.5 : 0.5;
-    const targetAttenuation = isPerspective ? true : !useFixedOrtho25px;
+    const useFixedOrtho35px = this.options.fixedOrthoPointSize ?? true;
+    const targetSize = isPerspective ? 0.05 : useFixedOrtho35px ? 3.5 : 0.5;
+    const targetAttenuation = isPerspective ? true : !useFixedOrtho35px;
 
     const needsShaderUpdate =
       mat.sizeAttenuation !== targetAttenuation ||
@@ -1498,8 +1498,8 @@ export function injectCvatWorkspaceSettingsControls(
     {
       key: 'fixedOrthoPointSize',
       rowClass: 'cvat-workspace-settings-3d-ortho-point-size',
-      title: 'Fixed 2.5px point size in Top/Side/Front views',
-      description: 'Lock point size to 2.5px in orthographic views (uncheck to follow CVAT default)',
+      title: 'Fixed 3.5px point size in Top/Side/Front views',
+      description: 'Lock point size to 3.5px in orthographic views (uncheck to follow CVAT default)',
     },
   ];
 
