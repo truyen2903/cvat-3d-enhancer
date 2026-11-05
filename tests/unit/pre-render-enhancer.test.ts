@@ -103,6 +103,9 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const origRenderSpy = vi.fn();
     const origNotifySpy = vi.fn();
 
+    const box1SetColorSpy = vi.fn();
+    const box2SetColorSpy = vi.fn();
+
     const mockCanvas3d: CvatInternalCanvas3dLike = {
       model: {
         data: {
@@ -129,7 +132,9 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
               hidden: false,
               outside: false,
             },
-            cuboid: {},
+            cuboid: {
+              setColor: box1SetColorSpy,
+            },
           },
           2: {
             data: {
@@ -140,7 +145,9 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
               hidden: false,
               outside: false,
             },
-            cuboid: {},
+            cuboid: {
+              setColor: box2SetColorSpy,
+            },
           },
         },
         notify: origNotifySpy,
@@ -156,8 +163,12 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     enhancer.ensureHooked(mockCanvas3d);
 
-    const expectedBox1 = getDistinctCuboidColor(1, 0, true);
-    const expectedBox2 = getDistinctCuboidColor(2, 1, true);
+    const expectedBox1 = getDistinctCuboidColor(1, 0, true, '#ff0000');
+    const expectedBox2 = getDistinctCuboidColor(2, 1, true, '#ff0000');
+
+    // Cuboid boxes themselves must keep their labelColor (#ff0000)
+    expect(box1SetColorSpy).toHaveBeenCalledWith('#ff0000');
+    expect(box2SetColorSpy).toHaveBeenCalledWith('#ff0000');
 
     // Box #1 and Box #2 must have distinct colors even though both share the same labelColor
     expect(expectedBox1).not.toEqual(expectedBox2);

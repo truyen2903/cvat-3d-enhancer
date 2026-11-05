@@ -311,11 +311,23 @@ export const OVERLAP_RGB_BLACK_BG: readonly [number, number, number] = [1.0, 0.1
 export function getDistinctCuboidColor(
   clientID: number,
   fallbackIndex: number,
-  whiteBackground: boolean
+  whiteBackground: boolean,
+  labelColorHex?: string
 ): [number, number, number] {
   const palette = whiteBackground ? WHITE_BG_BOX_PALETTE : BLACK_BG_BOX_PALETTE;
   const idNum = Number.isFinite(clientID) && clientID >= 0 ? Math.floor(clientID) : fallbackIndex;
-  const entry = palette[idNum % palette.length]!;
+  // Knuth multiplicative hash for pseudo-random per-cuboid color distribution
+  const hashedIndex = Math.abs((idNum * 2654435761) >>> 0) % palette.length;
+  let entry = palette[hashedIndex]!;
+
+  if (typeof labelColorHex === 'string' && /^#?[0-9a-fA-F]{6}$/.test(labelColorHex.trim())) {
+    const [lr, lg, lb] = parseHexColorToNormalizedRgb(labelColorHex);
+    const dist = Math.hypot(entry[0] - lr, entry[1] - lg, entry[2] - lb);
+    if (dist < 0.35) {
+      entry = palette[(hashedIndex + 1) % palette.length]!;
+    }
+  }
+
   return [entry[0], entry[1], entry[2]];
 }
 
@@ -457,7 +469,17 @@ export function compileOrientedCuboids(
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
     const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
-    const [r, g, b] = getDistinctCuboidColor(clientID, boxIdx, whiteBackground);
+    const labelColor =
+      typeof data?.labelColor === 'string' && data.labelColor.trim().startsWith('#')
+        ? data.labelColor.trim()
+        : undefined;
+
+    // Ensure the 3D cuboid box itself always keeps its native CVAT label color
+    if (labelColor && typeof entry?.cuboid?.setColor === 'function') {
+      entry.cuboid.setColor(labelColor);
+    }
+
+    const [r, g, b] = getDistinctCuboidColor(clientID, boxIdx, whiteBackground, labelColor);
     boxIdx += 1;
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame
