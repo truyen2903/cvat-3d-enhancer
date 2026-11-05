@@ -109,12 +109,17 @@ export function extractSidebarDomLabelAndAttributes(
 ): {
   readonly labelName?: string;
   readonly domAttributes: Record<string, string>;
+  readonly isOutsideInDom: boolean;
 } {
   const domAttributes: Record<string, string> = {};
   const itemEl = doc.getElementById(`cvat-objects-sidebar-state-item-${clientID}`);
   if (!itemEl) {
-    return { domAttributes };
+    return { domAttributes, isOutsideInDom: false };
   }
+
+  const isOutsideInDom = Boolean(
+    itemEl.querySelector('.cvat-object-item-button-outside-enabled')
+  );
 
   const labelSelectText = itemEl
     .querySelector('.cvat-objects-sidebar-state-item-label-selector .ant-select-selection-item')
@@ -154,7 +159,7 @@ export function extractSidebarDomLabelAndAttributes(
     }
   }
 
-  return { labelName, domAttributes };
+  return { labelName, domAttributes, isOutsideInDom };
 }
 
 /**
@@ -299,6 +304,7 @@ export function resolveDimensionThresholdRule(
             maxL: 2.0,
             minW: 0.6,
             maxW: 0.9,
+            minH: 1.2,
             maxH: 1.8,
           },
     };
@@ -531,22 +537,36 @@ export function evaluateTrackHistoryWarnings(
   const curW = Number(currentPoints[7]);
   const curH = Number(currentPoints[8]);
 
-  // 1. [S] Không đồng bộ kích thước (only compare active keyframes with 100% matching attributes!)
+  // 1. [S] Không đồng bộ kích thước
+  // - Standard categories: compare L, W, H across active keyframes with 100% matching attributes.
+  // - `two-wheels`: when `ride_state` is present/active, `W` is allowed to change size across frames,
+  //   while `H` and `L` must ALWAYS fit across frames (L across all active frames, H across matching ride_state frames).
   const unsyncedDims = new Set<'L' | 'W' | 'H'>();
   const unsyncedFrames: number[] = [];
   const dimTol = 0.015;
+  const isTwoWheels = category === 'two-wheels';
 
   for (const kf of keyframes) {
     if (kf.outside || kf.frame === currentFrame || kf.points.length < 9) {
       continue;
     }
-    if (!haveIdenticalAttributes(currentAttributes, kf.attributes)) {
+    const sameAttrs = haveIdenticalAttributes(currentAttributes, kf.attributes);
+    if (!sameAttrs && !isTwoWheels) {
       continue;
     }
     const dL = Math.abs(Number(kf.points[6]) - curL);
     const dW = Math.abs(Number(kf.points[7]) - curW);
     const dH = Math.abs(Number(kf.points[8]) - curH);
-    if (dL > dimTol || dW > dimTol || dH > dimTol) {
+
+    if (isTwoWheels) {
+      // For two-wheels: W is allowed to vary across frames; L and H must always fit across frames
+      const checkH = sameAttrs || Object.keys(currentAttributes).length === 0;
+      if (dL > dimTol || (checkH && dH > dimTol)) {
+        if (dL > dimTol) unsyncedDims.add('L');
+        if (checkH && dH > dimTol) unsyncedDims.add('H');
+        unsyncedFrames.push(kf.frame);
+      }
+    } else if (dL > dimTol || dW > dimTol || dH > dimTol) {
       if (dL > dimTol) unsyncedDims.add('L');
       if (dW > dimTol) unsyncedDims.add('W');
       if (dH > dimTol) unsyncedDims.add('H');
@@ -691,15 +711,16 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   readonly clientID: number;
   readonly currentPoints: readonly number[];
   readonly occluded?: boolean;
+  readonly outside?: boolean;
   readonly drawnObjects?: Record<number | string, CvatDrawnObjectEntry | undefined>;
   readonly positionArray?: Float32Array | number[] | null;
 }): {
   readonly lidarPointCount: number | null;
   readonly warnings: QaWarningItem[];
 } {
-  const { clientID, currentPoints, occluded, drawnObjects, positionArray } = params;
+  const { clientID, currentPoints, occluded, outside, drawnObjects, positionArray } = params;
   const warnings: QaWarningItem[] = [];
-  if (currentPoints.length < 9) {
+  if (outside || currentPoints.length < 9) {
     return { lidarPointCount: null, warnings };
   }
 
@@ -754,7 +775,7 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
         warnings.push({
           code: 'F',
           severity: 'error',
-          title: 'Thừa box / Trùng lặp vị trí',
+          title: 'Thừa box / Trùng lặp vị trí (đang tắt Outside)',
           detail: `Chồng lấn với Box ID #${otherId} (tâm cách ${centerDistXY.toFixed(2)}m)`,
         });
         break;
@@ -873,13 +894,13 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
     }
   }
 
-  // 3. [F] Sparse point cloud check (< 6 points inside box per guide_13.json section 4.2)
-  if (insideCount < 6 && !occluded) {
+  // 3. [F] Sparse point cloud check (< 6 points inside box when outside is OFF per guide_13.json section 4.2)
+  if (!outside && insideCount < 6 && !occluded) {
     warnings.push({
       code: 'F',
       severity: 'error',
-      title: 'Thừa box / Quá ít điểm LiDAR',
-      detail: `Chỉ có ${insideCount} điểm LiDAR trong box (quy chuẩn >= 6 điểm)`,
+      title: 'Thừa box (đang tắt Outside)',
+      detail: `Đang tắt Outside khi trong box chỉ có ${insideCount} điểm LiDAR (quy chuẩn >= 6 điểm)`,
     });
   }
 
@@ -971,6 +992,7 @@ export function evaluateActiveObjectQaReport(params: {
   readonly positionArray?: Float32Array | number[] | null;
   readonly fallbackLabelName?: string;
   readonly domAttributes?: Record<string, string>;
+  readonly isOutsideOnCurrentFrame?: boolean;
 }): ActiveObjectQaReport | null {
   const {
     clientID,
@@ -981,9 +1003,22 @@ export function evaluateActiveObjectQaReport(params: {
     positionArray,
     fallbackLabelName,
     domAttributes,
+    isOutsideOnCurrentFrame,
   } = params;
 
   const state = stateOnCurrentFrame ?? drawnEntry?.state ?? null;
+  const keyframes = state ? extractTrackKeyframes(state) : [];
+  const kfAtCurrentFrame = keyframes.find((k) => k.frame === frame);
+  const isOutside =
+    Boolean(isOutsideOnCurrentFrame) ||
+    Boolean(state?.outside) ||
+    Boolean(drawnEntry?.data?.outside) ||
+    Boolean(drawnEntry?.state?.outside) ||
+    Boolean(kfAtCurrentFrame?.outside);
+
+  if (isOutside) {
+    return null;
+  }
   const points =
     Array.isArray(state?.points) && state.points.length >= 9
       ? state.points
@@ -1022,7 +1057,6 @@ export function evaluateActiveObjectQaReport(params: {
 
   // Step 3: Track history checks ([S], [H], [J], [M])
   if (state) {
-    const keyframes = extractTrackKeyframes(state);
     const trackWarnings = evaluateTrackHistoryWarnings(
       frame,
       points,
@@ -1039,6 +1073,7 @@ export function evaluateActiveObjectQaReport(params: {
     clientID,
     currentPoints: points,
     occluded,
+    outside: isOutside,
     drawnObjects,
     positionArray,
   });

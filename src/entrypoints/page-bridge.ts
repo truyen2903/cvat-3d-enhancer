@@ -299,14 +299,21 @@ export class PageBridgeRuntimeHost {
       stateOnCurrentFrame?.frame ?? instance.model?.data?.imageID ?? domFrameAttr ?? 0
     );
 
-    const { labelName: domLabelName, domAttributes } = extractSidebarDomLabelAndAttributes(
-      this.doc,
-      clientID
-    );
+    const {
+      labelName: domLabelName,
+      domAttributes,
+      isOutsideInDom,
+    } = extractSidebarDomLabelAndAttributes(this.doc, clientID);
+    const isOutside =
+      isOutsideInDom ||
+      Boolean(stateOnCurrentFrame?.outside) ||
+      Boolean(drawnEntry?.data?.outside) ||
+      Boolean(drawnEntry?.state?.outside);
     const attrSig = JSON.stringify({
       s: stateOnCurrentFrame?.attributes ?? {},
       d: domAttributes,
       l: domLabelName ?? '',
+      o: isOutside ? 1 : 0,
     });
     const ptsSig = pts
       .slice(0, 9)
@@ -329,6 +336,7 @@ export class PageBridgeRuntimeHost {
       positionArray: posArray,
       fallbackLabelName: domLabelName,
       domAttributes,
+      isOutsideOnCurrentFrame: isOutside,
     });
 
     renderActiveObjectQaOverlayDom(this.doc, report, true);

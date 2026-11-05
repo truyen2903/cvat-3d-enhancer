@@ -60,10 +60,16 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     });
     expect(riderResolved.rule.subtypeLabel).toContain('rider');
     expect(noRiderResolved.rule.subtypeLabel).toContain('without rider');
+    expect(noRiderResolved.rule.minH).toBe(1.2);
+    expect(noRiderResolved.rule.maxH).toBe(1.8);
 
-    // H=1.1m is INVALID when ride_state=true (requires H in [1.5, 1.8]), but VALID when ride_state=false (requires H <= 1.8)
-    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.1, riderResolved.rule)?.code).toBe('K');
-    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.1, noRiderResolved.rule)).toBeNull();
+    // H=1.3m is INVALID when ride_state=true (requires H in [1.5, 1.8]), but VALID when ride_state=false (requires H in [1.2, 1.8])
+    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.3, riderResolved.rule)?.code).toBe('K');
+    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.3, noRiderResolved.rule)).toBeNull();
+    // H=1.1m (< 1.2m) is INVALID even when ride_state=false (minH = 1.2m)
+    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.1, noRiderResolved.rule)?.code).toBe(
+      'K'
+    );
 
     // 4. pedestrian + pose=standing / bending / sitting (id 6259 from labels_job_1867.json)
     const standingResolved = resolveDimensionThresholdRule({
@@ -140,6 +146,43 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
 
     const missingWarning = warningsAtFrame1.find((w) => w.code === 'M');
     expect(missingWarning?.detail).toContain('2..3');
+
+    // For two-wheels with ride_state: W is allowed to vary across frames, while H and L must always fit across frames
+    const twoWheelKeyframes = [
+      {
+        frame: 0,
+        points: [0, 0, 0, 0, 0, 0, 1.75, 0.65, 1.65],
+        attributes: { 6260: 'true', 6261: 'motorcycle' },
+        outside: false,
+        occluded: false,
+      },
+      {
+        frame: 1,
+        // W changed from 0.65 to 0.85, but L=1.75 and H=1.65 are identical -> NO [S] warning!
+        points: [1.5, 0, 0, 0, 0, 0, 1.75, 0.85, 1.65],
+        attributes: { 6260: 'true', 6261: 'motorcycle' },
+        outside: false,
+        occluded: false,
+      },
+    ];
+    const twoWheelWarnOk = evaluateTrackHistoryWarnings(
+      1,
+      [1.5, 0, 0, 0, 0, 0, 1.75, 0.85, 1.65],
+      { 6260: 'true', 6261: 'motorcycle' },
+      twoWheelKeyframes,
+      'two-wheels'
+    );
+    expect(twoWheelWarnOk.some((w) => w.code === 'S')).toBe(false);
+
+    // If H or L changes on two-wheels, [S] MUST trigger!
+    const twoWheelWarnMismatchHL = evaluateTrackHistoryWarnings(
+      1,
+      [1.5, 0, 0, 0, 0, 0, 1.85, 0.85, 1.65],
+      { 6260: 'true', 6261: 'motorcycle' },
+      twoWheelKeyframes,
+      'two-wheels'
+    );
+    expect(twoWheelWarnMismatchHL.some((w) => w.code === 'S')).toBe(true);
   });
 
   it('detects [Z] floating/underground box, [F] overlapping/sparse box, [T] loose box, [P] cutting LiDAR points, and [D] far distance', () => {
@@ -204,6 +247,16 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
       positionArray: null,
     });
     expect(farResult.warnings.map((w) => w.code)).toContain('D');
+
+    // Verify [F] is NOT reported when outside=true on the current frame
+    const outsideResult = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: activePoints,
+      outside: true,
+      drawnObjects,
+      positionArray: new Float32Array([0, 0, 0]),
+    });
+    expect(outsideResult.warnings).toHaveLength(0);
   });
 
   it('renders and hides the QA overlay DOM banner inside .cvat-canvas3d-perspective', () => {
