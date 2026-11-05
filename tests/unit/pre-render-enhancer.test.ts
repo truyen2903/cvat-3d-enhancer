@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
   type CvatObjectStateLike,
+  computePerceptualColorDistance,
+  computeWcagContrastRatio,
   Cvat3dPreRenderEnhancer,
   getDistinctCuboidColor,
   injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   OVERLAP_RGB_WHITE_BG,
+  parseHexColorToNormalizedRgb,
   readRenderOptionsFromClientSettings,
   syncTrackCuboidDimension,
   writeRenderOptionsToClientSettings,
@@ -571,5 +574,24 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(trackShapes[0]!.points[6]).toBeCloseTo(4.8, 4);
     expect(trackShapes[15]!.points[6]).toBeCloseTo(4.8, 4);
     expect(trackShapes[10]!.points[6]).toBeCloseTo(4.0, 4);
+  });
+
+  it('guarantees high contrast against both background and cuboid labelColor for internal box points', () => {
+    const labelColors = ['#0047c7', '#40ff73', '#ff0000', '#c794ff', '#ffd11a', '#008040'];
+
+    for (const whiteBackground of [true, false]) {
+      const bgRgb: readonly [number, number, number] = whiteBackground ? [1, 1, 1] : [0, 0, 0];
+      for (const labelHex of labelColors) {
+        const labelRgb = parseHexColorToNormalizedRgb(labelHex);
+        for (let id = 1; id <= 24; id += 1) {
+          const pointRgb = getDistinctCuboidColor(id, id, whiteBackground, labelHex);
+          const bgContrast = computeWcagContrastRatio(pointRgb, bgRgb);
+          const boxDist = computePerceptualColorDistance(pointRgb, labelRgb);
+
+          expect(bgContrast).toBeGreaterThanOrEqual(4.2);
+          expect(boxDist).toBeGreaterThanOrEqual(0.42);
+        }
+      }
+    }
   });
 });
