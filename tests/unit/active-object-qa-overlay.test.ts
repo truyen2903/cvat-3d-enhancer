@@ -269,14 +269,37 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     expect(codes).toContain('T');
     expect(codes).toContain('P');
 
-    // Also verify [D] when object is > 60m away
-    const farResult = evaluateSpatialAndPointCloudWarnings({
+    // Verify [D] does NOT trigger at <= 80m (e.g. ~68m), and DOES trigger when > 80m away
+    const under80Result = evaluateSpatialAndPointCloudWarnings({
       clientID: 1,
       currentPoints: [65, 20, 0, 0, 0, 0, 4.2, 1.8, 1.6],
       drawnObjects: {},
       positionArray: null,
     });
+    expect(under80Result.warnings.map((w) => w.code)).not.toContain('D');
+
+    const farResult = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: [75, 35, 0, 0, 0, 0, 4.2, 1.8, 1.6],
+      drawnObjects: {},
+      positionArray: null,
+    });
     expect(farResult.warnings.map((w) => w.code)).toContain('D');
+
+    // Also verify [D] when only `pos` is provided (without 9-DoF points)
+    const posOnlyReport = evaluateActiveObjectQaReport({
+      clientID: 11,
+      frame: 0,
+      stateOnCurrentFrame: {
+        clientID: 11,
+        frame: 0,
+        label: { name: 'vehicles' },
+        pos: { x: 60, y: 60, z: -1.2 }, // d = sqrt(3600 + 3600 + 1.44) ~ 84.86m > 80m
+      },
+    });
+    expect(posOnlyReport).not.toBeNull();
+    expect(posOnlyReport?.distanceMeters).toBeGreaterThan(80);
+    expect(posOnlyReport?.warnings.some((w) => w.code === 'D')).toBe(true);
 
     // Verify [F] is NOT reported when outside=true on the current frame
     const outsideResult = evaluateSpatialAndPointCloudWarnings({

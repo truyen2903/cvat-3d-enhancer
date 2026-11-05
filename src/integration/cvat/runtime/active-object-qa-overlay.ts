@@ -110,11 +110,36 @@ export function extractSidebarDomLabelAndAttributes(
   readonly labelName?: string;
   readonly domAttributes: Record<string, string>;
   readonly isOutsideInDom: boolean;
+  readonly domPos?: { readonly x: number; readonly y: number; readonly z: number } | null;
 } {
+  let domPos: { readonly x: number; readonly y: number; readonly z: number } | null = null;
+  const hudCandidates = doc.querySelectorAll<HTMLElement>(
+    '.cvat-canvas3d-perspective [class*="hud"], .cvat-canvas3d-perspective [class*="info"], .cvat-canvas3d-perspective div'
+  );
+  for (const el of hudCandidates) {
+    if (el.id === 'cvat-3d-enhancer-active-qa-overlay' || el.children.length > 8) {
+      continue;
+    }
+    const txt = el.textContent ?? '';
+    if (!/pos/i.test(txt)) continue;
+    const m = /pos(?:ition)?\s*[:=]?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?)(?:\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?))?\s*\)?/i.exec(
+      txt
+    );
+    if (m) {
+      const x = Number(m[1]);
+      const y = Number(m[2]);
+      const z = m[3] !== undefined && Number.isFinite(Number(m[3])) ? Number(m[3]) : 0;
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        domPos = { x, y, z };
+        break;
+      }
+    }
+  }
+
   const domAttributes: Record<string, string> = {};
   const itemEl = doc.getElementById(`cvat-objects-sidebar-state-item-${clientID}`);
   if (!itemEl) {
-    return { domAttributes, isOutsideInDom: false };
+    return { domAttributes, isOutsideInDom: false, domPos };
   }
 
   const isOutsideInDom = Boolean(
@@ -161,7 +186,7 @@ export function extractSidebarDomLabelAndAttributes(
     }
   }
 
-  return { labelName, domAttributes, isOutsideInDom };
+  return { labelName, domAttributes, isOutsideInDom, domPos };
 }
 
 /**
@@ -726,17 +751,85 @@ export function evaluateTrackHistoryWarnings(
   return warnings;
 }
 
+export const MAX_SENSOR_DISTANCE_METERS = 80;
+
+/**
+ * Calculates distance `d` (in meters) from sensor origin `(0, 0, 0)` given `pos` `(x, y, z)`.
+ * Falls back to 2D `hypot(x, y)` if `z` is omitted or non-finite.
+ */
+export function computeDistanceFromPos(cx: number, cy: number, cz?: number): number {
+  if (typeof cz === 'number' && Number.isFinite(cz)) {
+    return Math.hypot(cx, cy, cz);
+  }
+  return Math.hypot(cx, cy);
+}
+
+/**
+ * Extracts `(x, y, z)` position from any supported `pos` / `position` / `points` structure,
+ * including `{ x, y, z }`, `[x, y, z]`, `cuboid.perspective.position`, or HUD text `Pos: (x, y, z)`.
+ */
+export function extractPosCoordinates(
+  source?: unknown,
+  drawnEntry?: CvatDrawnObjectEntry | null,
+  fallbackPos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null
+): { readonly x: number; readonly y: number; readonly z: number } | null {
+  const tryVec = (val: unknown): { readonly x: number; readonly y: number; readonly z: number } | null => {
+    if (!val) return null;
+    if (Array.isArray(val) && val.length >= 2) {
+      const x = Number(val[0]);
+      const y = Number(val[1]);
+      const z = val.length >= 3 && Number.isFinite(Number(val[2])) ? Number(val[2]) : 0;
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        return { x, y, z };
+      }
+    } else if (typeof val === 'object') {
+      const rec = val as Record<string, unknown>;
+      const x = Number(rec.x ?? rec[0]);
+      const y = Number(rec.y ?? rec[1]);
+      const rawZ = Number(rec.z ?? rec[2]);
+      const z = Number.isFinite(rawZ) ? rawZ : 0;
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        return { x, y, z };
+      }
+    }
+    return null;
+  };
+
+  if (source && typeof source === 'object') {
+    const rec = source as Record<string, unknown>;
+    const fromPoints = tryVec(rec.points);
+    if (fromPoints) return fromPoints;
+    const fromPos = tryVec(rec.pos ?? rec.position);
+    if (fromPos) return fromPos;
+  }
+
+  if (drawnEntry) {
+    const fromDataPoints = tryVec(drawnEntry.data?.points);
+    if (fromDataPoints) return fromDataPoints;
+    const fromDataPos = tryVec(
+      (drawnEntry.data as { pos?: unknown; position?: unknown } | undefined)?.pos ??
+        (drawnEntry.data as { pos?: unknown; position?: unknown } | undefined)?.position
+    );
+    if (fromDataPos) return fromDataPos;
+    const fromCuboidPos = tryVec(drawnEntry.cuboid?.perspective?.position);
+    if (fromCuboidPos) return fromCuboidPos;
+  }
+
+  return tryVec(fallbackPos);
+}
+
 /**
  * Evaluates spatial & LiDAR point cloud geometry warnings on the current frame:
  * - `Z`: Độ cao ngoài ngưỡng / box bị bay, bị âm đường
  * - `F`: Thừa box (overlapping box on same frame or < 6 LiDAR points inside box)
  * - `T`: Sai kích thước (box too loose around internal LiDAR points)
  * - `P`: Lỗi sai vị trí (box wall cutting into mid-body LiDAR points or off-center)
- * - `D`: Khoảng cách quá xa
+ * - `D`: Khoảng cách quá xa (> 80m, tự tính `d` từ `pos` nếu chỉ có `pos`)
  */
 export function evaluateSpatialAndPointCloudWarnings(params: {
   readonly clientID: number;
   readonly currentPoints: readonly number[];
+  readonly pos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null;
   readonly occluded?: boolean;
   readonly outside?: boolean;
   readonly drawnObjects?: Record<number | string, CvatDrawnObjectEntry | undefined>;
@@ -745,15 +838,44 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   readonly lidarPointCount: number | null;
   readonly warnings: QaWarningItem[];
 } {
-  const { clientID, currentPoints, occluded, outside, drawnObjects, positionArray } = params;
+  const { clientID, currentPoints, pos, occluded, outside, drawnObjects, positionArray } = params;
   const warnings: QaWarningItem[] = [];
-  if (outside || currentPoints.length < 9) {
+  if (outside) {
     return { lidarPointCount: null, warnings };
   }
 
-  const cx = Number(currentPoints[0]);
-  const cy = Number(currentPoints[1]);
-  const cz = Number(currentPoints[2]);
+  const resolvedPos =
+    currentPoints.length >= 2
+      ? {
+          x: Number(currentPoints[0]),
+          y: Number(currentPoints[1]),
+          z: currentPoints.length >= 3 && Number.isFinite(Number(currentPoints[2])) ? Number(currentPoints[2]) : 0,
+        }
+      : extractPosCoordinates({ pos }, drawnObjects?.[clientID] ?? null, pos);
+
+  if (!resolvedPos || !Number.isFinite(resolvedPos.x) || !Number.isFinite(resolvedPos.y)) {
+    return { lidarPointCount: null, warnings };
+  }
+
+  const cx = resolvedPos.x;
+  const cy = resolvedPos.y;
+  const cz = resolvedPos.z;
+  const distanceMeters = computeDistanceFromPos(cx, cy, cz);
+
+  // 1. [D] Khoảng cách quá xa (> 80m, tự tính d từ pos)
+  if (distanceMeters > MAX_SENSOR_DISTANCE_METERS) {
+    warnings.push({
+      code: 'D',
+      severity: 'warning',
+      title: 'Khoảng cách quá xa',
+      detail: `Cách cảm biến d=${distanceMeters.toFixed(1)}m (> ${MAX_SENSOR_DISTANCE_METERS}m)`,
+    });
+  }
+
+  if (currentPoints.length < 9) {
+    return { lidarPointCount: null, warnings };
+  }
+
   const rx = Number(currentPoints[3]) || 0;
   const ry = Number(currentPoints[4]) || 0;
   const rz = Number(currentPoints[5]) || 0;
@@ -765,17 +887,6 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   const hy = W * 0.5;
   const hz = H * 0.5;
   const bottomZ = cz - hz;
-  const distanceMeters = Math.hypot(cx, cy);
-
-  // 1. [D] Khoảng cách quá xa
-  if (distanceMeters > 60) {
-    warnings.push({
-      code: 'D',
-      severity: 'warning',
-      title: 'Khoảng cách quá xa',
-      detail: `Cách cảm biến ${distanceMeters.toFixed(1)}m (> 60m)`,
-    });
-  }
 
   // 2. [F] Check overlapping / duplicate box on the same frame
   if (drawnObjects) {
@@ -1014,12 +1125,18 @@ export function evaluateActiveObjectQaReport(params: {
   readonly stateOnCurrentFrame?: (CvatObjectStateLike & {
     label?: CvatLabelLike;
     label_id?: number;
+    pos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
+    position?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
   }) | null;
   readonly drawnObjects?: Record<number | string, CvatDrawnObjectEntry | undefined>;
   readonly positionArray?: Float32Array | number[] | null;
   readonly fallbackLabelName?: string;
   readonly domAttributes?: Record<string, string>;
   readonly isOutsideOnCurrentFrame?: boolean;
+  readonly fallbackPos?:
+    | readonly number[]
+    | { readonly x: number; readonly y: number; readonly z?: number }
+    | null;
 }): ActiveObjectQaReport | null {
   const {
     clientID,
@@ -1031,6 +1148,7 @@ export function evaluateActiveObjectQaReport(params: {
     fallbackLabelName,
     domAttributes,
     isOutsideOnCurrentFrame,
+    fallbackPos,
   } = params;
 
   const state = stateOnCurrentFrame ?? drawnEntry?.state ?? null;
@@ -1056,25 +1174,32 @@ export function evaluateActiveObjectQaReport(params: {
   if (effectiveKf?.outside || (firstKf !== undefined && frame < firstKf.frame)) {
     return null;
   }
+
+  const meshPersp = drawnEntry?.cuboid?.perspective;
+  const meshPoints =
+    meshPersp?.position && meshPersp?.scale
+      ? [
+          Number(meshPersp.position.x),
+          Number(meshPersp.position.y),
+          Number(meshPersp.position.z),
+          Number(meshPersp.rotation?.x ?? 0),
+          Number(meshPersp.rotation?.y ?? 0),
+          Number(meshPersp.rotation?.z ?? 0),
+          Number(meshPersp.scale.x),
+          Number(meshPersp.scale.y),
+          Number(meshPersp.scale.z),
+        ]
+      : null;
+
   const points =
     Array.isArray(state?.points) && state.points.length >= 9
       ? state.points
       : Array.isArray(drawnEntry?.data?.points) && drawnEntry.data.points.length >= 9
         ? drawnEntry.data.points
-        : null;
+        : meshPoints;
 
-  if (!points) {
-    return null;
-  }
-
-  const L = Number(points[6]);
-  const W = Number(points[7]);
-  const H = Number(points[8]);
-  const cx = Number(points[0]);
-  const cy = Number(points[1]);
-  const cz = Number(points[2]);
-
-  if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) {
+  const posOnly = extractPosCoordinates(state, drawnEntry, fallbackPos);
+  if (!points && !posOnly) {
     return null;
   }
 
@@ -1086,6 +1211,44 @@ export function evaluateActiveObjectQaReport(params: {
   );
   const warnings: QaWarningItem[] = [];
 
+  if (!points && posOnly) {
+    // Only `pos` is available -> calculate `d` from `pos` and evaluate [D] (> 80m)
+    const distanceMeters = computeDistanceFromPos(posOnly.x, posOnly.y, posOnly.z);
+    const spatial = evaluateSpatialAndPointCloudWarnings({
+      clientID,
+      currentPoints: [posOnly.x, posOnly.y, posOnly.z],
+      pos: posOnly,
+      outside: false,
+      drawnObjects,
+      positionArray: null,
+    });
+    warnings.push(...spatial.warnings);
+
+    return {
+      clientID,
+      frame,
+      labelName,
+      subtypeLabel: rule.subtypeLabel,
+      dimensions: { L: 0, W: 0, H: 0 },
+      distanceMeters,
+      bottomZ: posOnly.z,
+      lidarPointCount: null,
+      thresholdRule: rule,
+      warnings,
+    };
+  }
+
+  const L = Number(points![6]);
+  const W = Number(points![7]);
+  const H = Number(points![8]);
+  const cx = Number(points![0]);
+  const cy = Number(points![1]);
+  const cz = Number(points![2]);
+
+  if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) {
+    return null;
+  }
+
   // Step 2: [K] Dimension threshold check
   const kWarning = checkDimensionThresholdViolation(L, W, H, rule);
   if (kWarning) {
@@ -1096,7 +1259,7 @@ export function evaluateActiveObjectQaReport(params: {
   if (state) {
     const trackWarnings = evaluateTrackHistoryWarnings(
       frame,
-      points,
+      points!,
       state.attributes ?? {},
       keyframes,
       rule.category
@@ -1108,7 +1271,8 @@ export function evaluateActiveObjectQaReport(params: {
   const occluded = Boolean((state as { occluded?: boolean } | null)?.occluded);
   const spatial = evaluateSpatialAndPointCloudWarnings({
     clientID,
-    currentPoints: points,
+    currentPoints: points!,
+    pos: posOnly,
     occluded,
     outside: false,
     drawnObjects,
@@ -1122,7 +1286,7 @@ export function evaluateActiveObjectQaReport(params: {
     labelName,
     subtypeLabel: rule.subtypeLabel,
     dimensions: { L, W, H },
-    distanceMeters: Math.hypot(cx, cy),
+    distanceMeters: computeDistanceFromPos(cx, cy, cz),
     bottomZ: cz - H * 0.5,
     lidarPointCount: spatial.lidarPointCount,
     thresholdRule: rule,
@@ -1229,7 +1393,11 @@ export function renderActiveObjectQaOverlayDom(
 
   const dimSpan = doc.createElement('span');
   dimSpan.style.cssText = 'color: #e2e8f0; font-weight: 500;';
-  dimSpan.textContent = `L:${report.dimensions.L.toFixed(2)} W:${report.dimensions.W.toFixed(2)} H:${report.dimensions.H.toFixed(2)}m${ptsBadge}`;
+  const distText = ` • d:${report.distanceMeters.toFixed(1)}m`;
+  dimSpan.textContent =
+    report.dimensions.L > 0 || report.dimensions.W > 0 || report.dimensions.H > 0
+      ? `L:${report.dimensions.L.toFixed(2)} W:${report.dimensions.W.toFixed(2)} H:${report.dimensions.H.toFixed(2)}m${distText}${ptsBadge}`
+      : `d:${report.distanceMeters.toFixed(1)}m${ptsBadge}`;
 
   headerDiv.appendChild(idBadge);
   headerDiv.appendChild(attrBadge);

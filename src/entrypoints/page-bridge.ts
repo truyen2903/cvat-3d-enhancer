@@ -43,7 +43,11 @@ import {
   getPerspectivePointCloudPositions,
   renderActiveObjectQaOverlayDom,
 } from '../integration/cvat/runtime/active-object-qa-overlay';
-import { OrthoViewMaximizer } from '../integration/cvat/runtime/ortho-view-maximizer';
+import { OrthoViewMaximizer, type OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
+import {
+  OrthoCuboidEditor,
+  type OrthoCameraLike,
+} from '../integration/cvat/runtime/ortho-cuboid-editor';
 
 interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
@@ -125,8 +129,28 @@ export class PageBridgeRuntimeHost {
     this.doc.addEventListener('plugins.ready', onPluginReady);
     this.win.addEventListener('message', this.handleMessage);
     installPointerButtonEventTracking(this.win);
+    // W/A/S/D/Q/E nudge (while zoomed) + edge resize in Top/Side/Front views
+    const orthoEditor = new OrthoCuboidEditor(
+      {
+        getMaximizedView: () => orthoMaximizer.getMaximizedView(),
+        getActivePoints: () => this.getActiveCuboidPoints(),
+        getViewCamera: (view) => this.getOrthoViewCamera(view),
+        previewPoints: (clientID, points) => this.previewCuboidPoints(clientID, points),
+        commitPoints: (clientID, points) => {
+          void this.commitCuboidPoints(clientID, points);
+        },
+      },
+      this.doc,
+      this.win
+    );
     // Keys 1/2/3 toggle maximize of Top/Side/Front orthographic views
-    const uninstallOrthoMaximizer = new OrthoViewMaximizer(this.doc, this.win).install();
+    const orthoMaximizer = new OrthoViewMaximizer(this.doc, this.win, (view) => {
+      if (view === null) {
+        orthoEditor.flushPendingCommit();
+      }
+    });
+    const uninstallOrthoEditor = orthoEditor.install();
+    const uninstallOrthoMaximizer = orthoMaximizer.install();
 
     const onInteractiveChange = (event: Event) => {
       const targetEl = event.target as Element | null;
@@ -187,6 +211,7 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('pointerup', onInteractiveChange, true);
       this.doc.removeEventListener('keyup', onInteractiveChange, true);
       uninstallOrthoMaximizer();
+      uninstallOrthoEditor();
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
@@ -316,6 +341,7 @@ export class PageBridgeRuntimeHost {
       labelName: domLabelName,
       domAttributes,
       isOutsideInDom,
+      domPos,
     } = extractSidebarDomLabelAndAttributes(this.doc, clientID);
     const isOutside =
       isOutsideInDom ||
@@ -336,6 +362,7 @@ export class PageBridgeRuntimeHost {
       s: stateOnCurrentFrame?.attributes ?? {},
       d: domAttributes,
       l: domLabelName ?? '',
+      pos: domPos ?? null,
     });
     const ptsSig = pts
       .slice(0, 9)
@@ -359,6 +386,7 @@ export class PageBridgeRuntimeHost {
       fallbackLabelName: domLabelName,
       domAttributes,
       isOutsideOnCurrentFrame: isOutside,
+      fallbackPos: domPos,
     });
 
     renderActiveObjectQaOverlayDom(this.doc, report, true);
@@ -433,6 +461,158 @@ export class PageBridgeRuntimeHost {
         this.syncActiveObjectQaOverlay(true);
       },
     });
+  }
+
+  /** Active cuboid (drawn entry + ObjectState) on the current frame. */
+  private resolveActiveCuboid(): {
+    clientID: number;
+    entry: CvatDrawnObjectEntry | null;
+    state: CvatObjectStateLike | null;
+  } | null {
+    const instance = this.getActiveCanvas3dInstance();
+    const clientID = Number(this.getActiveObjectClientId(instance));
+    if (!Number.isFinite(clientID)) {
+      return null;
+    }
+    const entry = instance?.view?.drawnObjects?.[clientID] ?? null;
+    let state: CvatObjectStateLike | null = entry?.state ?? null;
+    if (!state && this.reduxStore) {
+      try {
+        const annotation = this.reduxStore.getState().annotation as
+          | { annotations?: { states?: CvatObjectStateLike[] } }
+          | undefined;
+        const states = annotation?.annotations?.states;
+        if (Array.isArray(states)) {
+          state = states.find((s) => Number(s?.clientID) === clientID) ?? null;
+        }
+      } catch {
+        // Ignore fallback lookup errors
+      }
+    }
+    return { clientID, entry, state };
+  }
+
+  private getActiveCuboidPoints(): { clientID: number; points: number[] } | null {
+    const active = this.resolveActiveCuboid();
+    if (!active || active.state?.lock) {
+      return null;
+    }
+    if (active.state?.shapeType && active.state.shapeType !== 'cuboid') {
+      return null;
+    }
+    const pts =
+      Array.isArray(active.state?.points) && active.state.points.length >= 9
+        ? active.state.points
+        : Array.isArray(active.entry?.data?.points) && active.entry.data.points.length >= 9
+          ? active.entry.data.points
+          : null;
+    return pts ? { clientID: active.clientID, points: [...pts] } : null;
+  }
+
+  private getOrthoViewCamera(view: OrthoViewName): OrthoCameraLike | null {
+    const isOrtho = (cam: unknown): cam is OrthoCameraLike => {
+      const c = cam as OrthoCameraLike | null | undefined;
+      return Boolean(c && typeof c.left === 'number' && c.matrixWorld?.elements);
+    };
+    const instance = this.getActiveCanvas3dInstance();
+    const viewCam = (instance?.view?.views?.[view] as { camera?: unknown } | undefined)?.camera;
+    if (isOrtho(viewCam)) {
+      return viewCam;
+    }
+    const selectors: Record<OrthoViewName, string> = {
+      top: CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER,
+      side: CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER,
+      front: CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER,
+    };
+    const canvas = this.doc.querySelector<HTMLCanvasElement>(`${selectors[view]} canvas`);
+    const rendered = this.preRenderEnhancer.getLastRenderCameraForCanvas(canvas);
+    return isOrtho(rendered) ? rendered : null;
+  }
+
+  /** Live visual update of the active cuboid meshes (no persistence / undo entry). */
+  private previewCuboidPoints(clientID: number, points: number[]): void {
+    const entry = this.getActiveCanvas3dInstance()?.view?.drawnObjects?.[clientID];
+    if (!entry) {
+      return;
+    }
+    const [x, y, z, rx, ry, rz, sx, sy, sz] = points as [
+      number, number, number, number, number, number, number, number, number,
+    ];
+    const cuboid = entry.cuboid as CvatDrawnObjectEntry['cuboid'] & {
+      setPosition?: (x: number, y: number, z: number) => void;
+    };
+    if (typeof cuboid.setPosition === 'function') cuboid.setPosition(x, y, z);
+    if (typeof cuboid.setRotation === 'function') cuboid.setRotation(rx, ry, rz);
+    if (typeof cuboid.setScale === 'function') cuboid.setScale(sx, sy, sz);
+    for (const key of ['perspective', 'top', 'side', 'front'] as const) {
+      const mesh = cuboid[key];
+      if (!mesh) continue;
+      if (mesh.position) Object.assign(mesh.position, { x, y, z });
+      if (mesh.rotation) Object.assign(mesh.rotation, { x: rx, y: ry, z: rz });
+      if (mesh.scale) Object.assign(mesh.scale, { x: sx, y: sy, z: sz });
+    }
+    if (Array.isArray(entry.data?.points)) {
+      for (let i = 0; i < 9; i += 1) entry.data.points[i] = points[i]!;
+    }
+    this.preRenderEnhancer.markDirty();
+    this.preRenderEnhancer.requestViewsRedraw();
+  }
+
+  /** Persists cuboid points through CVAT (same path as the existing dimension tools). */
+  private async commitCuboidPoints(clientID: number, points: number[]): Promise<void> {
+    const active = this.resolveActiveCuboid();
+    const state =
+      active?.clientID === clientID
+        ? active.state
+        : (this.getActiveCanvas3dInstance()?.view?.drawnObjects?.[clientID]?.state ?? null);
+    if (!state || state.lock) {
+      return;
+    }
+    const prev = Array.isArray(state.points) ? state.points : [];
+    const nextPoints = [...points, ...prev.slice(points.length)];
+
+    let dispatchState: CvatObjectStateLike = state;
+    try {
+      state.points = nextPoints;
+      if (state.updateFlags) {
+        state.updateFlags.points = true;
+      }
+      const internalSave = state.__internal?.save;
+      if (typeof internalSave === 'function') {
+        dispatchState = internalSave(Number(state.frame ?? 0), state);
+      } else if (typeof state.save === 'function') {
+        dispatchState = await state.save();
+      }
+    } catch {
+      // Fall back to CVAT's canvas.edited handler below
+    }
+
+    const perspCanvas = this.doc.querySelector<
+      HTMLCanvasElement & {
+        updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+      }
+    >('.cvat-canvas3d-perspective canvas');
+    if (perspCanvas && dispatchState) {
+      if (typeof perspCanvas.updatePosition === 'function') {
+        perspCanvas.updatePosition(dispatchState, [...nextPoints]);
+      } else {
+        perspCanvas.dispatchEvent(
+          new CustomEvent('canvas.edited', {
+            bubbles: false,
+            cancelable: true,
+            detail: { state: dispatchState, points: [...nextPoints] },
+          })
+        );
+      }
+    }
+
+    this.preRenderEnhancer.markDirty();
+    const inst = this.getActiveCanvas3dInstance();
+    if (inst?.view) {
+      this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
+      this.preRenderEnhancer.requestViewsRedraw();
+    }
+    this.syncActiveObjectQaOverlay(true);
   }
 
   private tryHookCvatUIPlugin(): void {
