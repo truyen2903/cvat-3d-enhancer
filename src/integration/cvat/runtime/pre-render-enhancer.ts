@@ -275,18 +275,18 @@ export function parseHexColorToNormalizedRgb(hex: string): [number, number, numb
  * for overlapping regions wrapped by 2+ bounding boxes.
  */
 export const WHITE_BG_BOX_PALETTE: readonly [number, number, number][] = [
-  [0.0, 0.28, 0.78], // #0047c7 Deep Electric Cobalt
-  [0.0, 0.5, 0.25], // #008040 Rich Emerald Green
-  [0.44, 0.12, 0.78], // #701fc7 Deep Royal Violet
-  [0.78, 0.35, 0.0], // #c75900 Dark Burnt Orange
-  [0.0, 0.48, 0.58], // #007a94 Deep Ocean Teal
-  [0.68, 0.05, 0.52], // #ad0d85 Deep Magenta Plum
-  [0.18, 0.22, 0.72], // #2e38b8 Ultramarine Indigo
+  [0.0, 0.25, 0.85], // #0040d9 Deep Electric Cobalt
+  [0.0, 0.5, 0.22], // #008038 Rich Emerald Green
+  [0.52, 0.0, 0.88], // #8500e0 Vivid Royal Violet
+  [0.82, 0.32, 0.0], // #d15200 Dark Burnt Orange
+  [0.0, 0.48, 0.62], // #007a9e Deep Ocean Teal
+  [0.78, 0.0, 0.58], // #c70094 Vivid Magenta Plum
+  [0.18, 0.15, 0.82], // #2e26d1 Ultramarine Indigo
   [0.24, 0.48, 0.0], // #3d7a00 Deep Forest Olive
-  [0.55, 0.24, 0.04], // #8c3d0a Rich Saddle Bronze
-  [0.0, 0.38, 0.68], // #0061ad Deep Cerulean
-  [0.35, 0.1, 0.58], // #591a94 Dark Amethyst
-  [0.02, 0.45, 0.42], // #05736b Dark Pine Cyan
+  [0.62, 0.22, 0.0], // #9e3800 Rich Saddle Bronze
+  [0.0, 0.36, 0.75], // #005cbf Deep Cerulean
+  [0.42, 0.0, 0.68], // #6b00ad Dark Amethyst
+  [0.0, 0.46, 0.44], // #007570 Dark Pine Cyan
 ];
 
 export const BLACK_BG_BOX_PALETTE: readonly [number, number, number][] = [
