@@ -2258,6 +2258,19 @@ export async function syncTrackCuboidDimension(
 
   const internalSave = currentState.__internal?.save;
 
+  const rawLabelName = String(
+    (currentState as { label?: { name?: string } }).label?.name ?? ''
+  )
+    .trim()
+    .toLowerCase();
+  const isTwoWheels =
+    rawLabelName === 'two-wheels' ||
+    rawLabelName === 'two-wheel' ||
+    rawLabelName === 'twowheels' ||
+    rawLabelName === 'two_wheels' ||
+    Number((currentState as { label?: { id?: number }; label_id?: number }).label?.id ??
+      (currentState as { label_id?: number }).label_id) === 36192;
+
   for (const shape of rawShapes) {
     const kfFrame = Number(shape.frame);
     if (!Number.isInteger(kfFrame)) {
@@ -2279,7 +2292,13 @@ export async function syncTrackCuboidDimension(
     const effectiveKfAttrs = kfState?.attributes ?? { ...rollingAttrs };
 
     // MANDATORY CHECK: 100% attribute match with current frame
-    if (!haveIdenticalAttributes(currentAttributes, effectiveKfAttrs)) {
+    // (For two-wheels, H and L must always fit across all frames regardless of ride_state changes)
+    const bypassAttrMatchForTwoWheelsHL =
+      isTwoWheels && (dimension === 'H' || dimension === 'L');
+    if (
+      !bypassAttrMatchForTwoWheelsHL &&
+      !haveIdenticalAttributes(currentAttributes, effectiveKfAttrs)
+    ) {
       skippedAttributeMismatchFrames += 1;
       continue;
     }

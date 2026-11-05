@@ -43,6 +43,7 @@ import {
   getPerspectivePointCloudPositions,
   renderActiveObjectQaOverlayDom,
 } from '../integration/cvat/runtime/active-object-qa-overlay';
+import { OrthoViewMaximizer } from '../integration/cvat/runtime/ortho-view-maximizer';
 
 interface CvatCanvas3dLike extends CvatInternalCanvas3dLike {
   configure?: (config: Record<string, unknown>) => void;
@@ -124,6 +125,8 @@ export class PageBridgeRuntimeHost {
     this.doc.addEventListener('plugins.ready', onPluginReady);
     this.win.addEventListener('message', this.handleMessage);
     installPointerButtonEventTracking(this.win);
+    // Keys 1/2/3 toggle maximize of Top/Side/Front orthographic views
+    const uninstallOrthoMaximizer = new OrthoViewMaximizer(this.doc, this.win).install();
 
     const onInteractiveChange = (event: Event) => {
       const targetEl = event.target as Element | null;
@@ -183,6 +186,7 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('change', onInteractiveChange, true);
       this.doc.removeEventListener('pointerup', onInteractiveChange, true);
       this.doc.removeEventListener('keyup', onInteractiveChange, true);
+      uninstallOrthoMaximizer();
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
@@ -275,6 +279,15 @@ export class PageBridgeRuntimeHost {
     const drawnObjects = instance.view.drawnObjects ?? {};
     const drawnEntry = drawnObjects[clientID] ?? null;
     let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
+
+    if (!stateOnCurrentFrame) {
+      const modelObjects = (instance.model as { objects?: CvatObjectStateLike[] } | undefined)
+        ?.objects;
+      if (Array.isArray(modelObjects)) {
+        stateOnCurrentFrame =
+          modelObjects.find((s) => Number(s?.clientID) === clientID) ?? null;
+      }
+    }
 
     if (!stateOnCurrentFrame && this.reduxStore) {
       try {

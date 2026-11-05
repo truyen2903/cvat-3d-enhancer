@@ -184,6 +184,35 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
       'two-wheels'
     );
     expect(twoWheelWarnMismatchHL.some((w) => w.code === 'S')).toBe(true);
+
+    // Even when ride_state is turned ON ('true') on the current frame while other keyframes still have 'false',
+    // a different H (e.g. 1.72 vs 1.60) MUST still report [S] on H!
+    const twoWheelMixedAttrKeyframes = [
+      {
+        frame: 0,
+        points: [0, 0, 0, 0, 0, 0, 1.75, 0.65, 1.6],
+        attributes: { 6260: 'false', 6261: 'motorcycle' },
+        outside: false,
+        occluded: false,
+      },
+      {
+        frame: 1,
+        points: [1.5, 0, 0, 0, 0, 0, 1.75, 0.85, 1.72],
+        attributes: { 6260: 'true', 6261: 'motorcycle' },
+        outside: false,
+        occluded: false,
+      },
+    ];
+    const twoWheelWarnHWhenRiderOn = evaluateTrackHistoryWarnings(
+      1,
+      [1.5, 0, 0, 0, 0, 0, 1.75, 0.85, 1.72],
+      { 6260: 'true', 6261: 'motorcycle' },
+      twoWheelMixedAttrKeyframes,
+      'two-wheels'
+    );
+    expect(twoWheelWarnHWhenRiderOn.some((w) => w.code === 'S' && w.detail.includes('H'))).toBe(
+      true
+    );
   });
 
   it('detects [Z] floating/underground box, [F] overlapping/sparse box, [T] loose box, [P] cutting LiDAR points, and [D] far distance', () => {

@@ -132,7 +132,7 @@ export function extractSidebarDomLabelAndAttributes(
   const labelName = labelSelectText || fallbackSelectText || undefined;
 
   // Inspect attribute rows inside the collapsed/expanded details section if present
-  const attrRows = itemEl.querySelectorAll('.cvat-object-item-attribute-wrapper, .ant-row');
+  const attrRows = itemEl.querySelectorAll('.cvat-object-item-attribute-wrapper');
   for (const row of attrRows) {
     const attrNameEl = row.querySelector('.ant-typography, label');
     const rawAttrName = attrNameEl?.textContent?.trim().replace(/:$/, '').toLowerCase();
@@ -493,14 +493,27 @@ export function extractTrackKeyframes(
   }
 
   const rollingAttrs: Record<number | string, string> = {};
-  if (state.attributes) {
-    for (const [k, v] of Object.entries(state.attributes)) {
-      rollingAttrs[k] = String(v ?? '');
+  const labelAttrs = (state as { label?: CvatLabelLike }).label?.attributes;
+  if (Array.isArray(labelAttrs)) {
+    for (const spec of labelAttrs) {
+      if (spec && spec.id !== undefined) {
+        const defVal = spec.defaultValue ?? spec.default_value;
+        if (defVal !== undefined) {
+          rollingAttrs[spec.id] = String(defVal);
+        }
+      }
     }
   }
   if (Array.isArray(track?.attributes)) {
     for (const attr of track.attributes) {
       rollingAttrs[attr.spec_id] = String(attr.value ?? '');
+    }
+  }
+  if (state.attributes) {
+    for (const [k, v] of Object.entries(state.attributes)) {
+      if (!(k in rollingAttrs)) {
+        rollingAttrs[k] = String(v ?? '');
+      }
     }
   }
 
@@ -574,11 +587,10 @@ export function evaluateTrackHistoryWarnings(
     const dH = Math.abs(Number(kf.points[8]) - curH);
 
     if (isTwoWheels) {
-      // For two-wheels: W is allowed to vary across frames; L and H must always fit across frames
-      const checkH = sameAttrs || Object.keys(currentAttributes).length === 0;
-      if (dL > dimTol || (checkH && dH > dimTol)) {
+      // For two-wheels: W is allowed to vary across frames; both L and H must ALWAYS fit across frames
+      if (dL > dimTol || dH > dimTol) {
         if (dL > dimTol) unsyncedDims.add('L');
-        if (checkH && dH > dimTol) unsyncedDims.add('H');
+        if (dH > dimTol) unsyncedDims.add('H');
         unsyncedFrames.push(kf.frame);
       }
     } else if (dL > dimTol || dW > dimTol || dH > dimTol) {
