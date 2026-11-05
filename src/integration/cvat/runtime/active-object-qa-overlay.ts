@@ -951,8 +951,8 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   const r21 = -s1 * c2;
   const r22 = c1 * c2;
 
-  // Expanded AABB for fast point scanning (includes 0.8m ring around box for ground Z & boundary cut checks)
-  const marginXY = 0.8;
+  // Expanded AABB for fast point scanning (includes 1.4m ring around box for ground Z & boundary cut checks)
+  const marginXY = 1.4;
   const marginZ = 1.0;
   const maxHalfSpan = Math.hypot(hx + marginXY, hy + marginXY, hz + marginZ);
 
@@ -964,7 +964,9 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   let sumLx = 0;
   let sumLy = 0;
   let boundaryCutCount = 0;
-  const localZSamples: number[] = [];
+  const innerHRelSamples: number[] = [];
+  const underBoxHRelSamples: number[] = [];
+  const ringGroundHRelSamples: number[] = [];
 
   const len = positionArray.length;
   for (let i = 0; i < len; i += 3) {
@@ -987,18 +989,8 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
     const lx = r00 * dx + r01 * dy + r02 * dz;
     const ly = r10 * dx + r11 * dy + r12 * dz;
     const lz = r20 * dx + r21 * dy + r22 * dz;
-
-    // Collect ground reference Z samples inside and right around the box footprint
-    if (
-      Math.abs(lx) <= hx + marginXY &&
-      Math.abs(ly) <= hy + marginXY &&
-      lz >= -hz - 0.9 &&
-      lz <= hz + 0.2
-    ) {
-      if (localZSamples.length < 600) {
-        localZSamples.push(pz);
-      }
-    }
+    // Height relative to the box's bottom face (hRel = 0 at bottomZ, hRel = H at topZ)
+    const hRel = lz + hz;
 
     const insideX = Math.abs(lx) <= hx;
     const insideY = Math.abs(ly) <= hy;
@@ -1006,13 +998,29 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
 
     if (insideX && insideY && insideZ) {
       insideCount += 1;
+      innerHRelSamples.push(hRel);
       if (lx < minLx) minLx = lx;
       if (lx > maxLx) maxLx = lx;
       if (ly < minLy) minLy = ly;
       if (ly > maxLy) maxLy = ly;
       sumLx += lx;
       sumLy += ly;
+    } else if (insideX && insideY && hRel >= -0.85 && hRel < -0.03) {
+      // Points directly underneath the box footprint
+      underBoxHRelSamples.push(hRel);
     } else if (
+      (!insideX || !insideY) &&
+      Math.abs(lx) <= hx + marginXY &&
+      Math.abs(ly) <= hy + marginXY &&
+      hRel >= -0.9 &&
+      hRel <= 0.45
+    ) {
+      // Ground ring strictly outside the box footprint (never polluted by upper object body points)
+      ringGroundHRelSamples.push(hRel);
+    }
+
+    if (
+      !(insideX && insideY && insideZ) &&
       // Check mid-body points (at least 0.25m above box bottom so road points are excluded)
       // that sit right outside the box wall (within 20% or 0.28m of the wall) -> box cuts into object points!
       lz > -hz + 0.25 &&
@@ -1034,34 +1042,145 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
     });
   }
 
-  // 4. [Z] Floating / Underground check against local ground elevation
-  if (localZSamples.length >= 6) {
-    localZSamples.sort((a, b) => a - b);
-    const p10Index = Math.max(0, Math.floor(localZSamples.length * 0.08));
-    const groundZ = localZSamples[p10Index]!;
-    const zDelta = bottomZ - groundZ;
-    if (zDelta > 0.28) {
+  // 4. [Z] Smart Ground Contact Check:
+  // A correct box sits RIGHT ON TOP OF ground points (hRel ~ -0.06m..+0.04m), neither pressing down
+  // onto the ground (`đè lên point đất` / âm đất) nor leaving excess empty space / floating (`bay / dư đáy`).
+  innerHRelSamples.sort((a, b) => a - b);
+  underBoxHRelSamples.sort((a, b) => a - b);
+  ringGroundHRelSamples.sort((a, b) => a - b);
+
+  const minInnerHRel =
+    innerHRelSamples.length >= 4
+      ? innerHRelSamples[Math.floor(innerHRelSamples.length * 0.05)]!
+      : innerHRelSamples[0] ?? null;
+
+  let zWarned = false;
+
+  if (ringGroundHRelSamples.length >= 6) {
+    const nRing = ringGroundHRelSamples.length;
+    const ringP15 = ringGroundHRelSamples[Math.floor(nRing * 0.15)]!;
+    const ringP30 = ringGroundHRelSamples[Math.floor(nRing * 0.3)]!;
+    const ringP80 = ringGroundHRelSamples[Math.floor(nRing * 0.8)]!;
+    const ringSpread = ringP80 - ringP15;
+    const isUnevenGround = ringSpread > 0.22; // `đất lôm côm` (sloped/curb/noisy ground)
+
+    // `groundHRel` = groundZ - bottomZ:
+    // - Positive (> 0): ground is ABOVE bottomZ -> box is pressing into / below ground (`đè lên point đất` / âm đất)
+    // - Negative (< 0): ground is BELOW bottomZ -> box bottom is above ground (`bay` if too negative)
+    const groundHRel = ringP30;
+    const zDeltaFromGround = -groundHRel; // bottomZ - groundZ
+
+    const tolUnderground = isUnevenGround ? 0.22 : 0.11;
+    const tolFloating = isUnevenGround ? 0.26 : 0.16;
+    const terrainNote = isUnevenGround ? ' [nền đất gồ ghề]' : '';
+
+    if (zDeltaFromGround < -tolUnderground) {
+      zWarned = true;
       warnings.push({
         code: 'Z',
         severity: 'error',
-        title: 'Box bị bay khỏi mặt đường',
-        detail: `Đáy box cao hơn mặt đất/điểm đáy +${zDelta.toFixed(2)}m`,
+        title: `Box bị âm đất / đè lên point đất${terrainNote}`,
+        detail: `Đáy box chìm thấp hơn lớp point đất xung quanh ${zDeltaFromGround.toFixed(2)}m`,
       });
-    } else if (zDelta < -0.28) {
+    } else if (zDeltaFromGround > tolFloating) {
+      zWarned = true;
       warnings.push({
         code: 'Z',
         severity: 'error',
-        title: 'Box bị âm đường',
-        detail: `Đáy box chìm dưới mặt đất ${zDelta.toFixed(2)}m`,
+        title: `Box bị bay khỏi point đất${terrainNote}`,
+        detail: `Đáy box cao hơn lớp point đất xung quanh +${zDeltaFromGround.toFixed(2)}m`,
       });
     }
-  } else if (bottomZ > 2.2 || bottomZ < -2.8) {
+  }
+
+  // Direct under-footprint check (catches floating box even when surrounding ring has no ground points)
+  if (!zWarned && underBoxHRelSamples.length >= 4) {
+    const underMed = underBoxHRelSamples[Math.floor(underBoxHRelSamples.length * 0.5)]!;
+    const gapBelow = -underMed;
+    if (gapBelow > 0.12) {
+      zWarned = true;
+      warnings.push({
+        code: 'Z',
+        severity: 'error',
+        title: 'Box bị bay (chưa chạm point đất dưới đáy)',
+        detail: `Đáy box còn cách lớp điểm ngay dưới đáy +${gapBelow.toFixed(2)}m`,
+      });
+    }
+  }
+
+  // Excess bottom gap inside the box (`dư khoảng trống dưới đáy`: bottomZ pulled lower than lowest object points)
+  if (
+    !zWarned &&
+    minInnerHRel !== null &&
+    innerHRelSamples.length >= 6 &&
+    underBoxHRelSamples.length === 0 &&
+    minInnerHRel > Math.max(0.26, H * 0.22)
+  ) {
+    zWarned = true;
     warnings.push({
       code: 'Z',
-      severity: 'error',
-      title: 'Độ cao ngoài ngưỡng',
-      detail: `Đáy box z=${bottomZ.toFixed(2)}m ngoài ngưỡng mặt đường`,
+      severity: 'warning',
+      title: 'Dư khoảng trống dưới đáy box',
+      detail: `Đáy box thấp hơn điểm thấp nhất của vật thể ${minInnerHRel.toFixed(2)}m (chưa ôm sát đáy)`,
     });
+  }
+
+  // Fallback when NO ground points exist around/under box (`ko có đất`):
+  // Compare bottomZ against nearby boxes on the same frame (`drawnObjects`) or global road envelope
+  if (!zWarned && ringGroundHRelSamples.length < 6 && underBoxHRelSamples.length < 4) {
+    const neighborBottomZs: number[] = [];
+    if (drawnObjects) {
+      for (const [otherKey, otherEntry] of Object.entries(drawnObjects)) {
+        const otherId = Number(
+          otherEntry?.data?.clientID ?? otherEntry?.state?.clientID ?? otherKey
+        );
+        if (otherId === clientID || otherEntry?.data?.hidden || otherEntry?.data?.outside) {
+          continue;
+        }
+        const otherPts = otherEntry?.state?.points ?? otherEntry?.data?.points;
+        if (!Array.isArray(otherPts) || otherPts.length < 9) {
+          continue;
+        }
+        const ox = Number(otherPts[0]);
+        const oy = Number(otherPts[1]);
+        const oz = Number(otherPts[2]);
+        const oH = Number(otherPts[8]);
+        const distXY = Math.hypot(cx - ox, cy - oy);
+        if (distXY <= 22 && Number.isFinite(oz) && Number.isFinite(oH)) {
+          neighborBottomZs.push(oz - oH * 0.5);
+        }
+      }
+    }
+
+    if (neighborBottomZs.length >= 1) {
+      neighborBottomZs.sort((a, b) => a - b);
+      const refBottomZ = neighborBottomZs[Math.floor(neighborBottomZs.length * 0.5)]!;
+      const diffNeighborZ = bottomZ - refBottomZ;
+      if (diffNeighborZ > 0.42) {
+        zWarned = true;
+        warnings.push({
+          code: 'Z',
+          severity: 'warning',
+          title: 'Box nghi bị bay (vùng không có point đất)',
+          detail: `Đáy box cao hơn mặt đáy các box lân cận +${diffNeighborZ.toFixed(2)}m`,
+        });
+      } else if (diffNeighborZ < -0.42) {
+        zWarned = true;
+        warnings.push({
+          code: 'Z',
+          severity: 'warning',
+          title: 'Box nghi bị âm đất (vùng không có point đất)',
+          detail: `Đáy box thấp hơn mặt đáy các box lân cận ${diffNeighborZ.toFixed(2)}m`,
+        });
+      }
+    } else if (bottomZ > 2.2 || bottomZ < -2.8) {
+      warnings.push({
+        code: 'Z',
+        severity: 'error',
+        title: 'Độ cao ngoài ngưỡng (vùng không có point đất)',
+        detail: `Đáy box z=${bottomZ.toFixed(2)}m ngoài ngưỡng mặt đường`,
+      });
+    }
   }
 
   // 5. [T] Sai kích thước & [P] Lỗi sai vị trí (when enough points exist to evaluate fit)

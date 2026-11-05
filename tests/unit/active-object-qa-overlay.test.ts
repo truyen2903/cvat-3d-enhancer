@@ -329,6 +329,63 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     expect(posOnlyReport?.distanceMeters).toBeGreaterThan(80);
     expect(posOnlyReport?.warnings.some((w) => w.code === 'D')).toBe(true);
 
+    // Verify [Z] does NOT trigger when box sits tightly on top of ground points (bottomZ = 0.02m, groundZ = 0.0m)
+    const tightGroundCoords: number[] = [];
+    // Ring ground points around box (outside L=4.0, W=1.8 -> hx=2.0, hy=0.9) at Z=0
+    for (let i = 0; i < 12; i += 1) {
+      tightGroundCoords.push(10 + ((i % 4) - 1.5) * 1.6, i < 6 ? -1.2 : 1.2, 0.0);
+    }
+    // Object points inside box starting tightly at Z=0.05..1.5
+    for (let i = 0; i < 12; i += 1) {
+      tightGroundCoords.push(
+        9.0 + (i % 4) * 0.6,
+        -0.6 + (i % 3) * 0.6,
+        0.05 + (i % 4) * 0.35
+      );
+    }
+    const tightPosArray = new Float32Array(tightGroundCoords);
+    const tightBoxResult = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      // cz = 0.82, H = 1.60 -> bottomZ = 0.02m (sits right on top of Z=0 ground!)
+      currentPoints: [10, 0, 0.82, 0, 0, 0, 4.0, 1.8, 1.6],
+      drawnObjects: {},
+      positionArray: tightPosArray,
+    });
+    expect(tightBoxResult.warnings.some((w) => w.code === 'Z')).toBe(false);
+
+    // Verify [Z] DOES trigger when box presses down into ground points (bottomZ = -0.18m < groundZ = 0.0m)
+    const undergroundBoxResult = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      // cz = 0.62, H = 1.60 -> bottomZ = -0.18m (pressing 18cm below Z=0 ground!)
+      currentPoints: [10, 0, 0.62, 0, 0, 0, 4.0, 1.8, 1.6],
+      drawnObjects: {},
+      positionArray: tightPosArray,
+    });
+    expect(undergroundBoxResult.warnings.some((w) => w.code === 'Z')).toBe(true);
+
+    // Verify [Z] fallback when no ground points exist (`ko có đất`) by comparing against nearby boxes on same frame
+    const noGroundSparseObj = new Float32Array([
+      10, 0, 1.4, 10.2, 0.1, 1.5, 9.8, -0.1, 1.6, 10.1, 0.2, 1.7, 9.9, -0.2, 1.8, 10, 0, 1.9,
+    ]);
+    const noGroundNeighborResult = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      // Active box has bottomZ = 1.35 - 0.8 = +0.55m, while neighbor box #2 at 6m away has bottomZ = 0.8 - 0.8 = 0.0m
+      currentPoints: [10, 0, 1.35, 0, 0, 0, 4.0, 1.8, 1.6],
+      drawnObjects: {
+        2: {
+          cuboid: {},
+          data: {
+            clientID: 2,
+            points: [10, 6.0, 0.8, 0, 0, 0, 4.0, 1.8, 1.6],
+            hidden: false,
+            outside: false,
+          },
+        },
+      },
+      positionArray: noGroundSparseObj,
+    });
+    expect(noGroundNeighborResult.warnings.some((w) => w.code === 'Z')).toBe(true);
+
     // Verify [F] is NOT reported when outside=true on the current frame
     const outsideResult = evaluateSpatialAndPointCloudWarnings({
       clientID: 1,
