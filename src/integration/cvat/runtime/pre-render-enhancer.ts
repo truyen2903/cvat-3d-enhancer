@@ -354,6 +354,93 @@ export function computePerceptualColorDistance(
   return Math.sqrt((2 + rMean) * dr * dr + 4 * dg * dg + (3 - rMean) * db * db) / 3;
 }
 
+/**
+ * Converts normalized RGB [0..1] to Hue in [0, 360) and Saturation in [0, 1].
+ */
+export function rgbToHueSaturation(rgb: readonly [number, number, number]): {
+  hue: number;
+  saturation: number;
+} {
+  const [r, g, b] = rgb;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  if (delta < 1e-5) {
+    return { hue: 0, saturation: 0 };
+  }
+  const l = (max + min) * 0.5;
+  const saturation = l > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+
+  let hue = 0;
+  if (max === r) {
+    hue = ((g - b) / delta + (g < b ? 6 : 0)) * 60;
+  } else if (max === g) {
+    hue = ((b - r) / delta + 2) * 60;
+  } else {
+    hue = ((r - g) / delta + 4) * 60;
+  }
+  return { hue: hue % 360, saturation };
+}
+
+/**
+ * Circular hue angle separation in [0, 180] degrees.
+ * Ensures internal point color is on a completely different color family (complementary/triadic)
+ * from the bounding box color so points never blend into the box's translucent tint or edges.
+ */
+export function computeHueSeparationDegrees(
+  rgb1: readonly [number, number, number],
+  rgb2: readonly [number, number, number]
+): number {
+  const hs1 = rgbToHueSaturation(rgb1);
+  const hs2 = rgbToHueSaturation(rgb2);
+  if (hs1.saturation < 0.08 || hs2.saturation < 0.08) {
+    return 180;
+  }
+  const diff = Math.abs(hs1.hue - hs2.hue) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+/**
+ * Extracts the actual rendered color of a 3D cuboid box in normalized RGB or hex string.
+ * Checks `cuboid.perspective.material.color` first (which reflects CVAT's active ColorBy mode:
+ * Label, Instance, or Group), then `data.labelColor`, `state.label.color`, `data.color`, `state.color`.
+ */
+export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): string | undefined {
+  const meshColor = entry?.cuboid?.perspective?.material?.color;
+  if (
+    meshColor &&
+    typeof meshColor.r === 'number' &&
+    typeof meshColor.g === 'number' &&
+    typeof meshColor.b === 'number' &&
+    Number.isFinite(meshColor.r) &&
+    Number.isFinite(meshColor.g) &&
+    Number.isFinite(meshColor.b)
+  ) {
+    return normalizedRgbToHex(meshColor.r, meshColor.g, meshColor.b);
+  }
+
+  const stateLabelColor = (
+    entry?.state as { label?: { color?: string }; color?: string } | undefined
+  )?.label?.color;
+  const stateColor = (entry?.state as { color?: string } | undefined)?.color;
+
+  const candidates = [
+    entry?.data?.labelColor,
+    stateLabelColor,
+    entry?.data?.color,
+    stateColor,
+    entry?.data?.groupColor,
+  ];
+
+  for (const c of candidates) {
+    if (typeof c === 'string' && /^#?[0-9a-fA-F]{6}$/.test(c.trim())) {
+      const clean = c.trim();
+      return clean.startsWith('#') ? clean : `#${clean}`;
+    }
+  }
+  return undefined;
+}
+
 export function getDistinctCuboidColor(
   clientID: number,
   fallbackIndex: number,
@@ -374,15 +461,17 @@ export function getDistinctCuboidColor(
   }
 
   const labelRgb = parseHexColorToNormalizedRgb(labelColorHex!);
-  // CVAT renders the cuboid mesh with translucent fill blended over the background (`opacity ~ 0.25..0.4`),
-  // so points inside the box must contrast strongly with BOTH the pure background AND the label-tinted box interior.
+  // CVAT renders the cuboid mesh with translucent fill blended over the background (`opacity ~ 0.35..0.5`),
+  // so points inside the box must contrast strongly with BOTH the pure background AND the label-tinted box interior,
+  // AND belong to a distinctly different hue family (>= 65 deg hue angle separation) from the box color!
   const blendedInteriorRgb: readonly [number, number, number] = [
-    bgRgb[0] * 0.65 + labelRgb[0] * 0.35,
-    bgRgb[1] * 0.65 + labelRgb[1] * 0.35,
-    bgRgb[2] * 0.65 + labelRgb[2] * 0.35,
+    bgRgb[0] * 0.55 + labelRgb[0] * 0.45,
+    bgRgb[1] * 0.55 + labelRgb[1] * 0.45,
+    bgRgb[2] * 0.55 + labelRgb[2] * 0.45,
   ];
 
-  const MIN_BOX_PERCEPTUAL_DIST = 0.42;
+  const MIN_BOX_PERCEPTUAL_DIST = 0.5;
+  const MIN_HUE_SEPARATION_DEG = 65;
   const MIN_BG_CONTRAST_RATIO = 4.2;
 
   let bestEntry = palette[hashedIndex]!;
@@ -391,16 +480,28 @@ export function getDistinctCuboidColor(
   for (let offset = 0; offset < palette.length; offset += 1) {
     const candidate = palette[(hashedIndex + offset) % palette.length]!;
     const boxDist = computePerceptualColorDistance(candidate, labelRgb);
+    const hueDiff = computeHueSeparationDegrees(candidate, labelRgb);
+    const interiorDist = computePerceptualColorDistance(candidate, blendedInteriorRgb);
     const interiorContrast = computeWcagContrastRatio(candidate, blendedInteriorRgb);
     const bgContrast = computeWcagContrastRatio(candidate, bgRgb);
 
-    // If the primary hashed color (or next candidate) already passes strict contrast against
-    // both background and box label color, pick it immediately to preserve per-ID uniqueness.
-    if (boxDist >= MIN_BOX_PERCEPTUAL_DIST && bgContrast >= MIN_BG_CONTRAST_RATIO && interiorContrast >= 3.0) {
+    // If the candidate has strong perceptual distance, distinct hue family (>= 65°),
+    // and clear contrast against both background and the box's translucent interior, return it.
+    if (
+      boxDist >= MIN_BOX_PERCEPTUAL_DIST &&
+      hueDiff >= MIN_HUE_SEPARATION_DEG &&
+      bgContrast >= MIN_BG_CONTRAST_RATIO &&
+      interiorDist >= 0.42
+    ) {
       return [candidate[0], candidate[1], candidate[2]];
     }
 
-    const score = boxDist * 2.5 + Math.min(bgContrast, 10) * 0.15 + Math.min(interiorContrast, 10) * 0.2;
+    const score =
+      boxDist * 3.0 +
+      (hueDiff / 180) * 2.5 +
+      interiorDist * 2.0 +
+      Math.min(bgContrast, 10) * 0.15 +
+      Math.min(interiorContrast, 10) * 0.15;
     if (score > bestScore) {
       bestScore = score;
       bestEntry = candidate;
@@ -558,7 +659,13 @@ export function compileOrientedCuboids(
       entry.cuboid.setColor(labelColor);
     }
 
-    const [r, g, b] = getDistinctCuboidColor(clientID, boxIdx, whiteBackground, labelColor);
+    const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry) ?? labelColor;
+    const [r, g, b] = getDistinctCuboidColor(
+      clientID,
+      boxIdx,
+      whiteBackground,
+      renderedBoxColorHex
+    );
     boxIdx += 1;
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame

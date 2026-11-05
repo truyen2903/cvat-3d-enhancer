@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
   type CvatObjectStateLike,
+  computeHueSeparationDegrees,
   computePerceptualColorDistance,
   computeWcagContrastRatio,
   Cvat3dPreRenderEnhancer,
@@ -602,9 +603,11 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
           const pointRgb = getDistinctCuboidColor(id, id, whiteBackground, labelHex);
           const bgContrast = computeWcagContrastRatio(pointRgb, bgRgb);
           const boxDist = computePerceptualColorDistance(pointRgb, labelRgb);
+          const hueDiff = computeHueSeparationDegrees(pointRgb, labelRgb);
 
           expect(bgContrast).toBeGreaterThanOrEqual(4.2);
-          expect(boxDist).toBeGreaterThanOrEqual(0.42);
+          expect(boxDist).toBeGreaterThanOrEqual(0.5);
+          expect(hueDiff).toBeGreaterThanOrEqual(65);
         }
       }
     }
