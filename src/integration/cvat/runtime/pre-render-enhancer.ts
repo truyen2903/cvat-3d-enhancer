@@ -713,11 +713,9 @@ export function compileOrientedCuboids(
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
     const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
-    // Keep the 3D cuboid box face material at its native CVAT Label color (`data.labelColor`)
-    // without touching `cuboid.wireframe` (outlinedBorders), while assigning each box ID
-    // its own distinct, cached internal point color!
-    const labelColor = ensureCuboidKeepsLabelColor(entry);
-    const renderedBoxColorHex = labelColor ?? resolveRenderedCuboidColorHex(entry);
+    // NEVER touch or mutate `entry.cuboid` colors/materials here!
+    // Only READ the box's current color to compute a contrasting color for the 3D points inside it.
+    const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry);
     const [r, g, b] = getDistinctCuboidColor(
       clientID,
       boxIdx,

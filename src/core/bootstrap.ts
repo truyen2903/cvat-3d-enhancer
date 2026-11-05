@@ -130,7 +130,6 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     currentRoute = runtimeDetector.detectRouteContext();
     currentConfig = await configManager.resolveEffectiveConfig(getScopeContext());
     const runtimeSnapshot = await runtimeManager.refresh();
-    await featureRegistry.reconcile(featureContext);
     const presets = await configManager.getPresets();
     const featureStatuses = featureRegistry.getStatusList(featureContext);
 
