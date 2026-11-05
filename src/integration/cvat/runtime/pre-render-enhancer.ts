@@ -866,6 +866,139 @@ export function findPointsObjectsInScene(scene?: ThreeSceneLike): ThreeObject3DL
   return found;
 }
 
+const ORTHO_RAYCAST_PLANE_NAMES = new Set(['topPlane', 'sidePlane', 'frontPlane']);
+
+/**
+ * CVAT's `onSceneImageLoaded` creates invisible raycast planes (`topPlane`, `sidePlane`, `frontPlane`)
+ * using `new THREE.PlaneGeometry(offsetHeight, offsetWidth, offsetHeight, offsetWidth)`.
+ * When an orthographic view (e.g. `Side` view at 866x712) is expanded and the user steps to the next frame,
+ * CVAT passes `712` and `866` as `widthSegments` and `heightSegments`, generating 1,233,184 triangles!
+ * While rotating a box (`renderRotateAction`) never raycasts against this plane, resizing (`renderResizeAction`)
+ * and translating (`renderTranslateAction`) raycast against `${view}Plane` on every mousemove frame,
+ * causing severe CPU lag (testing 1.23M triangles per frame).
+ *
+ * Replacing the subdivided geometry with a 1x1 segment plane (2 triangles) preserves the exact same
+ * mathematical plane and `worldToLocal` transform while making resize/translate raycasts ~600,000x faster.
+ */
+export function optimizeOrthographicRaycastPlanes(
+  scene?: ThreeSceneLike | null,
+  optimizedPlanes?: WeakSet<object>
+): number {
+  if (!scene || !Array.isArray(scene.children)) {
+    return 0;
+  }
+  let optimizedCount = 0;
+  for (const child of scene.children) {
+    if (!child || typeof child !== 'object' || !child.name) {
+      continue;
+    }
+    if (!ORTHO_RAYCAST_PLANE_NAMES.has(child.name)) {
+      continue;
+    }
+    if (optimizedPlanes?.has(child)) {
+      continue;
+    }
+    optimizedPlanes?.add(child);
+
+    const geom = child.geometry as
+      | (NonNullable<ThreeObject3DLike['geometry']> & {
+          parameters?: {
+            width?: number;
+            height?: number;
+            widthSegments?: number;
+            heightSegments?: number;
+          };
+          index?: {
+            array: Uint16Array | Uint32Array | Float32Array | number[];
+            count?: number;
+            needsUpdate?: boolean;
+          } | null;
+          boundingBox?: unknown;
+          boundingSphere?: unknown;
+          dispose?: () => void;
+        })
+      | undefined;
+    if (!geom) {
+      continue;
+    }
+
+    const widthSegments = Number(geom.parameters?.widthSegments ?? 1);
+    const heightSegments = Number(geom.parameters?.heightSegments ?? 1);
+    const indexCount = Number(geom.index?.count ?? geom.index?.array?.length ?? 0);
+    const posCount = Number(
+      geom.attributes?.position?.count ??
+        (geom.attributes?.position?.array ? geom.attributes.position.array.length / 3 : 0)
+    );
+
+    if (widthSegments <= 1 && heightSegments <= 1 && indexCount <= 6 && posCount <= 4) {
+      continue;
+    }
+
+    const width = Math.max(Number(geom.parameters?.width) || 1000, 2000);
+    const height = Math.max(Number(geom.parameters?.height) || 1000, 2000);
+    const GeomCtor = (geom as { constructor?: unknown }).constructor;
+
+    if (typeof GeomCtor === 'function' && GeomCtor !== Object) {
+      try {
+        const replacement = new (GeomCtor as new (
+          w: number,
+          h: number,
+          ws: number,
+          hs: number
+        ) => typeof geom)(width, height, 1, 1);
+        if (replacement && replacement.attributes?.position) {
+          child.geometry = replacement;
+          if (typeof geom.dispose === 'function') {
+            geom.dispose();
+          }
+          optimizedCount += 1;
+          continue;
+        }
+      } catch {
+        // Fall through to in-place buffer simplification
+      }
+    }
+
+    const hw = width * 0.5;
+    const hh = height * 0.5;
+    if (geom.attributes?.position) {
+      geom.attributes.position.array = new Float32Array([
+        -hw,
+        hh,
+        0,
+        hw,
+        hh,
+        0,
+        -hw,
+        -hh,
+        0,
+        hw,
+        -hh,
+        0,
+      ]);
+      geom.attributes.position.count = 4;
+      geom.attributes.position.needsUpdate = true;
+    }
+    if (geom.index) {
+      geom.index.array = new Uint16Array([0, 2, 1, 2, 3, 1]);
+      geom.index.count = 6;
+      geom.index.needsUpdate = true;
+    }
+    if (geom.parameters) {
+      geom.parameters = {
+        width,
+        height,
+        widthSegments: 1,
+        heightSegments: 1,
+      };
+    }
+    geom.boundingBox = null;
+    geom.boundingSphere = null;
+    optimizedCount += 1;
+  }
+  return optimizedCount;
+}
+
 /**
  * Stateful, dirty-flagged pre-render enhancer for CVAT's `Canvas3dViewImpl`.
  * Guarantees that point cloud buffer coloring, background changes, and scattering material
@@ -878,6 +1011,8 @@ export class Cvat3dPreRenderEnhancer {
   private readonly hookedPrototypes = new WeakSet<object>();
   private readonly hookedPointObjects = new WeakSet<object>();
   private readonly primaryPerspectiveMaterials = new WeakSet<object>();
+  private readonly initializedMaterials = new WeakSet<object>();
+  private readonly optimizedPlaneMeshes = new WeakSet<object>();
   private readonly geometrySignatureMap = new WeakMap<object, string>();
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
   private readonly sceneRenderContext = new Map<
@@ -1047,9 +1182,15 @@ export class Cvat3dPreRenderEnhancer {
           }
           const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
           const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
+          const targetBgRgb = this.options.whiteBackground
+            ? 'rgb(255, 255, 255)'
+            : 'rgb(0, 0, 0)';
           const sceneObj = scene as ThreeSceneLike | undefined;
           if (sceneObj?.background && typeof sceneObj.background.set === 'function') {
             sceneObj.background.set(targetBgHex);
+          }
+          if (sceneObj) {
+            optimizeOrthographicRaycastPlanes(sceneObj, this.optimizedPlaneMeshes);
           }
           const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
           if (sceneObj && renObj && typeof renObj.render === 'function' && camera) {
@@ -1060,7 +1201,11 @@ export class Cvat3dPreRenderEnhancer {
               if (oldestKey) this.sceneRenderContext.delete(oldestKey);
             }
           }
-          if (renObj?.domElement && renObj.domElement.style.backgroundColor !== targetBgCss) {
+          if (
+            renObj?.domElement &&
+            renObj.domElement.style.backgroundColor !== targetBgCss &&
+            renObj.domElement.style.backgroundColor !== targetBgRgb
+          ) {
             renObj.domElement.style.backgroundColor = targetBgCss;
             if (typeof renObj.setClearColor === 'function') {
               renObj.setClearColor(targetBgHex, 1);
@@ -1336,6 +1481,9 @@ export class Cvat3dPreRenderEnhancer {
       for (const [key, rv] of viewEntries) {
         if (!rv) continue;
 
+        if (rv.scene) {
+          optimizeOrthographicRaycastPlanes(rv.scene, this.optimizedPlaneMeshes);
+        }
         const isPerspective = key === 'perspective';
         const pointsList = findPointsObjectsInScene(rv.scene);
         for (const ptsObj of pointsList) {
@@ -1407,9 +1555,10 @@ export class Cvat3dPreRenderEnhancer {
     const targetAttenuation = isPerspective ? true : !useFixedOrtho35px;
 
     const needsShaderUpdate =
+      !this.initializedMaterials.has(mat) ||
       mat.sizeAttenuation !== targetAttenuation ||
-      mat.transparent !== false ||
-      mat.needsUpdate === undefined;
+      mat.transparent !== false;
+    this.initializedMaterials.add(mat);
 
     mat.size = targetSize;
     mat.sizeAttenuation = targetAttenuation;
@@ -1572,6 +1721,7 @@ export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: b
 
   const targetHex = whiteBackground ? 0xffffff : 0x000000;
   const targetCss = whiteBackground ? '#ffffff' : '#000000';
+  const targetRgb = whiteBackground ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)';
   const canvases = doc.querySelectorAll<HTMLCanvasElement & { scene?: ThreeSceneLike }>('canvas');
   for (const canvas of canvases) {
     const isCvatViewportCanvas =
@@ -1585,7 +1735,9 @@ export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: b
     if (canvas.scene?.background && typeof canvas.scene.background.set === 'function') {
       canvas.scene.background.set(targetHex);
     }
-    canvas.style.backgroundColor = targetCss;
+    if (canvas.style.backgroundColor !== targetCss && canvas.style.backgroundColor !== targetRgb) {
+      canvas.style.backgroundColor = targetCss;
+    }
   }
 }
 

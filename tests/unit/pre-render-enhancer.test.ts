@@ -10,6 +10,7 @@ import {
   getDistinctCuboidColor,
   injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
+  optimizeOrthographicRaycastPlanes,
   OVERLAP_RGB_WHITE_BG,
   parseHexColorToNormalizedRgb,
   readRenderOptionsFromClientSettings,
@@ -737,5 +738,55 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
         }
       }
     }
+  });
+
+  it('simplifies subdivided orthographic raycast planes (sidePlane/topPlane/frontPlane) from 712x866 segments (1.23M triangles) to 1x1 segment (2 triangles)', () => {
+    const disposeSpy = vi.fn();
+    class MockPlaneGeometry {
+      public parameters: {
+        width: number;
+        height: number;
+        widthSegments: number;
+        heightSegments: number;
+      };
+      public attributes: {
+        position: { array: Float32Array; count: number };
+      };
+      public index: { array: Uint16Array; count: number };
+      public dispose = disposeSpy;
+
+      public constructor(w = 1, h = 1, ws = 1, hs = 1) {
+        this.parameters = { width: w, height: h, widthSegments: ws, heightSegments: hs };
+        const vertCount = (ws + 1) * (hs + 1);
+        const idxCount = ws * hs * 6;
+        this.attributes = {
+          position: { array: new Float32Array(Math.min(vertCount * 3, 12)), count: vertCount },
+        };
+        this.index = { array: new Uint16Array(Math.min(idxCount, 6)), count: idxCount };
+      }
+    }
+
+    const bloatedSidePlaneGeom = new MockPlaneGeometry(712, 866, 712, 866);
+    const sidePlaneMesh = {
+      type: 'Mesh',
+      name: 'sidePlane',
+      geometry: bloatedSidePlaneGeom,
+    };
+    const sideScene = {
+      background: null,
+      children: [sidePlaneMesh],
+    };
+
+    const optimizedPlanes = new WeakSet<object>();
+    const count1 = optimizeOrthographicRaycastPlanes(sideScene, optimizedPlanes);
+    expect(count1).toBe(1);
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
+    expect(sidePlaneMesh.geometry.parameters.widthSegments).toBe(1);
+    expect(sidePlaneMesh.geometry.parameters.heightSegments).toBe(1);
+    expect(sidePlaneMesh.geometry.index.count).toBe(6);
+
+    // Subsequent calls on the same plane mesh are a fast no-op
+    const count2 = optimizeOrthographicRaycastPlanes(sideScene, optimizedPlanes);
+    expect(count2).toBe(0);
   });
 });
