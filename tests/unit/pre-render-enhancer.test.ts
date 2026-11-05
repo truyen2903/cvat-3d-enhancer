@@ -200,9 +200,24 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     mockCanvas3d.view!.drawnObjects![1]!.data.points = [50, 50, 50, 0, 0, 0, 4, 4, 4];
     mockCanvas3d.view!.notify!(mockCanvas3d.model, 'objects_updated');
     mockCanvas3d.view!.render!();
+    // Even if a DOM canvas/zoom structure change fires mid-drag (`markViewStructureChanged`),
+    // dragged box positions must still remain frozen until Next/Prev frame!
+    enhancer.markViewStructureChanged();
+    mockCanvas3d.view!.render!();
 
     // Point 3 MUST NOT change color while dragging on the same frame
     expect(colorArray[9]).toBeCloseTo(0, 3);
+    // And Perspective points.material.size MUST stay 0.05 (never turn into 2.5px when renderer.domElement is omitted)
+    const perspScn = mockCanvas3d.view!.views!.perspective!.scene!;
+    (pointsObj as { onBeforeRender?: (...args: unknown[]) => void }).onBeforeRender?.(
+      {},
+      perspScn,
+      { isPerspectiveCamera: true, type: 'PerspectiveCamera' },
+      pointsObj.geometry,
+      pointsObj.material
+    );
+    expect(pointsObj.material.size).toBe(0.05);
+    expect(pointsObj.material.sizeAttenuation).toBe(true);
 
     // Now simulate Next Frame -> Prev Frame (image_changed + initial objects_updated)
     mockCanvas3d.view!.notify!(mockCanvas3d.model, 'image_changed');

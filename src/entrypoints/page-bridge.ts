@@ -371,12 +371,20 @@ export class PageBridgeRuntimeHost {
           };
 
           // Also include any zoomed/expanded Top/Side/Front canvas mounted anywhere in the DOM
+          // (must have its own distinct THREE.Scene so we never alias the perspective scene!)
           const allSceneCanvases = docRef.querySelectorAll<
             HTMLCanvasElement & { scene?: ThreeSceneLike }
           >('canvas');
           let extraIdx = 0;
           for (const c of allSceneCanvases) {
-            if (c !== p && c !== t && c !== s && c !== f && c.scene) {
+            if (
+              c !== p &&
+              c !== t &&
+              c !== s &&
+              c !== f &&
+              c.scene &&
+              c.scene !== p?.scene
+            ) {
               viewsMap[`ortho_zoom_${extraIdx}`] = {
                 scene: c.scene,
                 renderer: { domElement: c },

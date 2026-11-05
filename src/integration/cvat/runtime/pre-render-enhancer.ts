@@ -639,6 +639,7 @@ export class Cvat3dPreRenderEnhancer {
   private primaryPerspectiveCanvas: HTMLCanvasElement | null = null;
   private lastCompiledBoxes: OrientedBoxBounds[] = [];
   private lastExecutionSignature = '';
+  private lastGeometryColorSignature = '';
   private dirty = true;
   private pendingFrameObjectsLoad = true;
 
@@ -672,6 +673,7 @@ export class Cvat3dPreRenderEnhancer {
     };
     if (changed) {
       this.dirty = true;
+      this.pendingFrameObjectsLoad = true;
       if (canvas3d?.view) {
         this.appliedViewBackground.delete(canvas3d.view);
         this.applyOnceIfNeeded(canvas3d.view, canvas3d.model);
@@ -857,12 +859,10 @@ export class Cvat3dPreRenderEnhancer {
 
     let isPerspective = false;
     if (!isOrthoCam) {
-      if (this.primaryPerspectiveCanvas && renObj?.domElement) {
-        isPerspective =
-          renObj.domElement === this.primaryPerspectiveCanvas &&
-          (!this.primaryPerspectiveScene || scene === this.primaryPerspectiveScene);
-      } else if (this.primaryPerspectiveScene && scene) {
+      if (this.primaryPerspectiveScene && scene) {
         isPerspective = scene === this.primaryPerspectiveScene;
+      } else if (this.primaryPerspectiveCanvas && renObj?.domElement) {
+        isPerspective = renObj.domElement === this.primaryPerspectiveCanvas;
       } else {
         isPerspective = Boolean(
           camObj && (camObj.isPerspectiveCamera === true || camObj.type === 'PerspectiveCamera')
@@ -885,10 +885,10 @@ export class Cvat3dPreRenderEnhancer {
 
     if (
       ptsObj.geometry &&
-      this.lastExecutionSignature &&
-      this.geometrySignatureMap.get(ptsObj.geometry) !== this.lastExecutionSignature
+      this.lastGeometryColorSignature &&
+      this.geometrySignatureMap.get(ptsObj.geometry) !== this.lastGeometryColorSignature
     ) {
-      this.geometrySignatureMap.set(ptsObj.geometry, this.lastExecutionSignature);
+      this.geometrySignatureMap.set(ptsObj.geometry, this.lastGeometryColorSignature);
       this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes);
     }
   }
@@ -991,9 +991,6 @@ export class Cvat3dPreRenderEnhancer {
 
     const drawnObjects = view.drawnObjects ?? {};
     const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
-    if (hasDrawnObjects) {
-      this.pendingFrameObjectsLoad = false;
-    }
 
     const viewEntries = Object.entries(view.views);
     let totalPointsObjects = 0;
@@ -1007,14 +1004,22 @@ export class Cvat3dPreRenderEnhancer {
       view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
     const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
     const orthoFixed = this.options.fixedOrthoPointSize ?? true;
-    const currentSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${orthoFixed ? 1 : 0}::${hasDrawnObjects ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
+    const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
+    const currentSignature = `${geometryColorSignature}:${orthoFixed ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
 
     if (!this.dirty && currentSignature === this.lastExecutionSignature) {
       return false;
     }
 
+    const shouldRecompileBoxSnapshots =
+      this.pendingFrameObjectsLoad || geometryColorSignature !== this.lastGeometryColorSignature;
+
     this.lastExecutionSignature = currentSignature;
+    this.lastGeometryColorSignature = geometryColorSignature;
     this.dirty = false;
+    if (hasDrawnObjects) {
+      this.pendingFrameObjectsLoad = false;
+    }
 
     const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
 
@@ -1039,20 +1044,29 @@ export class Cvat3dPreRenderEnhancer {
       }
     }
 
-    // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry)
+    // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry).
+    // IMPORTANT: Only recompile cuboid bounds on initial frame load or option change (`shouldRecompileBoxSnapshots`),
+    // NEVER when a box is being dragged/resized/rotated or when a zoom canvas mounts mid-frame!
+    if (shouldRecompileBoxSnapshots) {
+      this.lastCompiledBoxes = this.options.colorPointsByCuboid
+        ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
+        : [];
+    }
+    const compiledBoxes = this.lastCompiledBoxes;
     const processedGeometries = new WeakSet<object>();
-    const compiledBoxes = this.options.colorPointsByCuboid
-      ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
-      : [];
-    this.lastCompiledBoxes = compiledBoxes;
 
     for (const [, rv] of viewEntries) {
       const pointsList = findPointsObjectsInScene(rv?.scene);
       for (const ptsObj of pointsList) {
         if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
           processedGeometries.add(ptsObj.geometry);
-          this.geometrySignatureMap.set(ptsObj.geometry, currentSignature);
-          this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
+          if (
+            shouldRecompileBoxSnapshots ||
+            this.geometrySignatureMap.get(ptsObj.geometry) !== geometryColorSignature
+          ) {
+            this.geometrySignatureMap.set(ptsObj.geometry, geometryColorSignature);
+            this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
+          }
         }
       }
     }
