@@ -209,7 +209,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     const enhancer = new Cvat3dPreRenderEnhancer({
       whiteBackground: true,
-      enableScattering: false,
+      enableScattering: true,
       colorPointsByCuboid: true,
     });
 
@@ -242,7 +242,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(colorArray[7]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[1], 3);
     expect(colorArray[8]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[2], 3);
 
-    // Point 3 (outside all boxes, scattering OFF on white background) -> 100% pure Black (0, 0, 0)
+    // Point 3 (outside all boxes, solid B/W ON on white background) -> 100% pure Black (0, 0, 0)
     expect(colorArray[9]).toBeCloseTo(0, 3);
     expect(colorArray[10]).toBeCloseTo(0, 3);
     expect(colorArray[11]).toBeCloseTo(0, 3);
@@ -278,6 +278,50 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(colorArray[9]).toBeCloseTo(expectedBox1[0], 3);
     expect(colorArray[10]).toBeCloseTo(expectedBox1[1], 3);
     expect(colorArray[11]).toBeCloseTo(expectedBox1[2], 3);
+  });
+
+  it('keeps original LiDAR colors for unboxed points when solid B/W is OFF and restores them after toggling', () => {
+    const originals = [0.2, 0.4, 0.6, 0.9, 0.1, 0.3];
+    const colorArray = new Float32Array(originals);
+    const points = {
+      type: 'Points',
+      geometry: {
+        attributes: {
+          position: { array: new Float32Array([10, 10, 10, 20, 20, 20]) },
+          color: { array: colorArray, needsUpdate: false },
+        },
+      },
+      material: { size: 0.05, sizeAttenuation: true, color: { r: 1, g: 1, b: 1, set: vi.fn() } },
+    };
+    const canvas3d: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 3 } },
+      view: {
+        views: { perspective: { scene: { background: null, children: [points] } } },
+        drawnObjects: {},
+      },
+    };
+
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: true,
+      enableScattering: false,
+      colorPointsByCuboid: true,
+    });
+    enhancer.ensureHooked(canvas3d);
+    originals.forEach((v, i) => expect(colorArray[i]).toBeCloseTo(v, 5));
+
+    // Turn solid B/W ON -> pure black on white background
+    enhancer.setOptions(
+      { whiteBackground: true, enableScattering: true, colorPointsByCuboid: true },
+      canvas3d
+    );
+    colorArray.forEach((v) => expect(v).toBeCloseTo(0, 5));
+
+    // Turn it OFF again -> original LiDAR colors restored exactly
+    enhancer.setOptions(
+      { whiteBackground: true, enableScattering: false, colorPointsByCuboid: true },
+      canvas3d
+    );
+    originals.forEach((v, i) => expect(colorArray[i]).toBeCloseTo(v, 5));
   });
 
   it('applies white background immediately on frame 0 even before PCD point cloud finishes loading (zero black flash)', () => {

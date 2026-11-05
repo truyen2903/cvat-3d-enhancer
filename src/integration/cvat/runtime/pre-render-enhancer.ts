@@ -1423,27 +1423,13 @@ export class Cvat3dPreRenderEnhancer {
     const colorScale =
       colorArray instanceof Uint8Array || colorArray instanceof Uint8ClampedArray ? 255 : 1;
 
-    // Check if LiDAR intensity attribute is available for scattering mode
-    const intensityArray = ptsObj.geometry?.attributes?.intensity?.array;
-    let minIntensity = Infinity;
-    let maxIntensity = -Infinity;
-    if (this.options.enableScattering && intensityArray && intensityArray.length > 0) {
-      const sampleStep = Math.max(1, Math.floor(intensityArray.length / 500));
-      for (let idx = 0; idx < intensityArray.length; idx += sampleStep) {
-        const val = intensityArray[idx] ?? 0;
-        if (Number.isFinite(val)) {
-          if (val < minIntensity) minIntensity = val;
-          if (val > maxIntensity) maxIntensity = val;
-        }
-      }
-    }
-    const hasIntensitySpread =
-      Number.isFinite(minIntensity) &&
-      Number.isFinite(maxIntensity) &&
-      maxIntensity - minIntensity > 1e-5;
-
     const overlapRgb = this.options.whiteBackground ? OVERLAP_RGB_WHITE_BG : OVERLAP_RGB_BLACK_BG;
     const boxCount = boxes.length;
+    // `enableScattering` = "Solid black/white unboxed points":
+    //   ON  -> ignore LiDAR intensity, unboxed points are pure black on white bg / pure white on black bg
+    //   OFF -> unboxed points keep their ORIGINAL LiDAR point colors exactly as loaded by CVAT
+    const useSolidUnboxed = this.options.enableScattering;
+    const solidBase = this.options.whiteBackground ? 0 : colorScale;
 
     for (let i = 0; i < len; i += 3) {
       const px = posArray[i] ?? 0;
@@ -1500,34 +1486,15 @@ export class Cvat3dPreRenderEnhancer {
         colorArray[i] = matchedBox.r * colorScale;
         colorArray[i + 1] = matchedBox.g * colorScale;
         colorArray[i + 2] = matchedBox.b * colorScale;
-      } else if (!this.options.enableScattering) {
-        // Scattering OFF: 100% pure black on white background, or 100% pure white on black background
-        const solidBase = this.options.whiteBackground ? 0 : 1 * colorScale;
+      } else if (useSolidUnboxed) {
         colorArray[i] = solidBase;
         colorArray[i + 1] = solidBase;
         colorArray[i + 2] = solidBase;
       } else {
-        // Scattering ON: compute LiDAR scattering intensity/range shade adapted to background
-        const ptIdx = Math.floor(i / 3);
-        let scatterFactor = 0.5;
-        if (hasIntensitySpread && intensityArray) {
-          const rawI = intensityArray[ptIdx] ?? minIntensity;
-          scatterFactor = Math.max(
-            0,
-            Math.min(1, (rawI - minIntensity) / (maxIntensity - minIntensity))
-          );
-        } else {
-          const dist = Math.sqrt(px * px + py * py + pz * pz);
-          scatterFactor = Math.max(0, Math.min(1, dist / 60));
-        }
-
-        const shade = this.options.whiteBackground
-          ? (0.12 + 0.52 * scatterFactor) * colorScale
-          : (0.35 + 0.65 * (1 - 0.55 * scatterFactor)) * colorScale;
-
-        colorArray[i] = shade;
-        colorArray[i + 1] = shade;
-        colorArray[i + 2] = shade;
+        // Restore original LiDAR point colors (snapshot taken before any enhancer modification)
+        colorArray[i] = originalColors[i] ?? colorArray[i] ?? 1;
+        colorArray[i + 1] = originalColors[i + 1] ?? colorArray[i + 1] ?? 1;
+        colorArray[i + 2] = originalColors[i + 2] ?? colorArray[i + 2] ?? 1;
       }
     }
 
@@ -1662,8 +1629,9 @@ export function injectCvatWorkspaceSettingsControls(
     {
       key: 'enableScattering',
       rowClass: 'cvat-workspace-settings-3d-point-scattering',
-      title: 'Reduce 3D point cloud scattering',
-      description: 'Apply attenuated point size and translucency for denser point cloud inspection',
+      title: 'Solid black/white 3D points (ignore LiDAR intensity)',
+      description:
+        'Checked: points outside boxes are pure black on white background / pure white on black background. Unchecked: keep original LiDAR intensity colors',
     },
     {
       key: 'colorPointsByCuboid',
