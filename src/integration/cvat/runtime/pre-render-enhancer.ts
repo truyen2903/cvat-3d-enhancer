@@ -893,6 +893,7 @@ export class Cvat3dPreRenderEnhancer {
   private dirty = true;
   private pendingFrameObjectsLoad = true;
   private isRedrawingViews = false;
+  private isApplying = false;
 
   public constructor(initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS) {
     this.options = {
@@ -945,6 +946,9 @@ export class Cvat3dPreRenderEnhancer {
     }
     this.isRedrawingViews = true;
     try {
+      if (typeof this.activeView?.render === 'function') {
+        this.activeView.render();
+      }
       for (const [scene, ctx] of this.sceneRenderContext.entries()) {
         if (typeof ctx.renderer?.render === 'function' && ctx.camera) {
           ctx.renderer.render(scene, ctx.camera);
@@ -989,6 +993,9 @@ export class Cvat3dPreRenderEnhancer {
 
     for (const [, rv] of entries) {
       if (!rv) continue;
+      if (rv.scene) {
+        this.ensureThreePrototypesHooked(rv.scene);
+      }
       if (rv.scene?.background && typeof rv.scene.background.set === 'function') {
         rv.scene.background.set(targetBgHex);
       }
@@ -1057,6 +1064,15 @@ export class Cvat3dPreRenderEnhancer {
             if (typeof renObj.setClearColor === 'function') {
               renObj.setClearColor(targetBgHex, 1);
             }
+          }
+          if (
+            this.dirty &&
+            !this.isApplying &&
+            this.activeView &&
+            sceneObj &&
+            sceneObj === this.primaryPerspectiveScene
+          ) {
+            this.applyOnceIfNeeded(this.activeView, this.activeModel ?? undefined);
           }
         };
       }
@@ -1254,112 +1270,120 @@ export class Cvat3dPreRenderEnhancer {
     view: CvatInternalViewLike,
     model?: CvatInternalCanvas3dLike['model']
   ): boolean {
-    if (!view.views) {
+    if (!view.views || this.isApplying) {
       return false;
     }
-    this.activeView = view;
-    if (model) {
-      this.activeModel = model;
-    }
-
-    // Set WebGL scene background BEFORE checking whether point cloud has loaded so frame 0 never flashes black
-    this.applySceneBackgrounds(view);
-
-    const perspectiveScene = view.views.perspective?.scene;
-    this.primaryPerspectiveScene = perspectiveScene ?? null;
-    this.primaryPerspectiveCanvas = view.views.perspective?.renderer?.domElement ?? null;
-
-    const perspectivePoints = findPointsObjectsInScene(perspectiveScene);
-    if (perspectivePoints.length === 0) {
-      // Scene point cloud not yet populated for this frame; keep dirty=true so point coloring runs on PCD load
-      return false;
-    }
-
-    this.ensureThreePrototypesHooked(perspectiveScene, perspectivePoints[0]);
-
-    const drawnObjects = view.drawnObjects ?? {};
-    const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
-
-    const viewEntries = Object.entries(view.views);
-    let totalPointsObjects = 0;
-    for (const [, rv] of viewEntries) {
-      if (rv?.scene) {
-        totalPointsObjects += findPointsObjectsInScene(rv.scene).length;
+    this.isApplying = true;
+    try {
+      this.activeView = view;
+      if (model) {
+        this.activeModel = model;
       }
-    }
 
-    const domFrameAttr =
-      view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
-    const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
-    const orthoFixed = this.options.fixedOrthoPointSize ?? true;
-    const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
-    const currentSignature = `${geometryColorSignature}:${orthoFixed ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
+      // Set WebGL scene background BEFORE checking whether point cloud has loaded so frame 0 never flashes black
+      this.applySceneBackgrounds(view);
 
-    if (!this.dirty && currentSignature === this.lastExecutionSignature) {
-      return false;
-    }
-
-    const shouldRecompileBoxSnapshots =
-      this.pendingFrameObjectsLoad || geometryColorSignature !== this.lastGeometryColorSignature;
-
-    this.lastExecutionSignature = currentSignature;
-    this.lastGeometryColorSignature = geometryColorSignature;
-    this.dirty = false;
-    if (hasDrawnObjects) {
-      this.pendingFrameObjectsLoad = false;
-    }
-
-    const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
-
-    for (const [key, rv] of viewEntries) {
-      if (!rv) continue;
-
-      const isPerspective = key === 'perspective';
-      const pointsList = findPointsObjectsInScene(rv.scene);
-      for (const ptsObj of pointsList) {
-        this.bindInstanceBeforeRenderHook(ptsObj);
-        this.applyScatteringToMaterial(ptsObj, isPerspective);
+      const perspectiveScene = view.views.perspective?.scene;
+      this.primaryPerspectiveScene = perspectiveScene ?? null;
+      this.primaryPerspectiveCanvas = view.views.perspective?.renderer?.domElement ?? null;
+      if (perspectiveScene) {
+        this.ensureThreePrototypesHooked(perspectiveScene);
       }
-    }
 
-    // Ensure translucent cuboid meshes never write to depth buffer and depth-cull internal points
-    for (const entry of Object.values(drawnObjects)) {
-      for (const viewKey of cuboidViewKeys) {
-        const meshMat = entry?.cuboid?.[viewKey]?.material;
-        if (meshMat && typeof meshMat === 'object') {
-          meshMat.depthWrite = false;
+      const perspectivePoints = findPointsObjectsInScene(perspectiveScene);
+      if (perspectivePoints.length === 0) {
+        // Scene point cloud not yet populated for this frame; keep dirty=true so point coloring runs on PCD load
+        return false;
+      }
+
+      this.ensureThreePrototypesHooked(perspectiveScene, perspectivePoints[0]);
+
+      const drawnObjects = view.drawnObjects ?? {};
+      const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
+
+      const viewEntries = Object.entries(view.views);
+      let totalPointsObjects = 0;
+      for (const [, rv] of viewEntries) {
+        if (rv?.scene) {
+          totalPointsObjects += findPointsObjectsInScene(rv.scene).length;
         }
       }
-    }
 
-    // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry).
-    // IMPORTANT: Only recompile cuboid bounds on initial frame load or option change (`shouldRecompileBoxSnapshots`),
-    // NEVER when a box is being dragged/resized/rotated or when a zoom canvas mounts mid-frame!
-    if (shouldRecompileBoxSnapshots) {
-      this.lastCompiledBoxes = this.options.colorPointsByCuboid
-        ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
-        : [];
-    }
-    const compiledBoxes = this.lastCompiledBoxes;
-    const processedGeometries = new WeakSet<object>();
+      const domFrameAttr =
+        view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
+      const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
+      const orthoFixed = this.options.fixedOrthoPointSize ?? true;
+      const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
+      const currentSignature = `${geometryColorSignature}:${orthoFixed ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
 
-    for (const [, rv] of viewEntries) {
-      const pointsList = findPointsObjectsInScene(rv?.scene);
-      for (const ptsObj of pointsList) {
-        if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
-          processedGeometries.add(ptsObj.geometry);
-          if (
-            shouldRecompileBoxSnapshots ||
-            this.geometrySignatureMap.get(ptsObj.geometry) !== geometryColorSignature
-          ) {
-            this.geometrySignatureMap.set(ptsObj.geometry, geometryColorSignature);
-            this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
+      if (!this.dirty && currentSignature === this.lastExecutionSignature) {
+        return false;
+      }
+
+      const shouldRecompileBoxSnapshots =
+        this.pendingFrameObjectsLoad || geometryColorSignature !== this.lastGeometryColorSignature;
+
+      this.lastExecutionSignature = currentSignature;
+      this.lastGeometryColorSignature = geometryColorSignature;
+      this.dirty = false;
+      if (hasDrawnObjects) {
+        this.pendingFrameObjectsLoad = false;
+      }
+
+      const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
+
+      for (const [key, rv] of viewEntries) {
+        if (!rv) continue;
+
+        const isPerspective = key === 'perspective';
+        const pointsList = findPointsObjectsInScene(rv.scene);
+        for (const ptsObj of pointsList) {
+          this.bindInstanceBeforeRenderHook(ptsObj);
+          this.applyScatteringToMaterial(ptsObj, isPerspective);
+        }
+      }
+
+      // Ensure translucent cuboid meshes never write to depth buffer and depth-cull internal points
+      for (const entry of Object.values(drawnObjects)) {
+        for (const viewKey of cuboidViewKeys) {
+          const meshMat = entry?.cuboid?.[viewKey]?.material;
+          if (meshMat && typeof meshMat === 'object') {
+            meshMat.depthWrite = false;
           }
         }
       }
-    }
 
-    return true;
+      // Apply per-cuboid point coloring across all views' point clouds (sharing or cloning geometry).
+      // IMPORTANT: Only recompile cuboid bounds on initial frame load or option change (`shouldRecompileBoxSnapshots`),
+      // NEVER when a box is being dragged/resized/rotated or when a zoom canvas mounts mid-frame!
+      if (shouldRecompileBoxSnapshots) {
+        this.lastCompiledBoxes = this.options.colorPointsByCuboid
+          ? compileOrientedCuboids(drawnObjects, this.options.whiteBackground)
+          : [];
+      }
+      const compiledBoxes = this.lastCompiledBoxes;
+      const processedGeometries = new WeakSet<object>();
+
+      for (const [, rv] of viewEntries) {
+        const pointsList = findPointsObjectsInScene(rv?.scene);
+        for (const ptsObj of pointsList) {
+          if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
+            processedGeometries.add(ptsObj.geometry);
+            if (
+              shouldRecompileBoxSnapshots ||
+              this.geometrySignatureMap.get(ptsObj.geometry) !== geometryColorSignature
+            ) {
+              this.geometrySignatureMap.set(ptsObj.geometry, geometryColorSignature);
+              this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
+            }
+          }
+        }
+      }
+
+      return true;
+    } finally {
+      this.isApplying = false;
+    }
   }
 
   private applyScatteringToMaterial(ptsObj: ThreeObject3DLike, isPerspective: boolean): void {
@@ -1564,8 +1588,30 @@ export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: b
   }
 }
 
+function extractAntdHashClass(container: Element): string {
+  const sample = container.querySelector('[class*="css-"]');
+  if (sample && typeof sample.className === 'string') {
+    const match = /\b(css-[a-z0-9_-]+)\b/i.exec(sample.className);
+    if (match?.[1]) {
+      return ` ${match[1]}`;
+    }
+  }
+  return '';
+}
+
+function computeOptionsSignature(opts: Cvat3dWorkspaceRenderOptions): string {
+  return [
+    opts.whiteBackground ? 1 : 0,
+    opts.enableScattering ? 1 : 0,
+    opts.colorPointsByCuboid ? 1 : 0,
+    (opts.fixedOrthoPointSize ?? true) ? 1 : 0,
+    (opts.followActiveObject ?? true) ? 1 : 0,
+    (opts.enableActiveObjectWarnings ?? true) ? 1 : 0,
+  ].join(':');
+}
+
 /**
- * Injects the 3 tickable 3D render options directly into CVAT's native Settings -> Workspace tab
+ * Injects the tickable 3D render options directly into CVAT's native Settings -> Workspace tab
  * (`.cvat-workspace-settings`) using CVAT's exact Ant Design Row/Col/Checkbox/Text DOM structure
  * so the options blend seamlessly with native CVAT settings.
  */
@@ -1574,8 +1620,8 @@ export function injectCvatWorkspaceSettingsControls(
   getOptions: () => Cvat3dWorkspaceRenderOptions,
   onChange: (next: Cvat3dWorkspaceRenderOptions) => void
 ): boolean {
-  const container = doc.querySelector('.cvat-workspace-settings');
-  if (!container) {
+  const containers = doc.querySelectorAll<HTMLElement>('.cvat-workspace-settings');
+  if (containers.length === 0) {
     return false;
   }
 
@@ -1583,49 +1629,21 @@ export function injectCvatWorkspaceSettingsControls(
     input: HTMLInputElement,
     checked: boolean
   ): void => {
-    input.checked = checked;
+    if (input.checked !== checked) {
+      input.checked = checked;
+    }
     const checkboxSpan = input.closest('.ant-checkbox');
     const wrapperLabel = input.closest('.ant-checkbox-wrapper');
-    if (checkboxSpan) {
+    if (checkboxSpan && checkboxSpan.classList.contains('ant-checkbox-checked') !== checked) {
       checkboxSpan.classList.toggle('ant-checkbox-checked', checked);
     }
-    if (wrapperLabel) {
+    if (
+      wrapperLabel &&
+      wrapperLabel.classList.contains('ant-checkbox-wrapper-checked') !== checked
+    ) {
       wrapperLabel.classList.toggle('ant-checkbox-wrapper-checked', checked);
     }
   };
-
-  const existing = doc.getElementById(WORKSPACE_SETTINGS_INJECTED_ID);
-  if (existing) {
-    const opts = getOptions();
-    const bgInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="whiteBackground"]'
-    );
-    const scInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="enableScattering"]'
-    );
-    const boxInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="colorPointsByCuboid"]'
-    );
-    const orthoInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="fixedOrthoPointSize"]'
-    );
-    if (bgInput) syncCheckboxVisualState(bgInput, opts.whiteBackground);
-    if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
-    if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
-    if (orthoInput) syncCheckboxVisualState(orthoInput, opts.fixedOrthoPointSize ?? true);
-    const followInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="followActiveObject"]'
-    );
-    if (followInput) syncCheckboxVisualState(followInput, opts.followActiveObject ?? true);
-    const warnInput = existing.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="enableActiveObjectWarnings"]'
-    );
-    if (warnInput) syncCheckboxVisualState(warnInput, opts.enableActiveObjectWarnings ?? true);
-    return true;
-  }
-
-  const wrapper = doc.createElement('div');
-  wrapper.id = WORKSPACE_SETTINGS_INJECTED_ID;
 
   const items: {
     readonly key: keyof Cvat3dWorkspaceRenderOptions;
@@ -1674,74 +1692,147 @@ export function injectCvatWorkspaceSettingsControls(
     },
   ];
 
-  const initialOpts = getOptions();
+  const opts = getOptions();
+  const optsSig = computeOptionsSignature(opts);
+  let mountedAny = false;
 
-  for (const item of items) {
-    const isChecked =
-      item.key === 'fixedOrthoPointSize' ||
-      item.key === 'followActiveObject' ||
-      item.key === 'enableActiveObjectWarnings'
-        ? (initialOpts[item.key] ?? true)
-        : Boolean(initialOpts[item.key]);
+  for (const container of containers) {
+    const existing = container.querySelector<HTMLElement>(
+      `#${WORKSPACE_SETTINGS_INJECTED_ID}, [data-enhancer-workspace-settings="true"]`
+    );
+    if (existing) {
+      mountedAny = true;
+      // Skip DOM mutation if options have not changed since last sync (prevents MutationObserver
+      // from resetting input.checked mid-click!)
+      if (existing.dataset.enhancerOptsSig === optsSig) {
+        continue;
+      }
+      existing.dataset.enhancerOptsSig = optsSig;
+      const bgInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="whiteBackground"]'
+      );
+      const scInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="enableScattering"]'
+      );
+      const boxInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="colorPointsByCuboid"]'
+      );
+      const orthoInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="fixedOrthoPointSize"]'
+      );
+      const followInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="followActiveObject"]'
+      );
+      const warnInput = existing.querySelector<HTMLInputElement>(
+        'input[data-enhancer-opt="enableActiveObjectWarnings"]'
+      );
+      if (bgInput) syncCheckboxVisualState(bgInput, opts.whiteBackground);
+      if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
+      if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
+      if (orthoInput) syncCheckboxVisualState(orthoInput, opts.fixedOrthoPointSize ?? true);
+      if (followInput) syncCheckboxVisualState(followInput, opts.followActiveObject ?? true);
+      if (warnInput) syncCheckboxVisualState(warnInput, opts.enableActiveObjectWarnings ?? true);
+      continue;
+    }
 
-    const row = doc.createElement('div');
-    row.className = `ant-row ${item.rowClass} cvat-player-setting`;
+    const antdHash = extractAntdHashClass(container);
+    const wrapper = doc.createElement('div');
+    wrapper.id = WORKSPACE_SETTINGS_INJECTED_ID;
+    wrapper.dataset.enhancerWorkspaceSettings = 'true';
+    wrapper.dataset.enhancerOptsSig = optsSig;
 
-    const checkboxCol = doc.createElement('div');
-    checkboxCol.className = 'ant-col ant-col-24';
+    for (const item of items) {
+      const isChecked =
+        item.key === 'fixedOrthoPointSize' ||
+        item.key === 'followActiveObject' ||
+        item.key === 'enableActiveObjectWarnings'
+          ? (opts[item.key] ?? true)
+          : Boolean(opts[item.key]);
 
-    const label = doc.createElement('label');
-    label.className = `ant-checkbox-wrapper cvat-text-color${
-      isChecked ? ' ant-checkbox-wrapper-checked' : ''
-    }`;
+      const row = doc.createElement('div');
+      row.className = `ant-row ${item.rowClass} cvat-player-setting${antdHash}`;
+      row.style.position = 'relative';
 
-    const checkboxSpan = doc.createElement('span');
-    checkboxSpan.className = `ant-checkbox${isChecked ? ' ant-checkbox-checked' : ''}`;
+      const checkboxCol = doc.createElement('div');
+      checkboxCol.className = `ant-col ant-col-24${antdHash}`;
 
-    const checkboxInput = doc.createElement('input');
-    checkboxInput.type = 'checkbox';
-    checkboxInput.className = 'ant-checkbox-input';
-    checkboxInput.dataset.enhancerOpt = item.key;
-    checkboxInput.checked = isChecked;
+      const label = doc.createElement('label');
+      label.className = `ant-checkbox-wrapper cvat-text-color${antdHash}${
+        isChecked ? ' ant-checkbox-wrapper-checked' : ''
+      }`;
+      label.style.cssText =
+        'position: relative; display: inline-flex; align-items: center; cursor: pointer; user-select: none;';
 
-    const checkboxInner = doc.createElement('span');
-    checkboxInner.className = 'ant-checkbox-inner';
+      const checkboxSpan = doc.createElement('span');
+      checkboxSpan.className = `ant-checkbox${antdHash}${isChecked ? ' ant-checkbox-checked' : ''}`;
+      checkboxSpan.style.cssText =
+        'position: relative; display: inline-block; line-height: 1; cursor: pointer;';
 
-    checkboxSpan.appendChild(checkboxInput);
-    checkboxSpan.appendChild(checkboxInner);
+      const checkboxInput = doc.createElement('input');
+      checkboxInput.type = 'checkbox';
+      checkboxInput.className = 'ant-checkbox-input';
+      checkboxInput.dataset.enhancerOpt = item.key;
+      checkboxInput.checked = isChecked;
+      // Strictly contain the invisible input inside the 16x16 .ant-checkbox box so it never stretches
+      // over neighboring checkboxes when Ant Design CSS-in-JS classes change
+      checkboxInput.style.cssText =
+        'position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1;';
 
-    const titleSpan = doc.createElement('span');
-    titleSpan.textContent = item.title;
+      const checkboxInner = doc.createElement('span');
+      checkboxInner.className = 'ant-checkbox-inner';
 
-    label.appendChild(checkboxSpan);
-    label.appendChild(titleSpan);
-    checkboxCol.appendChild(label);
+      checkboxSpan.appendChild(checkboxInput);
+      checkboxSpan.appendChild(checkboxInner);
 
-    const descCol = doc.createElement('div');
-    descCol.className = 'ant-col ant-col-24';
+      const titleSpan = doc.createElement('span');
+      titleSpan.textContent = item.title;
 
-    const descText = doc.createElement('span');
-    descText.className = 'ant-typography ant-typography-secondary';
-    descText.textContent = item.description;
-    descCol.appendChild(descText);
+      label.appendChild(checkboxSpan);
+      label.appendChild(titleSpan);
+      checkboxCol.appendChild(label);
 
-    checkboxInput.addEventListener('change', () => {
-      syncCheckboxVisualState(checkboxInput, checkboxInput.checked);
-      const current = getOptions();
-      const updated: Cvat3dWorkspaceRenderOptions = {
-        ...current,
-        [item.key]: checkboxInput.checked,
+      const descCol = doc.createElement('div');
+      descCol.className = `ant-col ant-col-24${antdHash}`;
+
+      const descText = doc.createElement('span');
+      descText.className = `ant-typography ant-typography-secondary${antdHash}`;
+      descText.textContent = item.description;
+      descCol.appendChild(descText);
+
+      const applyToggle = (nextChecked: boolean): void => {
+        syncCheckboxVisualState(checkboxInput, nextChecked);
+        const current = getOptions();
+        const updated: Cvat3dWorkspaceRenderOptions = {
+          ...current,
+          [item.key]: nextChecked,
+        };
+        wrapper.dataset.enhancerOptsSig = computeOptionsSignature(updated);
+        onChange(updated);
       };
-      onChange(updated);
-    });
 
-    row.appendChild(checkboxCol);
-    row.appendChild(descCol);
-    wrapper.appendChild(row);
+      checkboxInput.addEventListener('change', () => {
+        applyToggle(checkboxInput.checked);
+      });
+
+      label.addEventListener('click', (e: MouseEvent) => {
+        if (e.target === checkboxInput) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        applyToggle(!checkboxInput.checked);
+      });
+
+      row.appendChild(checkboxCol);
+      row.appendChild(descCol);
+      wrapper.appendChild(row);
+    }
+
+    container.appendChild(wrapper);
+    mountedAny = true;
   }
 
-  container.appendChild(wrapper);
-  return true;
+  return mountedAny;
 }
 
 export type CuboidDimensionKey = 'H' | 'W' | 'L';

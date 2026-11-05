@@ -86,8 +86,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(healed.workspace?.cvat3dEnhancer?.colorPointsByCuboid).toBe(true);
   });
 
-  it('injects native checkboxes into .cvat-workspace-settings and triggers callback on tick', () => {
-    document.body.innerHTML = `<div class="cvat-workspace-settings"></div>`;
+  it('injects native checkboxes into .cvat-workspace-settings and triggers callback on tick (both via input change and label click)', () => {
+    document.body.innerHTML = `<div class="cvat-workspace-settings"><div class="ant-row css-n0gjrg"></div></div>`;
     let current = {
       whiteBackground: false,
       enableScattering: false,
@@ -104,6 +104,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       'input[data-enhancer-opt="colorPointsByCuboid"]'
     );
     expect(boxCheckbox).not.toBeNull();
+    expect(boxCheckbox!.style.position).toBe('absolute');
     boxCheckbox!.checked = true;
     boxCheckbox!.dispatchEvent(new Event('change'));
 
@@ -112,6 +113,16 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       enableScattering: false,
       colorPointsByCuboid: true,
     });
+
+    // Clicking on the label/inner span (not the raw input) must also toggle cleanly once
+    const bgInput = document.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="whiteBackground"]'
+    );
+    const bgLabel = bgInput?.closest('label');
+    expect(bgLabel?.className).toContain('css-n0gjrg');
+    bgLabel?.click();
+    expect(bgInput?.checked).toBe(true);
+    expect(current.whiteBackground).toBe(true);
   });
 
   it('colors each cuboid distinctly, assigns a 3rd overlap color for overlapping boxes, uses 100% black/white when scattering is off, and freezes colors during box drag until frame change', () => {

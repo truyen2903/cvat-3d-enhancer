@@ -47,10 +47,23 @@ function injectPageBridgeScript(doc: Document, sessionToken: string): () => void
   scriptEl.type = 'module';
   scriptEl.src = scriptUrl;
   scriptEl.dataset.cvatEnhancerBridgeToken = sessionToken;
+  let loaded = false;
+  let disposed = false;
+  const cleanupEl = () => {
+    loaded = true;
+    if (disposed) {
+      scriptEl.remove();
+    }
+  };
+  scriptEl.addEventListener('load', cleanupEl, { once: true });
+  scriptEl.addEventListener('error', cleanupEl, { once: true });
   (doc.head || doc.documentElement).appendChild(scriptEl);
 
   return () => {
-    scriptEl.remove();
+    disposed = true;
+    if (loaded) {
+      scriptEl.remove();
+    }
   };
 }
 

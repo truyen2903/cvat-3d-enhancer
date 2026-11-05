@@ -125,8 +125,16 @@ export class PageBridgeRuntimeHost {
     this.win.addEventListener('message', this.handleMessage);
     installPointerButtonEventTracking(this.win);
 
-    const onInteractiveChange = () => {
-      this.syncActiveObjectQaOverlay(true);
+    const onInteractiveChange = (event: Event) => {
+      const targetEl = event.target as Element | null;
+      if (
+        targetEl &&
+        typeof targetEl.closest === 'function' &&
+        targetEl.closest('.cvat-workspace-settings, #cvat-3d-enhancer-workspace-settings')
+      ) {
+        return;
+      }
+      this.syncActiveObjectQaOverlay(event.type === 'change');
     };
     this.doc.addEventListener('change', onInteractiveChange, true);
     this.doc.addEventListener('pointerup', onInteractiveChange, true);
@@ -334,6 +342,10 @@ export class PageBridgeRuntimeHost {
         const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
         syncEarlyViewportBackgroundDom(this.doc, persisted.whiteBackground);
         const canvasInstance = this.getActiveCanvas3dInstance();
+        if (canvasInstance) {
+          this.preRenderEnhancer.ensureHooked(canvasInstance);
+          this.ensureActiveObjectHoverLock(canvasInstance);
+        }
         this.preRenderEnhancer.setOptions(persisted, canvasInstance);
         this.syncActiveObjectQaOverlay(true);
       }
@@ -874,15 +886,21 @@ export class PageBridgeRuntimeHost {
   };
 }
 
-// Auto-initialize when injected into page with data-cvat-enhancer-bridge-token
-if (typeof document !== 'undefined') {
-  const scriptEl = document.querySelector<HTMLScriptElement>(
-    'script[data-cvat-enhancer-bridge-token]'
-  );
-  const token = scriptEl?.dataset.cvatEnhancerBridgeToken;
-  if (token) {
-    // Immediately remove token attribute from DOM so page scripts cannot scrape it later
-    delete scriptEl.dataset.cvatEnhancerBridgeToken;
+// Auto-initialize when injected into page (even if scriptEl was cleaned up before ES module load completed)
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  const winFlags = window as unknown as { __cvat3dEnhancerPageBridgeStarted?: boolean };
+  if (!winFlags.__cvat3dEnhancerPageBridgeStarted) {
+    winFlags.__cvat3dEnhancerPageBridgeStarted = true;
+    const scriptEl = document.querySelector<HTMLScriptElement>(
+      'script[data-cvat-enhancer-bridge-token]'
+    );
+    const token =
+      scriptEl?.dataset.cvatEnhancerBridgeToken ||
+      `standalone_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+    if (scriptEl?.dataset.cvatEnhancerBridgeToken) {
+      // Immediately remove token attribute from DOM so page scripts cannot scrape it later
+      delete scriptEl.dataset.cvatEnhancerBridgeToken;
+    }
     const host = new PageBridgeRuntimeHost(token);
     host.start();
   }
