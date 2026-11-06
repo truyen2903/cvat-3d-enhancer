@@ -2,12 +2,18 @@ import { defineManifest } from '@crxjs/vite-plugin';
 
 export default defineManifest({
   manifest_version: 3,
-  name: 'CVAT 3D Enhancer',
+  name: 'meow',
   version: '0.1.0',
   description:
     'Security-first 3D/LiDAR annotation workspace enhancer for CVAT with capability-verified runtime controls and hierarchical presets.',
   minimum_chrome_version: '114',
   permissions: ['storage', 'activeTab', 'scripting'],
+  icons: {
+    16: 'icons/icon-16.png',
+    32: 'icons/icon-32.png',
+    48: 'icons/icon-48.png',
+    128: 'icons/icon-128.png',
+  },
   host_permissions: [
     'https://*.cvat.ai/*',
     'http://localhost/*',
@@ -19,8 +25,14 @@ export default defineManifest({
     type: 'module',
   },
   action: {
-    default_title: 'CVAT 3D Enhancer',
+    default_title: 'meow',
     default_popup: 'src/entrypoints/popup/index.html',
+    default_icon: {
+      16: 'icons/icon-16.png',
+      32: 'icons/icon-32.png',
+      48: 'icons/icon-48.png',
+      128: 'icons/icon-128.png',
+    },
   },
   content_scripts: [
     {
@@ -35,7 +47,7 @@ export default defineManifest({
   ],
   web_accessible_resources: [
     {
-      resources: ['assets/*'],
+      resources: ['assets/*', 'icons/*'],
       matches: ['https://*/*', 'http://*/*'],
     },
   ],

@@ -589,7 +589,7 @@ export const FloatingPanelApp: React.FC = () => {
       <div className="enhancer-header">
         <span className="enhancer-title">
           <span className="enhancer-dot" />
-          CVAT 3D Enhancer
+          meow
         </span>
         <button type="button" className="enhancer-btn" onClick={toggleCollapsed}>
           Collapse
