@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "CVAT 3D Enhancer",
+  "version": "0.1.0",
+  "description": "Security-first 3D/LiDAR annotation workspace enhancer for CVAT with capability-verified runtime controls and hierarchical presets.",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.cvat.ai/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "CVAT 3D Enhancer",
+    "default_popup": "src/entrypoints/popup/index.html"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "assets/content.ts-loader-3uJvz-KK.js"
+      ],
+      "matches": [
+        "https://*.cvat.ai/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "resources": [
+        "assets/*"
+      ],
+      "use_dynamic_url": false
+    },
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "resources": [
+        "assets/index-B4I2heBL.js",
+        "assets/index-YF8g75cw.js",
+        "assets/schemas-njzct5Su.js",
+        "assets/index-50c5XEHu.js",
+        "assets/origin-validator--cNPonwa.js",
+        "assets/ortho-cuboid-editor-4v2iKQTs.js",
+        "assets/content.ts-DGEoBUgK.js"
+      ],
+      "use_dynamic_url": false
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
+  }
+}
