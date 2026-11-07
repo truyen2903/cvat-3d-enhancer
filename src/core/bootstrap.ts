@@ -23,7 +23,6 @@ import { VersionDetector } from '../integration/cvat/compatibility';
 import { RuntimeDetector } from '../integration/cvat/detector';
 import { CvatDomAdapter } from '../integration/cvat/dom';
 import {
-  detectActiveZoomedOrthoView,
   detectHoveredOrthoView,
   isEditableEventTarget,
   resolveNudgeKeyCode,
@@ -85,7 +84,16 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
 
   // Also register a synchronous window capture listener at document_start so that even if a page
   // listener was attached before page-bridge ES module finished loading, W/A/S/D/Q/E are suppressed
-  // whenever an orthographic view is maximized.
+  // only while an orthographic view is hovered and this window has not lost focus.
+  let earlyKeysSuspended = false;
+  const onEarlyBlur = (): void => {
+    earlyKeysSuspended = true;
+  };
+  const onEarlyFocus = (): void => {
+    earlyKeysSuspended = false;
+  };
+  window.addEventListener('blur', onEarlyBlur);
+  window.addEventListener('focus', onEarlyFocus);
   const onEarlyZoomKeyCapture = (event: KeyboardEvent): void => {
     const code = resolveNudgeKeyCode(event);
     if (!code || event.ctrlKey || event.altKey || event.metaKey) {
@@ -94,7 +102,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     if (isEditableEventTarget(event.target)) {
       return;
     }
-    if (detectHoveredOrthoView(document) || detectActiveZoomedOrthoView(document, null)) {
+    if (!earlyKeysSuspended && detectHoveredOrthoView(document)) {
       event.preventDefault();
       event.stopPropagation();
     }
@@ -104,6 +112,8 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     document.addEventListener(type, onEarlyZoomKeyCapture, true);
   }
   lifecycle.registerCleanup(() => {
+    window.removeEventListener('blur', onEarlyBlur);
+    window.removeEventListener('focus', onEarlyFocus);
     for (const type of ['keydown', 'keyup', 'keypress'] as const) {
       window.removeEventListener(type, onEarlyZoomKeyCapture, true);
       document.removeEventListener(type, onEarlyZoomKeyCapture, true);
@@ -263,23 +273,19 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
 
   // Observe SPA DOM transitions to detect when user enters/exits a 3D annotation job
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  lifecycle.observeMutations(
-    document.documentElement,
-    { childList: true, subtree: true },
-    () => {
-      removeLegacyFloatingHost();
-      const nextRoute = runtimeDetector.detectRouteContext();
-      if (
-        nextRoute.pathname !== currentRoute.pathname ||
-        nextRoute.is3DWorkspace !== currentRoute.is3DWorkspace
-      ) {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          void syncAll();
-        }, 250);
-      }
+  lifecycle.observeMutations(document.documentElement, { childList: true, subtree: true }, () => {
+    removeLegacyFloatingHost();
+    const nextRoute = runtimeDetector.detectRouteContext();
+    if (
+      nextRoute.pathname !== currentRoute.pathname ||
+      nextRoute.is3DWorkspace !== currentRoute.is3DWorkspace
+    ) {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        void syncAll();
+      }, 250);
     }
-  );
+  });
   lifecycle.registerCleanup(() => {
     if (debounceTimer) clearTimeout(debounceTimer);
   });

@@ -41,7 +41,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-JMmKIOUD.js"
+        "assets/content.ts-loader-DRPuSyLE.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -73,8 +73,8 @@
         "assets/schemas-njzct5Su.js",
         "assets/index-50c5XEHu.js",
         "assets/origin-validator--cNPonwa.js",
-        "assets/ortho-cuboid-editor-DbH0orqN.js",
-        "assets/content.ts-XNRg6VYd.js"
+        "assets/ortho-cuboid-editor-Ccn7rt4g.js",
+        "assets/content.ts-CDT9WX92.js"
       ],
       "use_dynamic_url": false
     }

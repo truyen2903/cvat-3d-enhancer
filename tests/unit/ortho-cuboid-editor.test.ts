@@ -120,7 +120,61 @@ describe('OrthoCuboidEditor keyboard', () => {
     }
   );
 
-  it('swallows WASDQE only while a view is maximized and debounces commits', () => {
+  it('does not reclaim shortcuts from stale CSS hover after blur, and requires hover after focus returns', () => {
+    document.body.innerHTML =
+      '<div class="cvat-canvas3d-frontview cvat-3d-enhancer-view-maximized"><canvas></canvas></div>';
+    const panel = document.querySelector('.cvat-canvas3d-frontview')!;
+    const query = document.querySelector.bind(document);
+    let cssHovered = true;
+    vi.spyOn(document, 'querySelector').mockImplementation((selector: string) => {
+      if (selector.endsWith(':hover'))
+        return cssHovered && selector.includes('frontview') ? panel : null;
+      return query(selector);
+    });
+    const editor = new OrthoCuboidEditor(
+      {
+        getMaximizedView: () => 'front',
+        getActivePoints: () => ({ clientID: 7, points: [...box] }),
+        getViewCamera: () => topCamera,
+        previewPoints: vi.fn(),
+        commitPoints: vi.fn(),
+      },
+      document,
+      window
+    );
+    const uninstall = editor.install();
+    const native = vi.fn();
+    window.addEventListener('keydown', native);
+    const key = () =>
+      new KeyboardEvent('keydown', { code: 'KeyD', bubbles: true, cancelable: true });
+    document.body.dispatchEvent(key());
+    expect(native).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('blur'));
+    // CSS hover is deliberately still true, as it may be after switching windows.
+    document.body.dispatchEvent(key());
+    expect(native).toHaveBeenCalledTimes(1);
+    cssHovered = false;
+    window.dispatchEvent(new Event('focus'));
+    document.body.dispatchEvent(key());
+    expect(native).toHaveBeenCalledTimes(2);
+    panel.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+    document.body.dispatchEvent(key());
+    expect(native).toHaveBeenCalledTimes(2);
+    for (const type of ['keydown', 'keyup', 'keypress']) {
+      panel.dispatchEvent(
+        new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })
+      );
+      const event = new KeyboardEvent(type, { code: 'KeyA', bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    window.removeEventListener('keydown', native);
+    uninstall();
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('swallows WASDQE only during hover even with a maximized view and debounces commits', () => {
     vi.useFakeTimers();
     let maximized: 'top' | null = 'top';
     let points = [...box];
@@ -139,7 +193,13 @@ describe('OrthoCuboidEditor keyboard', () => {
       document,
       window
     );
+    document.body.innerHTML = '<div class="cvat-canvas3d-topview"><canvas></canvas></div>';
+    const canvas = document.querySelector('canvas')!;
     const uninstall = editor.install();
+    expect(editor.shouldSuppressKeyEvent(new KeyboardEvent('keydown', { code: 'KeyD' }))).toBe(
+      false
+    );
+    canvas.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
     const cvatListener = vi.fn();
     document.addEventListener('keydown', cvatListener);
 
@@ -164,6 +224,9 @@ describe('OrthoCuboidEditor keyboard', () => {
 
     // Not maximized -> CVAT gets keys normally
     maximized = null;
+    canvas.dispatchEvent(
+      new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })
+    );
     document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
     expect(cvatListener).toHaveBeenCalledTimes(2);
 
@@ -172,7 +235,7 @@ describe('OrthoCuboidEditor keyboard', () => {
     vi.useRealTimers();
   });
 
-  it('suppresses WASDQE even when CVAT registered window capture listeners or zoomed via DOM class', () => {
+  it('returns shortcuts to CVAT on pointer exit even while the view remains maximized', () => {
     document.body.innerHTML = `
       <div class="cvat-canvas3d-topview cvat-3d-enhancer-view-maximized">
         <canvas width="866" height="712"></canvas>
@@ -199,15 +262,17 @@ describe('OrthoCuboidEditor keyboard', () => {
     const cvatWindowCapture = vi.fn();
     window.addEventListener('keydown', cvatWindowCapture, true);
 
+    const panel = document.querySelector('.cvat-canvas3d-topview')!;
+    panel.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
     const ev = new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true });
     document.body.dispatchEvent(ev);
     expect(cvatWindowCapture).not.toHaveBeenCalled();
     expect(previewPoints).toHaveBeenCalledTimes(1);
 
-    // Un-zoom in DOM -> CVAT capture listener receives 'd' again
-    document
-      .querySelector('.cvat-canvas3d-topview')!
-      .classList.remove('cvat-3d-enhancer-view-maximized');
+    // Leave the maximized class in place; exiting hover must be sufficient.
+    panel.dispatchEvent(
+      new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })
+    );
     document.body.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true })
     );

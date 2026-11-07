@@ -1,13 +1,13 @@
 /**
  * Orthographic (Top / Side / Front) cuboid editing helpers for the CVAT 3D workspace.
  *
- * 1. Keyboard nudge while hovering a view or while a view is maximized (see `ortho-view-maximizer.ts`):
+ * 1. Keyboard nudge only while hovering Top / Side / Front:
  *      A / D  -> move the active cuboid left / right on screen
  *      W / S  -> move the active cuboid up / down on screen
  *      Q      -> rotate (tilt) counter-clockwise around the view axis
  *      E      -> rotate (tilt) clockwise around the view axis
  *      Shift  -> 5x coarser step
- *    While hovering a view or while maximized, CVAT never receives W/A/S/D/Q/E (without Ctrl/Alt/Meta).
+ *    While hovering a view, CVAT never receives W/A/S/D/Q/E (without Ctrl/Alt/Meta).
  *    Outside these views, these keys go back to CVAT untouched.
  *
  * 2. Edge resize in Top / Side / Front views: CVAT natively only offers corner handles.
@@ -65,7 +65,7 @@ export interface EdgeHit {
 }
 
 export interface OrthoCuboidEditorContext {
-  /** Currently maximized view (used when no small view is hovered). */
+  /** Legacy maximized state; keyboard activation now depends solely on hover. */
   getMaximizedView: () => OrthoViewName | null;
   /** Active, editable cuboid points on the current frame (null if none / locked). */
   getActivePoints: () => { clientID: number; points: number[] } | null;
@@ -583,6 +583,8 @@ export class OrthoCuboidEditor {
   private readonly doc: Document;
   private readonly win: Window;
   private readonly ctx: OrthoCuboidEditorContext;
+  private hoverObserved = false;
+  private shortcutsSuspended = false;
   private hoveredPanel: HTMLElement | null = null;
   private drag: DragState | null = null;
   private suppressNextClick = false;
@@ -602,6 +604,9 @@ export class OrthoCuboidEditor {
   }
 
   public install(): () => void {
+    this.shortcutsSuspended = false;
+    this.hoverObserved = false;
+    this.hoveredPanel = null;
     const removeProtoHook = installEarlyKeySuppressionHook(this.win, (ev) =>
       this.shouldSuppressKeyEvent(ev)
     );
@@ -611,13 +616,26 @@ export class OrthoCuboidEditor {
       __cvat3dEnhancerInternalKeyListener: true,
     });
     const pointerOver = (e: MouseEvent): void => {
+      if (this.shortcutsSuspended) return;
+      this.hoverObserved = true;
       this.hoveredPanel = this.resolveViewPanel(e.target);
     };
     const pointerOut = (e: MouseEvent): void => {
+      this.hoverObserved = true;
       this.hoveredPanel = this.resolveViewPanel(e.relatedTarget);
     };
     const clearHover = (): void => {
       this.hoveredPanel = null;
+      this.hoverObserved = true;
+      this.shortcutsSuspended = true;
+      this.flushPendingCommit();
+    };
+    const restoreFocus = (): void => {
+      this.shortcutsSuspended = false;
+      this.hoverObserved = false;
+    };
+    const visibilityChanged = (): void => {
+      if (this.doc.hidden) clearHover();
     };
     const pointerDown = (e: PointerEvent): void => this.onPointerDown(e);
     const pointerMove = (e: PointerEvent): void => this.onPointerMove(e);
@@ -635,6 +653,8 @@ export class OrthoCuboidEditor {
     this.win.addEventListener('mousemove', pointerOver, opts);
     this.win.addEventListener('mouseout', pointerOut, opts);
     this.win.addEventListener('blur', clearHover);
+    this.win.addEventListener('focus', restoreFocus);
+    this.doc.addEventListener('visibilitychange', visibilityChanged);
     this.win.addEventListener('pointerdown', pointerDown, opts);
     this.win.addEventListener('pointermove', pointerMove, opts);
     this.win.addEventListener('pointerup', pointerUp, opts);
@@ -655,6 +675,8 @@ export class OrthoCuboidEditor {
       this.win.removeEventListener('mousemove', pointerOver, opts);
       this.win.removeEventListener('mouseout', pointerOut, opts);
       this.win.removeEventListener('blur', clearHover);
+      this.win.removeEventListener('focus', restoreFocus);
+      this.doc.removeEventListener('visibilitychange', visibilityChanged);
       clearHover();
       this.win.removeEventListener('pointerdown', pointerDown, opts);
       this.win.removeEventListener('pointermove', pointerMove, opts);
@@ -683,14 +705,15 @@ export class OrthoCuboidEditor {
   // ----- keyboard -----------------------------------------------------------------------------
 
   private getActiveView(): OrthoViewName | null {
-    const liveHover = detectHoveredOrthoView(this.doc);
-    if (liveHover) return liveHover;
+    if (this.shortcutsSuspended) return null;
+    // CSS :hover may remain set after blur or a synthetic/retargeted pointer exit.
+    if (!this.hoverObserved) return detectHoveredOrthoView(this.doc);
     if (this.hoveredPanel?.isConnected) {
       for (const view of ['top', 'side', 'front'] as const) {
         if (this.hoveredPanel.matches(VIEW_WRAPPERS[view])) return view;
       }
     }
-    return detectActiveZoomedOrthoView(this.doc, this.ctx.getMaximizedView());
+    return null;
   }
 
   public shouldSuppressKeyEvent(event: KeyboardEvent): boolean {
@@ -720,7 +743,7 @@ export class OrthoCuboidEditor {
     if (!view || isEditableEventTarget(event.target)) {
       return;
     }
-    // Mark and swallow the key completely so CVAT never sees W/A/S/D/Q/E while hovering an ortho view or zoomed
+    // Mark and swallow the key completely so CVAT never sees W/A/S/D/Q/E while hovering an ortho view
     SUPPRESSED_KEY_EVENTS.add(event);
     event.preventDefault();
     event.stopPropagation();
