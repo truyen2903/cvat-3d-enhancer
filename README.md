@@ -1,6 +1,8 @@
-# CVAT 3D Enhancer
+# Meow
 
-Security-first Chrome/Brave Manifest V3 browser extension for the **CVAT 3D/LiDAR annotation workspace** (inspected and verified against **CVAT `v2.81.0`** / `cvat-canvas3d` `0.0.10`).
+![Meow](public/assets/meow-128.png)
+
+Meow — make your workspace feel like home.
 
 ---
 

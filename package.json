@@ -1,8 +1,8 @@
 {
-  "name": "cvat-3d-enhancer",
+  "name": "meow",
   "version": "0.1.0",
   "private": true,
-  "description": "Security-first Chrome/Brave Manifest V3 extension for CVAT 3D/LiDAR annotation enhancement",
+  "description": "Meow \u2014 make your workspace feel like home.",
   "type": "module",
   "license": "MIT",
   "scripts": {

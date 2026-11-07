@@ -2,10 +2,11 @@ import { defineManifest } from '@crxjs/vite-plugin';
 
 export default defineManifest({
   manifest_version: 3,
-  name: 'CVAT 3D Enhancer',
+  name: 'Meow',
   version: '0.1.0',
   description:
-    'Security-first 3D/LiDAR annotation workspace enhancer for CVAT with capability-verified runtime controls and hierarchical presets.',
+    'Meow — make your workspace feel like home.',
+  icons: { 16: 'assets/meow-16.png', 32: 'assets/meow-32.png', 48: 'assets/meow-48.png', 128: 'assets/meow-128.png' },
   minimum_chrome_version: '114',
   permissions: ['storage', 'activeTab', 'scripting'],
   host_permissions: [
@@ -19,7 +20,8 @@ export default defineManifest({
     type: 'module',
   },
   action: {
-    default_title: 'CVAT 3D Enhancer',
+    default_title: 'Meow',
+    default_icon: { 16: 'assets/meow-16.png', 32: 'assets/meow-32.png', 48: 'assets/meow-48.png', 128: 'assets/meow-128.png' },
     default_popup: 'src/entrypoints/popup/index.html',
   },
   content_scripts: [

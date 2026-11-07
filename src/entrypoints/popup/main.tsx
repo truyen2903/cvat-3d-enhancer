@@ -108,16 +108,8 @@ export const PopupApp: React.FC = () => {
   return (
     <div style={{ padding: '14px', fontFamily: 'Inter, system-ui, sans-serif', fontSize: '12px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
-        <span
-          style={{
-            width: '9px',
-            height: '9px',
-            borderRadius: '999px',
-            background: '#38bdf8',
-            display: 'inline-block',
-          }}
-        />
-        <strong style={{ fontSize: '14px' }}>CVAT 3D Enhancer</strong>
+        <img src={chrome.runtime.getURL('assets/meow-48.png')} alt="Meow" width={36} height={36} style={{ objectFit: 'contain', borderRadius: '6px' }} />
+        <strong style={{ fontSize: '14px' }}>Meow</strong>
       </div>
 
       <div

@@ -573,7 +573,7 @@ export const FloatingPanelApp: React.FC = () => {
       <div className="enhancer-shell collapsed" style={cssVariables}>
         <div className="enhancer-header" style={{ borderBottom: 'none' }}>
           <span className="enhancer-title">
-            <span className="enhancer-dot" />
+            <img src={chrome.runtime.getURL('assets/meow-48.png')} alt="" width={28} height={28} style={{ objectFit: 'contain', borderRadius: '4px' }} />
             CVAT 3D
           </span>
           <button type="button" className="enhancer-btn" onClick={toggleCollapsed}>
@@ -588,8 +588,8 @@ export const FloatingPanelApp: React.FC = () => {
     <div className="enhancer-shell" style={cssVariables} data-testid="cvat-enhancer-floating-panel">
       <div className="enhancer-header">
         <span className="enhancer-title">
-          <span className="enhancer-dot" />
-          CVAT 3D Enhancer
+          <img src={chrome.runtime.getURL('assets/meow-48.png')} alt="" width={28} height={28} style={{ objectFit: 'contain', borderRadius: '4px' }} />
+          Meow
         </span>
         <button type="button" className="enhancer-btn" onClick={toggleCollapsed}>
           Collapse

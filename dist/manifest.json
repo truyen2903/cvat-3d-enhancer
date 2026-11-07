@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "CVAT 3D Enhancer",
+  "name": "Meow",
   "version": "0.1.0",
-  "description": "Security-first 3D/LiDAR annotation workspace enhancer for CVAT with capability-verified runtime controls and hierarchical presets.",
+  "description": "Meow — make your workspace feel like home.",
+  "icons": {
+    "16": "assets/meow-16.png",
+    "32": "assets/meow-32.png",
+    "48": "assets/meow-48.png",
+    "128": "assets/meow-128.png"
+  },
   "minimum_chrome_version": "114",
   "permissions": [
     "storage",
@@ -23,13 +29,19 @@
     "type": "module"
   },
   "action": {
-    "default_title": "CVAT 3D Enhancer",
+    "default_title": "Meow",
+    "default_icon": {
+      "16": "assets/meow-16.png",
+      "32": "assets/meow-32.png",
+      "48": "assets/meow-48.png",
+      "128": "assets/meow-128.png"
+    },
     "default_popup": "src/entrypoints/popup/index.html"
   },
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-fyC1OXP-.js"
+        "assets/content.ts-loader-JMmKIOUD.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -62,7 +74,7 @@
         "assets/index-50c5XEHu.js",
         "assets/origin-validator--cNPonwa.js",
         "assets/ortho-cuboid-editor-DbH0orqN.js",
-        "assets/content.ts-jYTxYJ5T.js"
+        "assets/content.ts-XNRg6VYd.js"
       ],
       "use_dynamic_url": false
     }

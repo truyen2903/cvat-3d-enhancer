@@ -72,7 +72,7 @@ export function registerApplicationCommands(deps: ApplicationCommandDeps): void 
 
   commandRegistry.register<undefined, void>({
     id: 'ui.togglePanel',
-    title: 'Toggle CVAT 3D Enhancer Floating Panel',
+    title: 'Toggle Meow Floating Panel',
     category: 'ui',
     execute: () => {
       eventBus.emit('ui:toggle-panel', undefined);

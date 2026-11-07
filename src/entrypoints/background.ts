@@ -26,7 +26,7 @@ if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
   chrome.runtime.onInstalled.addListener((details) => {
-    log.info(`CVAT 3D Enhancer installed/updated (${details.reason})`);
+    log.info(`Meow installed/updated (${details.reason})`);
     void configureTrustedSessionStorageAccess();
     void syncDynamicContentScripts();
   });
