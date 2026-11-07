@@ -21,6 +21,109 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     `;
   });
 
+  it('defers QA scans during canvas drags and resumes on release without leaking listeners', () => {
+    vi.useFakeTimers();
+    const host = new PageBridgeRuntimeHost(
+      'perf_test_bridge_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      syncActiveObjectQaOverlay: (force?: boolean) => void;
+      getActiveCanvas3dInstance: () => null;
+      qaEvalTimer: number | null;
+      lastQaSignature: string;
+    };
+    const lookup = vi.spyOn(internal, 'getActiveCanvas3dInstance').mockReturnValue(null);
+    const stop = host.start();
+    try {
+      const scan = vi.fn();
+      internal.qaEvalTimer = setTimeout(scan, 120);
+      internal.lastQaSignature = 'pending-report';
+      document
+        .querySelector('canvas')!
+        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      lookup.mockClear();
+      internal.syncActiveObjectQaOverlay(true);
+      vi.advanceTimersByTime(200);
+      expect(scan).not.toHaveBeenCalled();
+      expect(lookup).not.toHaveBeenCalled();
+      window.dispatchEvent(new MouseEvent('pointerup'));
+      expect(lookup).toHaveBeenCalled();
+      stop();
+      lookup.mockClear();
+      window.dispatchEvent(new MouseEvent('pointerup'));
+      expect(lookup).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores Appearance and QA animation mutations while retaining sidebar control updates', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const host = new PageBridgeRuntimeHost(
+      'observer_test_bridge_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      tryMountObjectItemDimensionSyncControls: () => void;
+      tryMountWorkspaceSettingsCheckboxes: () => void;
+      checkForNewlyMountedCanvases: () => boolean;
+    };
+    const controls = vi
+      .spyOn(internal, 'tryMountObjectItemDimensionSyncControls')
+      .mockImplementation(() => {});
+    const settings = vi
+      .spyOn(internal, 'tryMountWorkspaceSettingsCheckboxes')
+      .mockImplementation(() => {});
+    const canvases = vi.spyOn(internal, 'checkForNewlyMountedCanvases').mockReturnValue(false);
+    const stop = host.start();
+    const flush = async () => {
+      await Promise.resolve();
+      const pending = frames.splice(0);
+      for (const callback of pending) callback(0);
+      await Promise.resolve();
+    };
+    try {
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        `
+        <div class="cvat-appearance-block"><span class="handle"></span></div>
+        <div class="cvat-objects-sidebar"><div class="cvat-objects-sidebar-state-item"></div></div>
+        <div id="animation"><span></span></div>
+      `
+      );
+      await flush();
+      await flush();
+      controls.mockClear();
+      settings.mockClear();
+      canvases.mockClear();
+      const appearance = document.querySelector('.cvat-appearance-block')!;
+      for (let i = 0; i < 20; i++) {
+        appearance.firstElementChild!.className = `handle dragging-${i}`;
+        document.querySelector('#animation')!.className = `animating-${i}`;
+      }
+      appearance.appendChild(document.createElement('span'));
+      await flush();
+      expect(controls).not.toHaveBeenCalled();
+      expect(settings).not.toHaveBeenCalled();
+      expect(canvases).not.toHaveBeenCalled();
+      document.querySelector('.cvat-objects-sidebar-state-item')!.classList.add('active');
+      await flush();
+      expect(controls).toHaveBeenCalledTimes(1);
+      expect(canvases).not.toHaveBeenCalled();
+      expect(settings).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
   it('probes CVAT runtime via PageBridge, verifies supported vs unsupported capabilities, and dispatches configure()', async () => {
     const configureSpy = vi.fn();
     const keyControlsSpy = vi.fn();

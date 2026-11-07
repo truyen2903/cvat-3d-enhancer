@@ -12,6 +12,8 @@
  *    or option toggle), never recomputing on every 60fps `render()` call unless state changed.
  */
 
+import { deferHiddenOrientationArrowUpdates } from './hidden-orientation-arrows';
+
 export interface Cvat3dWorkspaceRenderOptions {
   readonly whiteBackground: boolean;
   readonly enableScattering: boolean;
@@ -155,6 +157,7 @@ export interface CvatDrawnObjectEntry {
   };
   state?: CvatObjectStateLike;
   cuboid: {
+    orientationArrows?: Partial<Record<'perspective' | 'top' | 'side' | 'front', Record<string, unknown> | null>>;
     setColor?: (hexColor: string) => void;
     setScale?: (x: number, y: number, z: number) => void;
     setRotation?: (x: number, y: number, z: number) => void;
@@ -1150,6 +1153,7 @@ export class Cvat3dPreRenderEnhancer {
   private readonly baseColorsCache = new WeakMap<object, Float32Array>();
   private readonly modifiedGeometries = new WeakSet<object>();
   private readonly compactedGeometries = new WeakSet<object>();
+  private readonly hiddenOrientationArrows = new WeakSet<object>();
   private readonly hookedViews = new WeakSet<object>();
   private readonly hookedPrototypes = new WeakSet<object>();
   private readonly hookedPointObjects = new WeakSet<object>();
@@ -1158,6 +1162,7 @@ export class Cvat3dPreRenderEnhancer {
   private readonly optimizedPlaneMeshes = new WeakSet<object>();
   private readonly scenePlaneCheckCount = new WeakMap<object, number>();
   private readonly geometrySignatureMap = new WeakMap<object, string>();
+  private readonly appliedSceneColors = new WeakMap<ThreeColorLike, boolean>();
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
   private readonly sceneRenderContext = new Map<
     ThreeSceneLike,
@@ -1251,7 +1256,11 @@ export class Cvat3dPreRenderEnhancer {
       if (typeof this.activeView?.render === 'function') {
         this.activeView.render();
       }
+      const nativeScenes = typeof this.activeView?.render === 'function'
+        ? new Set(Object.values(this.activeView.views ?? {}).map((view) => view?.scene))
+        : null;
       for (const [scene, ctx] of this.sceneRenderContext.entries()) {
+        if (nativeScenes?.has(scene)) continue;
         if (typeof ctx.renderer?.render === 'function' && ctx.camera) {
           ctx.renderer.render(scene, ctx.camera);
         }
@@ -1281,6 +1290,16 @@ export class Cvat3dPreRenderEnhancer {
    * scenes and WebGL renderers (including any zoomed Top/Side/Front views), even BEFORE the first
    * frame's PCD point cloud finishes loading, eliminating the initial black-frame flash on frame 0.
    */
+  private syncSceneColor(scene: ThreeSceneLike | undefined): void {
+    const color = scene?.background;
+    if (!color || typeof color.set !== 'function') return;
+    const channel = this.options.whiteBackground ? 1 : 0;
+    if (this.appliedSceneColors.get(color) === this.options.whiteBackground &&
+      color.r === channel && color.g === channel && color.b === channel) return;
+    color.set(this.options.whiteBackground ? 0xffffff : 0x000000);
+    this.appliedSceneColors.set(color, this.options.whiteBackground);
+  }
+
   public applySceneBackgrounds(view: CvatInternalViewLike): void {
     if (!view.views) {
       return;
@@ -1298,9 +1317,7 @@ export class Cvat3dPreRenderEnhancer {
       if (rv.scene) {
         this.ensureThreePrototypesHooked(rv.scene);
       }
-      if (rv.scene?.background && typeof rv.scene.background.set === 'function') {
-        rv.scene.background.set(targetBgHex);
-      }
+      this.syncSceneColor(rv.scene);
       if (rv.renderer?.setClearColor) {
         rv.renderer.setClearColor(targetBgHex, 1);
       }
@@ -1352,9 +1369,7 @@ export class Cvat3dPreRenderEnhancer {
             ? 'rgb(255, 255, 255)'
             : 'rgb(0, 0, 0)';
           const sceneObj = scene as ThreeSceneLike | undefined;
-          if (sceneObj?.background && typeof sceneObj.background.set === 'function') {
-            sceneObj.background.set(targetBgHex);
-          }
+          this.syncSceneColor(sceneObj);
           if (
             sceneObj &&
             sceneObj !== this.primaryPerspectiveScene &&
@@ -1367,7 +1382,10 @@ export class Cvat3dPreRenderEnhancer {
           const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
           if (sceneObj && renObj && typeof renObj.render === 'function' && camera) {
             // Remember (renderer, camera) per scene so option toggles can force an immediate redraw
-            this.sceneRenderContext.set(sceneObj, { renderer: renObj, camera });
+            const previous = this.sceneRenderContext.get(sceneObj);
+            if (previous?.renderer !== renObj || previous.camera !== camera) {
+              this.sceneRenderContext.set(sceneObj, { renderer: renObj, camera });
+            }
             if (this.sceneRenderContext.size > 16) {
               const oldestKey = this.sceneRenderContext.keys().next().value;
               if (oldestKey) this.sceneRenderContext.delete(oldestKey);
@@ -1519,6 +1537,16 @@ export class Cvat3dPreRenderEnhancer {
    *   only update after switching frames (Next Frame -> Prev Frame) or toggling an option.
    * - `render`: executes `applyOnceIfNeeded()` BEFORE `renderer.render(scene, camera)` ONLY when dirty.
    */
+  private optimizeOrientationArrows(view: CvatInternalViewLike): void {
+    for (const entry of Object.values(view.drawnObjects ?? {})) {
+      for (const arrows of Object.values(entry.cuboid?.orientationArrows ?? {})) {
+        for (const arrow of Object.values(arrows ?? {})) {
+          deferHiddenOrientationArrowUpdates(arrow, this.hiddenOrientationArrows);
+        }
+      }
+    }
+  }
+
   public ensureHooked(canvas3d: CvatInternalCanvas3dLike | null): boolean {
     const view = canvas3d?.view;
     if (!view || typeof view !== 'object') {
@@ -1546,7 +1574,8 @@ export class Cvat3dPreRenderEnhancer {
         origOnSceneLoaded(points);
         this.dirty = true;
         this.pendingFrameObjectsLoad = true;
-        this.applyOnceIfNeeded(view, canvas3d?.model);
+        // Native code updates frame objects immediately after this callback.
+        // Let objects_updated / the next render process the completed frame once.
       };
     }
 
@@ -1560,10 +1589,9 @@ export class Cvat3dPreRenderEnhancer {
           this.applySceneBackgrounds(view);
         }
         origNotify(model, reason);
+        if (reason === 'objects_updated') this.optimizeOrientationArrows(view);
         if (reason === 'image_changed') {
-          this.dirty = true;
-          this.pendingFrameObjectsLoad = true;
-          this.applyOnceIfNeeded(view, canvas3d?.model);
+          if (this.dirty) this.applyOnceIfNeeded(view, canvas3d?.model);
         } else if (reason === 'objects_updated' && this.pendingFrameObjectsLoad) {
           // Only color boxes on initial frame object load; ignore subsequent box drag/resize/rotate on same frame
           this.dirty = true;
@@ -1619,6 +1647,7 @@ export class Cvat3dPreRenderEnhancer {
 
       this.ensureThreePrototypesHooked(perspectiveScene, perspectivePoints[0]);
 
+      this.optimizeOrientationArrows(view);
       const drawnObjects = view.drawnObjects ?? {};
       const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
 
