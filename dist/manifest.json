@@ -29,7 +29,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-3uJvz-KK.js"
+        "assets/content.ts-loader-fyC1OXP-.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -61,8 +61,8 @@
         "assets/schemas-njzct5Su.js",
         "assets/index-50c5XEHu.js",
         "assets/origin-validator--cNPonwa.js",
-        "assets/ortho-cuboid-editor-4v2iKQTs.js",
-        "assets/content.ts-DGEoBUgK.js"
+        "assets/ortho-cuboid-editor-DbH0orqN.js",
+        "assets/content.ts-jYTxYJ5T.js"
       ],
       "use_dynamic_url": false
     }

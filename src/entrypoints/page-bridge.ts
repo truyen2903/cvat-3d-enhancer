@@ -45,7 +45,7 @@ import {
   renderActiveObjectQaOverlayDom,
   renderActiveObjectQaOverlayLoadingDom,
 } from '../integration/cvat/runtime/active-object-qa-overlay';
-import { OrthoViewMaximizer, type OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
+import type { OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
 import {
   OrthoCuboidEditor,
   type OrthoCameraLike,
@@ -141,7 +141,7 @@ export class PageBridgeRuntimeHost {
     // W/A/S/D/Q/E nudge (while zoomed) + edge resize in Top/Side/Front views
     const orthoEditor = new OrthoCuboidEditor(
       {
-        getMaximizedView: () => orthoMaximizer.getMaximizedView(),
+        getMaximizedView: () => null,
         getActivePoints: () => this.getActiveCuboidPoints(),
         getViewCamera: (view) => this.getOrthoViewCamera(view),
         previewPoints: (clientID, points) => this.previewCuboidPoints(clientID, points),
@@ -152,14 +152,7 @@ export class PageBridgeRuntimeHost {
       this.doc,
       this.win
     );
-    // Keys 1/2/3 toggle maximize of Top/Side/Front orthographic views
-    const orthoMaximizer = new OrthoViewMaximizer(this.doc, this.win, (view) => {
-      if (view === null) {
-        orthoEditor.flushPendingCommit();
-      }
-    });
     const uninstallOrthoEditor = orthoEditor.install();
-    const uninstallOrthoMaximizer = orthoMaximizer.install();
 
     const onInteractiveChange = (event: Event) => {
       const targetEl = event.target as Element | null;
@@ -255,7 +248,6 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('change', onInteractiveChange, true);
       this.doc.removeEventListener('pointerup', onInteractiveChange, true);
       this.doc.removeEventListener('keyup', onInteractiveChange, true);
-      uninstallOrthoMaximizer();
       uninstallOrthoEditor();
       if (this.domSyncRafId !== null) {
         this.win.cancelAnimationFrame?.(this.domSyncRafId);

@@ -72,6 +72,54 @@ describe('Ortho cuboid editor math', () => {
 });
 
 describe('OrthoCuboidEditor keyboard', () => {
+  it.each(['top', 'side', 'front'] as const)(
+    'uses %s camera and suppresses native shortcuts only while its small canvas is hovered',
+    (view) => {
+      document.body.innerHTML = `<div class="cvat-canvas3d-orthographic-view cvat-canvas3d-${view}view"><div class="cvat-canvas3d-header">${view}</div><div class="cvat-canvas3d-fullsize"><canvas width="231" height="233"></canvas></div></div>`;
+      const canvas = document.querySelector('canvas')!;
+      const getViewCamera = vi.fn(() => topCamera);
+      const previewPoints = vi.fn();
+      const editor = new OrthoCuboidEditor(
+        {
+          getMaximizedView: () => null,
+          getActivePoints: () => ({ clientID: 7, points: [...box] }),
+          getViewCamera,
+          previewPoints,
+          commitPoints: vi.fn(),
+        },
+        document,
+        window
+      );
+      const uninstall = editor.install();
+      const native = vi.fn();
+      document.addEventListener('keydown', native);
+      document
+        .querySelector('.cvat-canvas3d-header')!
+        .dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      for (const code of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE']) {
+        const event = new KeyboardEvent('keydown', { code, bubbles: true, cancelable: true });
+        document.body.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      }
+      expect(native).not.toHaveBeenCalled();
+      expect(previewPoints).toHaveBeenCalledTimes(6);
+      expect(getViewCamera).toHaveBeenCalledWith(view);
+      canvas.dispatchEvent(
+        new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })
+      );
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
+      expect(native).toHaveBeenCalledTimes(1);
+      canvas.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      window.dispatchEvent(new Event('blur'));
+      expect(editor.shouldSuppressKeyEvent(new KeyboardEvent('keydown', { code: 'KeyW' }))).toBe(
+        false
+      );
+      document.removeEventListener('keydown', native);
+      uninstall();
+      document.body.innerHTML = '';
+    }
+  );
+
   it('swallows WASDQE only while a view is maximized and debounces commits', () => {
     vi.useFakeTimers();
     let maximized: 'top' | null = 'top';

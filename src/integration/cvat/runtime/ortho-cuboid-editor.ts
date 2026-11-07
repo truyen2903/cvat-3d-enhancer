@@ -1,14 +1,14 @@
 /**
  * Orthographic (Top / Side / Front) cuboid editing helpers for the CVAT 3D workspace.
  *
- * 1. Keyboard nudge while a view is maximized (see `ortho-view-maximizer.ts`):
+ * 1. Keyboard nudge while hovering a view or while a view is maximized (see `ortho-view-maximizer.ts`):
  *      A / D  -> move the active cuboid left / right on screen
  *      W / S  -> move the active cuboid up / down on screen
  *      Q      -> rotate (tilt) counter-clockwise around the view axis
  *      E      -> rotate (tilt) clockwise around the view axis
  *      Shift  -> 5x coarser step
- *    While a view is maximized, CVAT never receives W/A/S/D/Q/E (without Ctrl/Alt/Meta).
- *    When the view is restored, these keys go back to CVAT untouched.
+ *    While hovering a view or while maximized, CVAT never receives W/A/S/D/Q/E (without Ctrl/Alt/Meta).
+ *    Outside these views, these keys go back to CVAT untouched.
  *
  * 2. Edge resize in Top / Side / Front views: CVAT natively only offers corner handles.
  *    Dragging one of the 4 edges of the active cuboid resizes it along a single axis while the
@@ -65,7 +65,7 @@ export interface EdgeHit {
 }
 
 export interface OrthoCuboidEditorContext {
-  /** Currently maximized view (keyboard nudge only works while one is maximized). */
+  /** Currently maximized view (used when no small view is hovered). */
   getMaximizedView: () => OrthoViewName | null;
   /** Active, editable cuboid points on the current frame (null if none / locked). */
   getActivePoints: () => { clientID: number; points: number[] } | null;
@@ -78,10 +78,7 @@ export interface OrthoCuboidEditorContext {
 
 const KEY_EVENT_TYPES = ['keydown', 'keyup', 'keypress'] as const;
 const SUPPRESSED_KEY_EVENTS = new WeakSet<Event>();
-const HOOKED_EVENT_TARGET_PROTOS = new WeakMap<
-  object,
-  Set<(event: KeyboardEvent) => boolean>
->();
+const HOOKED_EVENT_TARGET_PROTOS = new WeakMap<object, Set<(event: KeyboardEvent) => boolean>>();
 
 /**
  * Installs a prototype-level hook on `EventTarget.prototype.addEventListener` /
@@ -107,10 +104,7 @@ export function installEarlyKeySuppressionHook(
     const activePredicates = predicates;
     const origAdd = EventTargetProto.addEventListener;
     const origRemove = EventTargetProto.removeEventListener;
-    const listenerMap = new WeakMap<
-      EventListenerOrEventListenerObject,
-      EventListener
-    >();
+    const listenerMap = new WeakMap<EventListenerOrEventListenerObject, EventListener>();
 
     EventTargetProto.addEventListener = function (
       this: EventTarget,
@@ -212,10 +206,7 @@ export function detectActiveZoomedOrthoView(
   for (const view of ['top', 'side', 'front'] as const) {
     const el = doc.querySelector<HTMLElement>(VIEW_WRAPPERS[view]);
     if (!el) continue;
-    if (
-      el.classList.contains('cvat-3d-enhancer-view-maximized') ||
-      el.style.position === 'fixed'
-    ) {
+    if (el.classList.contains('cvat-3d-enhancer-view-maximized') || el.style.position === 'fixed') {
       return view;
     }
     // Also detect if one of the ortho views was expanded to cover > 45% of the viewport width
@@ -240,6 +231,14 @@ export function detectActiveZoomedOrthoView(
     ) {
       return 'top';
     }
+  }
+  return null;
+}
+
+/** Resolve the whole hovered panel, including its header and canvas container. */
+export function detectHoveredOrthoView(doc: Document): OrthoViewName | null {
+  for (const view of ['top', 'side', 'front'] as const) {
+    if (doc.querySelector(`${VIEW_WRAPPERS[view]}:hover`)) return view;
   }
   return null;
 }
@@ -487,7 +486,12 @@ export function hitTestCuboidEdge(
     const px = dot(ax, frame.right);
     const py = dot(ax, frame.up);
     const f = Math.hypot(px, py);
-    return { axis: i, dir: f > 1e-9 ? ([px / f, py / f] as const) : null, f, half: (sizes[i]! / 2) * f };
+    return {
+      axis: i,
+      dir: f > 1e-9 ? ([px / f, py / f] as const) : null,
+      f,
+      half: (sizes[i]! / 2) * f,
+    };
   });
 
   const tol = tolerancePx * unitsPerPx;
@@ -579,6 +583,7 @@ export class OrthoCuboidEditor {
   private readonly doc: Document;
   private readonly win: Window;
   private readonly ctx: OrthoCuboidEditorContext;
+  private hoveredPanel: HTMLElement | null = null;
   private drag: DragState | null = null;
   private suppressNextClick = false;
   private cursorCanvas: HTMLCanvasElement | null = null;
@@ -586,7 +591,11 @@ export class OrthoCuboidEditor {
   private pending: { clientID: number; points: number[] } | null = null;
   private commitTimer: ReturnType<typeof setTimeout> | null = null;
 
-  public constructor(ctx: OrthoCuboidEditorContext, doc: Document = document, win: Window = window) {
+  public constructor(
+    ctx: OrthoCuboidEditorContext,
+    doc: Document = document,
+    win: Window = window
+  ) {
     this.ctx = ctx;
     this.doc = doc;
     this.win = win;
@@ -601,6 +610,15 @@ export class OrthoCuboidEditor {
     const keyHandler = Object.assign((e: KeyboardEvent): void => this.onKey(e), {
       __cvat3dEnhancerInternalKeyListener: true,
     });
+    const pointerOver = (e: MouseEvent): void => {
+      this.hoveredPanel = this.resolveViewPanel(e.target);
+    };
+    const pointerOut = (e: MouseEvent): void => {
+      this.hoveredPanel = this.resolveViewPanel(e.relatedTarget);
+    };
+    const clearHover = (): void => {
+      this.hoveredPanel = null;
+    };
     const pointerDown = (e: PointerEvent): void => this.onPointerDown(e);
     const pointerMove = (e: PointerEvent): void => this.onPointerMove(e);
     const pointerUp = (e: PointerEvent): void => this.onPointerUp(e);
@@ -612,6 +630,11 @@ export class OrthoCuboidEditor {
       this.win.addEventListener(type, keyHandler, opts);
       this.doc.addEventListener(type, keyHandler, opts);
     }
+    this.win.addEventListener('pointerover', pointerOver, opts);
+    this.win.addEventListener('pointerout', pointerOut, opts);
+    this.win.addEventListener('mousemove', pointerOver, opts);
+    this.win.addEventListener('mouseout', pointerOut, opts);
+    this.win.addEventListener('blur', clearHover);
     this.win.addEventListener('pointerdown', pointerDown, opts);
     this.win.addEventListener('pointermove', pointerMove, opts);
     this.win.addEventListener('pointerup', pointerUp, opts);
@@ -627,6 +650,12 @@ export class OrthoCuboidEditor {
         this.win.removeEventListener(type, keyHandler, opts);
         this.doc.removeEventListener(type, keyHandler, opts);
       }
+      this.win.removeEventListener('pointerover', pointerOver, opts);
+      this.win.removeEventListener('pointerout', pointerOut, opts);
+      this.win.removeEventListener('mousemove', pointerOver, opts);
+      this.win.removeEventListener('mouseout', pointerOut, opts);
+      this.win.removeEventListener('blur', clearHover);
+      clearHover();
       this.win.removeEventListener('pointerdown', pointerDown, opts);
       this.win.removeEventListener('pointermove', pointerMove, opts);
       this.win.removeEventListener('pointerup', pointerUp, opts);
@@ -653,6 +682,17 @@ export class OrthoCuboidEditor {
 
   // ----- keyboard -----------------------------------------------------------------------------
 
+  private getActiveView(): OrthoViewName | null {
+    const liveHover = detectHoveredOrthoView(this.doc);
+    if (liveHover) return liveHover;
+    if (this.hoveredPanel?.isConnected) {
+      for (const view of ['top', 'side', 'front'] as const) {
+        if (this.hoveredPanel.matches(VIEW_WRAPPERS[view])) return view;
+      }
+    }
+    return detectActiveZoomedOrthoView(this.doc, this.ctx.getMaximizedView());
+  }
+
   public shouldSuppressKeyEvent(event: KeyboardEvent): boolean {
     const code = resolveNudgeKeyCode(event);
     if (!code || event.ctrlKey || event.altKey || event.metaKey) {
@@ -661,7 +701,7 @@ export class OrthoCuboidEditor {
     if (isEditableEventTarget(event.target)) {
       return false;
     }
-    const view = detectActiveZoomedOrthoView(this.doc, this.ctx.getMaximizedView());
+    const view = this.getActiveView();
     return view !== null;
   }
 
@@ -676,11 +716,11 @@ export class OrthoCuboidEditor {
     if (!code || event.ctrlKey || event.altKey || event.metaKey) {
       return;
     }
-    const view = detectActiveZoomedOrthoView(this.doc, this.ctx.getMaximizedView());
+    const view = this.getActiveView();
     if (!view || isEditableEventTarget(event.target)) {
       return;
     }
-    // Mark and swallow the key completely so CVAT never sees W/A/S/D/Q/E while zoomed
+    // Mark and swallow the key completely so CVAT never sees W/A/S/D/Q/E while hovering an ortho view or zoomed
     SUPPRESSED_KEY_EVENTS.add(event);
     event.preventDefault();
     event.stopPropagation();
@@ -747,6 +787,12 @@ export class OrthoCuboidEditor {
 
   // ----- edge drag ----------------------------------------------------------------------------
 
+  private resolveViewPanel(target: EventTarget | null): HTMLElement | null {
+    const el = target as Element | null;
+    if (!el || typeof el.closest !== 'function') return null;
+    return el.closest<HTMLElement>(Object.values(VIEW_WRAPPERS).join(', '));
+  }
+
   private resolveViewCanvas(target: EventTarget | null): {
     view: OrthoViewName;
     canvas: HTMLCanvasElement;
@@ -772,7 +818,13 @@ export class OrthoCuboidEditor {
     canvas: HTMLCanvasElement,
     clientX: number,
     clientY: number
-  ): { hit: EdgeHit; frame: CameraFrame; local: [number, number]; clientID: number; points: number[] } | null {
+  ): {
+    hit: EdgeHit;
+    frame: CameraFrame;
+    local: [number, number];
+    clientID: number;
+    points: number[];
+  } | null {
     const active = this.ctx.getActivePoints();
     if (!active || active.points.length < 9) {
       return null;
@@ -785,9 +837,14 @@ export class OrthoCuboidEditor {
     if (rect.width <= 0 || rect.height <= 0) {
       return null;
     }
-    const points =
-      this.pending?.clientID === active.clientID ? this.pending.points : active.points;
-    const local = pixelToLocal2d(frame, clientX - rect.left, clientY - rect.top, rect.width, rect.height);
+    const points = this.pending?.clientID === active.clientID ? this.pending.points : active.points;
+    const local = pixelToLocal2d(
+      frame,
+      clientX - rect.left,
+      clientY - rect.top,
+      rect.width,
+      rect.height
+    );
     const hit = hitTestCuboidEdge(points, frame, local, worldUnitsPerPixel(frame, rect.width));
     return hit ? { hit, frame, local, clientID: active.clientID, points } : null;
   }
@@ -874,7 +931,10 @@ export class OrthoCuboidEditor {
   }
 
   private onMouseDuringDrag(event: MouseEvent): void {
-    if (this.drag || (this.suppressNextClick && (event.type === 'click' || event.type === 'mouseup'))) {
+    if (
+      this.drag ||
+      (this.suppressNextClick && (event.type === 'click' || event.type === 'mouseup'))
+    ) {
       event.preventDefault();
       event.stopImmediatePropagation();
       return;

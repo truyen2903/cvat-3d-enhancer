@@ -24,6 +24,7 @@ import { RuntimeDetector } from '../integration/cvat/detector';
 import { CvatDomAdapter } from '../integration/cvat/dom';
 import {
   detectActiveZoomedOrthoView,
+  detectHoveredOrthoView,
   isEditableEventTarget,
   resolveNudgeKeyCode,
 } from '../integration/cvat/runtime/ortho-cuboid-editor';
@@ -93,7 +94,7 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
     if (isEditableEventTarget(event.target)) {
       return;
     }
-    if (detectActiveZoomedOrthoView(document, null)) {
+    if (detectHoveredOrthoView(document) || detectActiveZoomedOrthoView(document, null)) {
       event.preventDefault();
       event.stopPropagation();
     }
