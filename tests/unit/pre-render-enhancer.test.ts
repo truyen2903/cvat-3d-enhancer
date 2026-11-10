@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
   type CvatObjectStateLike,
+  type ThreeObject3DLike,
   clearCuboidPointColorCache,
   computeHueSeparationDegrees,
   computePerceptualColorDistance,
@@ -618,10 +619,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     // - Frame 5 (current): attributes { 10: 'car', 20: 'moving' }, points [1,2,3, 0,0,0, 4.8, 2.1, 1.75]
     // - Frame 10: attributes { 10: 'car', 20: 'parked' } (MISMATCH!), points [2,3,4, 0,0,0, 4.0, 1.8, 1.5]
     // - Frame 15: attributes { 10: 'car', 20: 'moving' }, points [3,4,5, 0,0,0, 4.1, 1.9, 1.6]
-    const trackShapes: Record<
-      number,
-      { points: number[]; attributes: Record<number, string> }
-    > = {
+    const trackShapes: Record<number, { points: number[]; attributes: Record<number, string> }> = {
       0: { points: [0, 0, 0, 0, 0, 0, 4.0, 1.8, 1.5], attributes: { 10: 'car', 20: 'moving' } },
       5: { points: [1, 2, 3, 0, 0, 0, 4.8, 2.1, 1.75], attributes: { 10: 'car', 20: 'moving' } },
       10: { points: [2, 3, 4, 0, 0, 0, 4.0, 1.8, 1.5], attributes: { 10: 'car', 20: 'parked' } },
@@ -800,21 +798,15 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(count2).toBe(0);
   });
 
-  it('hides ground points when hideGroundPoints is enabled while preserving points inside boxes and elevated points, and restores all points when disabled', () => {
+  it('hides ground points only in Top while preserving main 3D, protected box points and elevated points', () => {
     // 4 points:
     // - Point 0: (0, 0, -1.6) -> Inside Box #1 centered at (0, 0, -1.5) with height 0.6. Even though z=-1.6 is near ground, it MUST BE KEPT!
     // - Point 1: (10, 0, -1.6) -> Outside all boxes, at ground level (z=-1.6) -> MUST BE HIDDEN
     // - Point 2: (10, 0, 0.5) -> Outside all boxes, but elevated (z=0.5m) -> MUST BE KEPT
     // - Point 3: (12, 0, -1.62) -> Outside all boxes, at ground level (z=-1.62) -> MUST BE HIDDEN
-    const posArr = new Float32Array([
-      0, 0, -1.6,
-      10, 0, -1.6,
-      10, 0, 0.5,
-      12, 0, -1.62,
-    ]);
+    const posArr = new Float32Array([0, 0, -1.6, 10, 0, -1.6, 10, 0, 0.5, 12, 0, -1.62]);
     const colArr = new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
 
-    let drawRangeCount = 4;
     const geom = {
       attributes: {
         position: { array: posArr, needsUpdate: false },
@@ -824,10 +816,15 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       setDrawRange(start: number, count: number) {
         this.drawRange.start = start;
         this.drawRange.count = count;
-        drawRangeCount = count;
       },
     };
 
+    const mainPoints: ThreeObject3DLike = {
+      type: 'Points',
+      geometry: geom,
+      material: { size: 0.05, color: { r: 1, g: 1, b: 1, set: vi.fn() } },
+    };
+    const topPoints: ThreeObject3DLike = { ...mainPoints };
     const canvas3d: CvatInternalCanvas3dLike = {
       model: { data: { imageID: 10 } },
       view: {
@@ -835,9 +832,10 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
           perspective: {
             scene: {
               background: null,
-              children: [{ type: 'Points', geometry: geom, material: { size: 0.05, sizeAttenuation: true, color: { r: 1, g: 1, b: 1, set: vi.fn() } } }],
+              children: [mainPoints],
             },
           },
+          top: { scene: { background: null, children: [topPoints] } },
         },
         drawnObjects: {
           1: {
@@ -863,11 +861,15 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     enhancer.ensureHooked(canvas3d);
 
     // Kept points: Point 0 (inside Box #1) and Point 2 (elevated point). Point 1 and Point 3 (ground) are hidden.
-    expect(drawRangeCount).toBe(2);
-    expect(geom.drawRange.count).toBe(2);
+    const topGeometry = topPoints.geometry!;
+    expect(topGeometry).not.toBe(geom);
+    expect(topGeometry.drawRange!.count).toBe(2);
+    expect(geom.drawRange.count).toBe(4);
+    expect(geom.attributes.position.array).toEqual(posArr);
+    expect(posArr[3]).toBe(10);
 
     // Verify original positions can still be inspected by QA overlay via getOriginalGeometryPositions
-    const orig = getOriginalGeometryPositions(geom);
+    const orig = getOriginalGeometryPositions(topGeometry);
     expect(orig).not.toBeNull();
     expect(orig!.length).toBe(12);
     expect(orig![3]).toBeCloseTo(10, 3);
@@ -884,7 +886,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       canvas3d
     );
 
-    expect(drawRangeCount).toBe(4);
+    expect(topGeometry.drawRange!.count).toBe(4);
     expect(geom.drawRange.count).toBe(4);
     expect(posArr[3]).toBeCloseTo(10, 3);
     expect(posArr[5]).toBeCloseTo(-1.6, 3);

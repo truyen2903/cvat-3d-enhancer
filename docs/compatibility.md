@@ -131,3 +131,14 @@ all Workspace flags rather than reverting them to defaults.
 
 Regression tests simulate delayed snapshots, rapid frame jumps, object changes, loading
 controls, focus transitions, and detached views. No live point-cloud buffers are inspected.
+
+## 11. Ground hiding is restricted to Top
+
+The existing `hideGroundPoints` Workspace option now hides ground only in the Top view.
+Main 3D, Side and Front retain all ground points. Top receives a private geometry copy so
+compacting shared point buffers cannot affect the other views. Disabling the option
+restores all Top points. Known Top canvases and Top camera references retain this behavior
+when expanded; unidentified views conservatively keep ground visible.
+
+Regression tests use synthetic point buffers and native Three.js geometry clones to check
+view isolation, toggling, newly mounted Top/Side canvases, and processing-cache stability.

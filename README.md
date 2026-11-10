@@ -10,7 +10,7 @@ Meow — make your workspace feel like home.
 
 ### Download and install (no build required)
 
-1. Open [the latest release](https://github.com/truyen2903/cvat-3d-enhancer/releases/latest) and download **meow-v0.2.1.zip** under **Assets**.
+1. Open [the latest release](https://github.com/truyen2903/cvat-3d-enhancer/releases/latest) and download **meow-v0.2.2.zip** under **Assets**.
 2. Extract the ZIP and keep the **meow/** folder in a permanent location.
 3. Open Chrome (`chrome://extensions`) or Brave (`brave://extensions`) and enable **Developer mode**.
 4. Click **Load unpacked** and select **meow/**, the extracted folder containing `manifest.json`.

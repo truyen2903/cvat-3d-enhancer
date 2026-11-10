@@ -87,6 +87,7 @@ export interface ThreeObject3DLike {
       count: number;
     };
     setDrawRange?: (start: number, count: number) => void;
+    clone?: () => NonNullable<ThreeObject3DLike['geometry']>;
   };
   material?: ThreePointsMaterialLike;
   onBeforeRender?: (...args: unknown[]) => void;
@@ -1164,6 +1165,16 @@ export class Cvat3dPreRenderEnhancer {
   private readonly baseColorsCache = new WeakMap<object, Float32Array>();
   private readonly modifiedGeometries = new WeakSet<object>();
   private readonly compactedGeometries = new WeakSet<object>();
+  private readonly topGeometryCopies = new WeakMap<
+    object,
+    NonNullable<ThreeObject3DLike['geometry']>
+  >();
+  private readonly topGeometrySources = new WeakMap<
+    object,
+    NonNullable<ThreeObject3DLike['geometry']>
+  >();
+  private readonly sceneViewRoles = new WeakMap<object, boolean>();
+  private readonly topCameras = new WeakSet<object>();
   private readonly hiddenOrientationArrows = new WeakSet<object>();
   private readonly hookedViews = new WeakSet<object>();
   private readonly hookedPrototypes = new WeakSet<object>();
@@ -1506,6 +1517,68 @@ export class Cvat3dPreRenderEnhancer {
     };
   }
 
+  private isTopView(
+    scene?: unknown,
+    renderer?: CvatRenderViewLike['renderer'],
+    camera?: unknown
+  ): boolean {
+    const canvas = renderer?.domElement;
+    if (canvas?.closest?.('.cvat-canvas3d-topview')) return true;
+    if (
+      canvas?.closest?.(
+        '.cvat-canvas3d-perspective, .cvat-canvas3d-sideview, .cvat-canvas3d-frontview'
+      )
+    )
+      return false;
+    if (scene && typeof scene === 'object' && this.sceneViewRoles.has(scene))
+      return this.sceneViewRoles.get(scene)!;
+    return Boolean(camera && typeof camera === 'object' && this.topCameras.has(camera));
+  }
+
+  /** Give Top a private geometry so compaction cannot change any other viewport. */
+  private preparePointGeometry(points: ThreeObject3DLike, isTop: boolean): void {
+    const source = points.geometry;
+    if (!source) return;
+    const original = this.topGeometrySources.get(source);
+    if (!isTop) {
+      if (original) points.geometry = original;
+      return;
+    }
+    if (!this.options.hideGroundPoints || original) return;
+    let copy = this.topGeometryCopies.get(source);
+    if (!copy) {
+      if (typeof source.clone === 'function') {
+        copy = source.clone();
+      } else {
+        const cloneAttribute = (
+          attribute?: ThreeBufferAttributeLike
+        ): ThreeBufferAttributeLike | undefined =>
+          attribute ? { ...attribute, array: attribute.array.slice() } : undefined;
+        copy = {
+          ...source,
+          attributes: {
+            ...source.attributes,
+            position: cloneAttribute(source.attributes?.position),
+            color: cloneAttribute(source.attributes?.color),
+          },
+          drawRange: source.drawRange ? { ...source.drawRange } : undefined,
+          setDrawRange(start, count) {
+            this.drawRange = { start, count };
+          },
+        };
+      }
+      this.topGeometryCopies.set(source, copy);
+      this.topGeometrySources.set(copy, source);
+      // A newly expanded Top may clone an already-colored main view. Keep its original
+      // intensity colors as the restore baseline instead of caching the recolored values.
+      const originalColor = source.attributes?.color;
+      const copyColor = copy.attributes?.color;
+      const baseColor = originalColor ? this.baseColorsCache.get(originalColor) : undefined;
+      if (copyColor && baseColor) this.baseColorsCache.set(copyColor, baseColor);
+    }
+    points.geometry = copy;
+  }
+
   private handlePointsBeforeRender(
     ptsObj: ThreeObject3DLike,
     renderer?: unknown,
@@ -1533,6 +1606,9 @@ export class Cvat3dPreRenderEnhancer {
       }
     }
 
+    const isTop = this.isTopView(scene, renObj, camera);
+    if (isTop && camera && typeof camera === 'object') this.topCameras.add(camera);
+    this.preparePointGeometry(ptsObj, isTop);
     this.applyScatteringToMaterial(ptsObj, isPerspective);
     if (
       materialArg &&
@@ -1546,13 +1622,14 @@ export class Cvat3dPreRenderEnhancer {
       );
     }
 
+    const signature = `${this.lastGeometryColorSignature}:ground:${isTop && this.options.hideGroundPoints ? 1 : 0}`;
     if (
       ptsObj.geometry &&
       this.lastGeometryColorSignature &&
-      this.geometrySignatureMap.get(ptsObj.geometry) !== this.lastGeometryColorSignature
+      this.geometrySignatureMap.get(ptsObj.geometry) !== signature
     ) {
-      this.geometrySignatureMap.set(ptsObj.geometry, this.lastGeometryColorSignature);
-      this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes);
+      this.geometrySignatureMap.set(ptsObj.geometry, signature);
+      this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes, isTop);
     }
   }
 
@@ -1717,9 +1794,16 @@ export class Cvat3dPreRenderEnhancer {
         if (rv.scene) {
           optimizeOrthographicRaycastPlanes(rv.scene, this.optimizedPlaneMeshes);
         }
+        if (rv.scene && ['perspective', 'top', 'side', 'front'].includes(key)) {
+          this.sceneViewRoles.set(rv.scene, key === 'top');
+        }
+        const isTop = key === 'top' || this.isTopView(rv.scene, rv.renderer);
+        const viewCamera = (rv as { camera?: unknown }).camera;
+        if (isTop && viewCamera && typeof viewCamera === 'object') this.topCameras.add(viewCamera);
         const isPerspective = key === 'perspective';
         const pointsList = findPointsObjectsInScene(rv.scene);
         for (const ptsObj of pointsList) {
+          this.preparePointGeometry(ptsObj, isTop);
           this.bindInstanceBeforeRenderHook(ptsObj);
           this.applyScatteringToMaterial(ptsObj, isPerspective);
         }
@@ -1747,17 +1831,19 @@ export class Cvat3dPreRenderEnhancer {
       const compiledBoxes = this.lastCompiledBoxes;
       const processedGeometries = new WeakSet<object>();
 
-      for (const [, rv] of viewEntries) {
+      for (const [key, rv] of viewEntries) {
+        const isTop = key === 'top' || this.isTopView(rv?.scene, rv?.renderer);
+        const signature = `${geometryColorSignature}:ground:${isTop && this.options.hideGroundPoints ? 1 : 0}`;
         const pointsList = findPointsObjectsInScene(rv?.scene);
         for (const ptsObj of pointsList) {
           if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
             processedGeometries.add(ptsObj.geometry);
             if (
               shouldRecompileBoxSnapshots ||
-              this.geometrySignatureMap.get(ptsObj.geometry) !== geometryColorSignature
+              this.geometrySignatureMap.get(ptsObj.geometry) !== signature
             ) {
-              this.geometrySignatureMap.set(ptsObj.geometry, geometryColorSignature);
-              this.applyPointCloudBoxColors(ptsObj, compiledBoxes);
+              this.geometrySignatureMap.set(ptsObj.geometry, signature);
+              this.applyPointCloudBoxColors(ptsObj, compiledBoxes, isTop);
             }
           }
         }
@@ -1815,7 +1901,8 @@ export class Cvat3dPreRenderEnhancer {
 
   private applyPointCloudBoxColors(
     ptsObj: ThreeObject3DLike,
-    boxes: readonly OrientedBoxBounds[]
+    boxes: readonly OrientedBoxBounds[],
+    isTop = false
   ): void {
     const geom = ptsObj.geometry;
     const posAttr = geom?.attributes?.position;
@@ -1824,7 +1911,7 @@ export class Cvat3dPreRenderEnhancer {
       return;
     }
 
-    const hideGround = Boolean(this.options.hideGroundPoints);
+    const hideGround = Boolean(this.options.hideGroundPoints) && isTop;
     const colorBoxes = Boolean(this.options.colorPointsByCuboid);
     const useSolidUnboxed = Boolean(this.options.enableScattering);
     const wasModified = this.modifiedGeometries.has(geom);
@@ -2271,9 +2358,9 @@ export function injectCvatWorkspaceSettingsControls(
     {
       key: 'hideGroundPoints',
       rowClass: 'cvat-workspace-settings-3d-hide-ground-points',
-      title: 'Hide ground 3D points (Tắt điểm mặt đất)',
+      title: 'Hide ground points in Top view only (Chỉ tắt đất ở Top)',
       description:
-        'Hide road and ground LiDAR points on the 3D canvas to see bounding boxes clearly and speed up frame switching',
+        'Hide road and ground points only in Top; keep ground visible in main 3D, Side and Front',
     },
     {
       key: 'fixedOrthoPointSize',
