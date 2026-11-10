@@ -94,7 +94,17 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   };
   window.addEventListener('blur', onEarlyBlur);
   window.addEventListener('focus', onEarlyFocus);
+  let savedKeyboardEnabled = true;
+  try {
+    savedKeyboardEnabled =
+      JSON.parse(window.localStorage.getItem('cvat3dEnhancerSettings') ?? '{}')
+        .enableOrthoKeyboard !== false;
+  } catch {
+    /* Keep default when settings are unavailable. */
+  }
   const onEarlyZoomKeyCapture = (event: KeyboardEvent): void => {
+    const keyboardFlag = document.documentElement.getAttribute('data-meow-ortho-keyboard');
+    if (keyboardFlag === '0' || (keyboardFlag === null && !savedKeyboardEnabled)) return;
     const code = resolveNudgeKeyCode(event);
     if (!code || event.ctrlKey || event.altKey || event.metaKey) {
       return;

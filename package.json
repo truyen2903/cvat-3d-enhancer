@@ -1,8 +1,8 @@
 {
   "name": "meow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Meow — make your workspace feel like home.",
+  "description": "Meow \u2014 make your workspace feel like home.",
   "type": "module",
   "license": "MIT",
   "scripts": {
@@ -15,7 +15,8 @@
     "test": "vitest run",
     "test:security": "vitest run tests/security && node scripts/check-secrets.mjs",
     "test:e2e": "playwright test",
-    "security:audit": "npm audit --audit-level=high && node scripts/check-secrets.mjs"
+    "security:audit": "npm audit --audit-level=high && node scripts/check-secrets.mjs",
+    "package:release": "python3 scripts/package-release.py"
   },
   "dependencies": {
     "react": "18.3.1",

@@ -1,3 +1,4 @@
+import { WORKSPACE_FEATURE_DEFAULTS } from '../../src/integration/cvat/runtime/workspace-feature-options';
 import { describe, expect, it, vi } from 'vitest';
 import {
   type CvatInternalCanvas3dLike,
@@ -44,6 +45,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     const readBack = readRenderOptionsFromClientSettings();
     expect(readBack).toEqual({
+      ...WORKSPACE_FEATURE_DEFAULTS,
       whiteBackground: true,
       enableScattering: true,
       colorPointsByCuboid: false,
@@ -71,6 +73,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     const restored = readRenderOptionsFromClientSettings();
     expect(restored).toEqual({
+      ...WORKSPACE_FEATURE_DEFAULTS,
       whiteBackground: true,
       enableScattering: false,
       colorPointsByCuboid: true,
@@ -275,7 +278,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
 
     // Point 3 MUST NOT change color while dragging on the same frame
     expect(colorArray[9]).toBeCloseTo(0, 3);
-    // And Perspective points.material.size MUST stay 0.05 (never turn into 2.5px when renderer.domElement is omitted)
+    // Perspective retains native zoom attenuation and a non-compounding 20% size increase.
     const perspScn = mockCanvas3d.view!.views!.perspective!.scene!;
     (pointsObj as { onBeforeRender?: (...args: unknown[]) => void }).onBeforeRender?.(
       {},
@@ -284,7 +287,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       pointsObj.geometry,
       pointsObj.material
     );
-    expect(pointsObj.material.size).toBe(0.05);
+    expect(pointsObj.material.size).toBeCloseTo(0.06);
     expect(pointsObj.material.sizeAttenuation).toBe(true);
 
     // Now simulate Next Frame -> Prev Frame (image_changed + initial objects_updated)
@@ -430,7 +433,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     // By default (fixedOrthoPointSize: true), orthographic view point size is fixed at 3.5px
     expect(topPoints.material.size).toBe(3.5);
     expect(topPoints.material.sizeAttenuation).toBe(false);
-    expect(perspPoints.material.size).toBe(0.05);
+    expect(perspPoints.material.size).toBeCloseTo(0.06);
+    expect(perspPoints.material.sizeAttenuation).toBe(true);
 
     // When turned OFF (fixedOrthoPointSize: false), reverts to CVAT native 0.5px
     enhancer.setOptions(
@@ -444,6 +448,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     );
     expect(topPoints.material.size).toBe(0.5);
     expect(topPoints.material.sizeAttenuation).toBe(true);
+    expect(perspPoints.material.size).toBeCloseTo(0.06);
+    expect(perspPoints.material.sizeAttenuation).toBe(true);
   });
 
   it('keeps PointsMaterial opaque (transparent = false) and disables cuboid depthWrite when scattering is enabled so active boxes never hide internal points', () => {
@@ -551,7 +557,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       followActiveObject: true,
     });
     enhancer.ensureHooked(canvas3d);
-    expect(perspPoints.material.size).toBe(0.05);
+    expect(perspPoints.material.size).toBeCloseTo(0.06);
+    expect(perspPoints.material.sizeAttenuation).toBe(true);
 
     // 1. Simulate pressing zoom key on Top/Side/Front which opens a new standalone zoom canvas
     // with its own MockThreePoints instance (not even registered in view.views)

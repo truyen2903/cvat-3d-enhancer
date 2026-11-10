@@ -12,9 +12,17 @@
  *    or option toggle), never recomputing on every 60fps `render()` call unless state changed.
  */
 
+import {
+  WORKSPACE_FEATURE_DEFAULTS,
+  WORKSPACE_FEATURE_KEYS,
+  WORKSPACE_FEATURE_CONTROLS,
+  normalizeWorkspaceFeatureOptions,
+  type WorkspaceFeatureOptions,
+} from './workspace-feature-options';
+import type { GuideMeshLike } from './cuboid-base-guide';
 import { deferHiddenOrientationArrowUpdates } from './hidden-orientation-arrows';
 
-export interface Cvat3dWorkspaceRenderOptions {
+export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
   readonly whiteBackground: boolean;
   readonly enableScattering: boolean;
   readonly colorPointsByCuboid: boolean;
@@ -25,6 +33,7 @@ export interface Cvat3dWorkspaceRenderOptions {
 }
 
 export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Object.freeze({
+  ...WORKSPACE_FEATURE_DEFAULTS,
   whiteBackground: false,
   enableScattering: false,
   colorPointsByCuboid: false,
@@ -97,7 +106,7 @@ export interface CvatRenderViewLike {
   };
 }
 
-export interface CvatCuboidViewMeshLike {
+export interface CvatCuboidViewMeshLike extends GuideMeshLike {
   position?: { x: number; y: number; z: number };
   rotation?: { x: number; y: number; z: number };
   scale?: { x: number; y: number; z: number };
@@ -157,7 +166,9 @@ export interface CvatDrawnObjectEntry {
   };
   state?: CvatObjectStateLike;
   cuboid: {
-    orientationArrows?: Partial<Record<'perspective' | 'top' | 'side' | 'front', Record<string, unknown> | null>>;
+    orientationArrows?: Partial<
+      Record<'perspective' | 'top' | 'side' | 'front', Record<string, unknown> | null>
+    >;
     setColor?: (hexColor: string) => void;
     setScale?: (x: number, y: number, z: number) => void;
     setRotation?: (x: number, y: number, z: number) => void;
@@ -196,14 +207,14 @@ export interface CvatInternalCanvas3dLike {
 
 function normalizeRenderOptionsRecord(obj: Record<string, unknown>): Cvat3dWorkspaceRenderOptions {
   return {
+    ...normalizeWorkspaceFeatureOptions(obj),
     whiteBackground: Boolean(obj.whiteBackground),
     enableScattering: Boolean(obj.enableScattering),
     colorPointsByCuboid: Boolean(obj.colorPointsByCuboid),
     hideGroundPoints: Boolean(obj.hideGroundPoints),
     fixedOrthoPointSize:
       typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
-    followActiveObject:
-      typeof obj.followActiveObject === 'boolean' ? obj.followActiveObject : true,
+    followActiveObject: typeof obj.followActiveObject === 'boolean' ? obj.followActiveObject : true,
     enableActiveObjectWarnings:
       typeof obj.enableActiveObjectWarnings === 'boolean' ? obj.enableActiveObjectWarnings : true,
   };
@@ -262,6 +273,9 @@ export function readRenderOptionsFromClientSettings(
     if (
       typeof storage.setItem === 'function' &&
       (!clientSettingsOptions ||
+        WORKSPACE_FEATURE_KEYS.some(
+          (key) => (clientSettingsOptions[key] ?? true) !== (standaloneOptions[key] ?? true)
+        ) ||
         clientSettingsOptions.whiteBackground !== standaloneOptions.whiteBackground ||
         clientSettingsOptions.enableScattering !== standaloneOptions.enableScattering ||
         clientSettingsOptions.colorPointsByCuboid !== standaloneOptions.colorPointsByCuboid ||
@@ -328,6 +342,7 @@ export function writeRenderOptionsToClientSettings(
       : {};
 
   const normalized: Cvat3dWorkspaceRenderOptions = {
+    ...normalizeWorkspaceFeatureOptions({ ...options }),
     whiteBackground: Boolean(options.whiteBackground),
     enableScattering: Boolean(options.enableScattering),
     colorPointsByCuboid: Boolean(options.colorPointsByCuboid),
@@ -542,9 +557,8 @@ export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): str
  * destroy CVAT's white/configured `outlinedBorders`).
  */
 export function ensureCuboidKeepsLabelColor(entry?: CvatDrawnObjectEntry): string | undefined {
-  const stateLabelColor = (
-    entry?.state as { label?: { color?: string } } | undefined
-  )?.label?.color;
+  const stateLabelColor = (entry?.state as { label?: { color?: string } } | undefined)?.label
+    ?.color;
   const rawLabelColor = entry?.data?.labelColor ?? stateLabelColor;
   const labelColor =
     typeof rawLabelColor === 'string' && /^#?[0-9a-fA-F]{6}$/.test(rawLabelColor.trim())
@@ -954,12 +968,9 @@ export function optimizeOrthographicRaycastPlanes(
 
     if (typeof GeomCtor === 'function' && GeomCtor !== Object) {
       try {
-        const replacement = new (GeomCtor as new (
-          w: number,
-          h: number,
-          ws: number,
-          hs: number
-        ) => typeof geom)(width, height, 1, 1);
+        const replacement = new (
+          GeomCtor as new (w: number, h: number, ws: number, hs: number) => typeof geom
+        )(width, height, 1, 1);
         if (replacement && replacement.attributes?.position) {
           child.geometry = replacement;
           if (typeof geom.dispose === 'function') {
@@ -1040,7 +1051,7 @@ export function getOriginalGeometryPositions(
 const GROUND_GRID_SIDE = 64;
 const GROUND_CELL_SIZE = 3.0;
 const GROUND_INV_CELL_SIZE = 1 / GROUND_CELL_SIZE;
-const GROUND_HALF_SPAN = (GROUND_GRID_SIDE * GROUND_CELL_SIZE) * 0.5; // 96m
+const GROUND_HALF_SPAN = GROUND_GRID_SIDE * GROUND_CELL_SIZE * 0.5; // 96m
 const sharedGroundCellMinZ = new Float32Array(GROUND_GRID_SIDE * GROUND_GRID_SIDE);
 const sharedEgoHistogram = new Int32Array(40);
 
@@ -1181,6 +1192,15 @@ export class Cvat3dPreRenderEnhancer {
   private isRedrawingViews = false;
   private isApplying = false;
 
+  private canvasRenderListener:
+    ((canvas: HTMLCanvasElement, camera: unknown, scene?: ThreeSceneLike) => void) | null = null;
+
+  public setCanvasRenderListener(
+    listener: ((canvas: HTMLCanvasElement, camera: unknown, scene?: ThreeSceneLike) => void) | null
+  ): void {
+    this.canvasRenderListener = listener;
+  }
+
   /**
    * Returns the camera most recently used to render into the given `<canvas>` (captured from
    * the scene `onBeforeRender` hook), or `null` if that canvas has not been rendered yet.
@@ -1197,10 +1217,13 @@ export class Cvat3dPreRenderEnhancer {
     return null;
   }
 
-  public constructor(initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS) {
+  public constructor(
+    initialOptions: Cvat3dWorkspaceRenderOptions = DEFAULT_CVAT_3D_RENDER_OPTIONS
+  ) {
     this.options = {
       ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
       ...initialOptions,
+      ...normalizeWorkspaceFeatureOptions({ ...initialOptions }),
       hideGroundPoints: Boolean(initialOptions.hideGroundPoints),
       fixedOrthoPointSize: initialOptions.fixedOrthoPointSize ?? true,
       followActiveObject: initialOptions.followActiveObject ?? true,
@@ -1225,10 +1248,12 @@ export class Cvat3dPreRenderEnhancer {
       next.enableScattering !== this.options.enableScattering ||
       next.colorPointsByCuboid !== this.options.colorPointsByCuboid ||
       nextHideGround !== prevHideGround ||
-      nextOrthoFixed !== prevOrthoFixed;
+      nextOrthoFixed !== prevOrthoFixed ||
+      (next.enlargePerspectivePoints ?? true) !== (this.options.enlargePerspectivePoints ?? true);
 
     this.options = {
       ...next,
+      ...normalizeWorkspaceFeatureOptions({ ...next }),
       hideGroundPoints: nextHideGround,
       fixedOrthoPointSize: nextOrthoFixed,
       followActiveObject: next.followActiveObject ?? true,
@@ -1256,9 +1281,10 @@ export class Cvat3dPreRenderEnhancer {
       if (typeof this.activeView?.render === 'function') {
         this.activeView.render();
       }
-      const nativeScenes = typeof this.activeView?.render === 'function'
-        ? new Set(Object.values(this.activeView.views ?? {}).map((view) => view?.scene))
-        : null;
+      const nativeScenes =
+        typeof this.activeView?.render === 'function'
+          ? new Set(Object.values(this.activeView.views ?? {}).map((view) => view?.scene))
+          : null;
       for (const [scene, ctx] of this.sceneRenderContext.entries()) {
         if (nativeScenes?.has(scene)) continue;
         if (typeof ctx.renderer?.render === 'function' && ctx.camera) {
@@ -1294,8 +1320,13 @@ export class Cvat3dPreRenderEnhancer {
     const color = scene?.background;
     if (!color || typeof color.set !== 'function') return;
     const channel = this.options.whiteBackground ? 1 : 0;
-    if (this.appliedSceneColors.get(color) === this.options.whiteBackground &&
-      color.r === channel && color.g === channel && color.b === channel) return;
+    if (
+      this.appliedSceneColors.get(color) === this.options.whiteBackground &&
+      color.r === channel &&
+      color.g === channel &&
+      color.b === channel
+    )
+      return;
     color.set(this.options.whiteBackground ? 0xffffff : 0x000000);
     this.appliedSceneColors.set(color, this.options.whiteBackground);
   }
@@ -1343,14 +1374,10 @@ export class Cvat3dPreRenderEnhancer {
     samplePoints?: ThreeObject3DLike
   ): void {
     if (perspectiveScene && typeof perspectiveScene === 'object') {
-      const sceneProto = Object.getPrototypeOf(perspectiveScene) as
-        | { onBeforeRender?: (...args: unknown[]) => void }
-        | null;
-      if (
-        sceneProto &&
-        sceneProto !== Object.prototype &&
-        !this.hookedPrototypes.has(sceneProto)
-      ) {
+      const sceneProto = Object.getPrototypeOf(perspectiveScene) as {
+        onBeforeRender?: (...args: unknown[]) => void;
+      } | null;
+      if (sceneProto && sceneProto !== Object.prototype && !this.hookedPrototypes.has(sceneProto)) {
         this.hookedPrototypes.add(sceneProto);
         const origSceneBeforeRender =
           typeof sceneProto.onBeforeRender === 'function' ? sceneProto.onBeforeRender : null;
@@ -1365,9 +1392,7 @@ export class Cvat3dPreRenderEnhancer {
           }
           const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
           const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
-          const targetBgRgb = this.options.whiteBackground
-            ? 'rgb(255, 255, 255)'
-            : 'rgb(0, 0, 0)';
+          const targetBgRgb = this.options.whiteBackground ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)';
           const sceneObj = scene as ThreeSceneLike | undefined;
           this.syncSceneColor(sceneObj);
           if (
@@ -1380,6 +1405,9 @@ export class Cvat3dPreRenderEnhancer {
             optimizeOrthographicRaycastPlanes(sceneObj, this.optimizedPlaneMeshes);
           }
           const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
+          if (renObj?.domElement && camera) {
+            this.canvasRenderListener?.(renObj.domElement, camera, sceneObj);
+          }
           if (sceneObj && renObj && typeof renObj.render === 'function' && camera) {
             // Remember (renderer, camera) per scene so option toggles can force an immediate redraw
             const previous = this.sceneRenderContext.get(sceneObj);
@@ -1415,9 +1443,9 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     if (samplePoints && typeof samplePoints === 'object') {
-      const pointsProto = Object.getPrototypeOf(samplePoints) as
-        | { onBeforeRender?: (...args: unknown[]) => void }
-        | null;
+      const pointsProto = Object.getPrototypeOf(samplePoints) as {
+        onBeforeRender?: (...args: unknown[]) => void;
+      } | null;
       if (
         pointsProto &&
         pointsProto !== Object.prototype &&
@@ -1486,8 +1514,7 @@ export class Cvat3dPreRenderEnhancer {
     materialArg?: unknown
   ): void {
     const camObj = camera as
-      | { isOrthographicCamera?: boolean; isPerspectiveCamera?: boolean; type?: string }
-      | undefined;
+      { isOrthographicCamera?: boolean; isPerspectiveCamera?: boolean; type?: string } | undefined;
     const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
     const isOrthoCam = Boolean(
       camObj && (camObj.isOrthographicCamera === true || camObj.type === 'OrthographicCamera')
@@ -1752,13 +1779,18 @@ export class Cvat3dPreRenderEnhancer {
       this.primaryPerspectiveMaterials.add(mat);
     } else if (this.primaryPerspectiveMaterials.has(mat) && typeof mat.clone === 'function') {
       // If a zoomed Top/Side/Front view cloned the perspective Points object without cloning its material,
-      // give the orthographic/zoom Points object its own isolated PointsMaterial so it stays at 2.5px.
+      // give the orthographic/zoom Points object its own material to preserve its 3.5px size.
       mat = mat.clone();
       ptsObj.material = mat;
     }
 
     const useFixedOrtho35px = this.options.fixedOrthoPointSize ?? true;
-    const targetSize = isPerspective ? 0.05 : useFixedOrtho35px ? 3.5 : 0.5;
+    // Keep CVAT perspective zoom attenuation; enlarge its native 0.05 size by 20%.
+    const targetSize = isPerspective
+      ? 0.05 * ((this.options.enlargePerspectivePoints ?? true) ? 1.2 : 1)
+      : useFixedOrtho35px
+        ? 3.5
+        : 0.5;
     const targetAttenuation = isPerspective ? true : !useFixedOrtho35px;
 
     const needsShaderUpdate =
@@ -1894,14 +1926,21 @@ export class Cvat3dPreRenderEnhancer {
     if (!hideGround) {
       // Fast non-compacting path: bulk-initialize unboxed colors with native TypedArray `.fill()` / `.set()`
       if (useSolidUnboxed) {
-        if (colorArray instanceof Float32Array || colorArray instanceof Uint8Array || colorArray instanceof Uint8ClampedArray) {
+        if (
+          colorArray instanceof Float32Array ||
+          colorArray instanceof Uint8Array ||
+          colorArray instanceof Uint8ClampedArray
+        ) {
           colorArray.fill(solidBase);
         } else {
           for (let i = 0; i < len; i += 1) {
             colorArray[i] = solidBase;
           }
         }
-      } else if (colorArray instanceof Float32Array && colorArray.length === originalColors.length) {
+      } else if (
+        colorArray instanceof Float32Array &&
+        colorArray.length === originalColors.length
+      ) {
         colorArray.set(originalColors);
       } else {
         for (let i = 0; i < len; i += 1) {
@@ -2135,9 +2174,7 @@ export function syncEarlyViewportBackgroundDom(doc: Document, whiteBackground: b
   for (const canvas of canvases) {
     const isCvatViewportCanvas =
       Boolean(canvas.scene) ||
-      Boolean(
-        canvas.closest?.('.cvat-canvas3d-perspective, .cvat-canvas3d-orthographic-view')
-      );
+      Boolean(canvas.closest?.('.cvat-canvas3d-perspective, .cvat-canvas3d-orthographic-view'));
     if (!isCvatViewportCanvas) {
       continue;
     }
@@ -2163,6 +2200,7 @@ function extractAntdHashClass(container: Element): string {
 
 function computeOptionsSignature(opts: Cvat3dWorkspaceRenderOptions): string {
   return [
+    ...WORKSPACE_FEATURE_KEYS.map((key) => ((opts[key] ?? true) ? 1 : 0)),
     opts.whiteBackground ? 1 : 0,
     opts.enableScattering ? 1 : 0,
     opts.colorPointsByCuboid ? 1 : 0,
@@ -2188,10 +2226,7 @@ export function injectCvatWorkspaceSettingsControls(
     return false;
   }
 
-  const syncCheckboxVisualState = (
-    input: HTMLInputElement,
-    checked: boolean
-  ): void => {
+  const syncCheckboxVisualState = (input: HTMLInputElement, checked: boolean): void => {
     if (input.checked !== checked) {
       input.checked = checked;
     }
@@ -2244,7 +2279,8 @@ export function injectCvatWorkspaceSettingsControls(
       key: 'fixedOrthoPointSize',
       rowClass: 'cvat-workspace-settings-3d-ortho-point-size',
       title: 'Fixed 3.5px point size in Top/Side/Front views',
-      description: 'Lock point size to 3.5px in orthographic views (uncheck to follow CVAT default)',
+      description:
+        'Lock point size to 3.5px in orthographic views (uncheck to follow CVAT default)',
     },
     {
       key: 'followActiveObject',
@@ -2262,14 +2298,25 @@ export function injectCvatWorkspaceSettingsControls(
     },
   ];
 
+  items.push(
+    ...WORKSPACE_FEATURE_CONTROLS.map((item) => ({
+      ...item,
+      rowClass: `cvat-workspace-settings-${item.key}`,
+    }))
+  );
+
   const opts = getOptions();
   const optsSig = computeOptionsSignature(opts);
   let mountedAny = false;
 
   for (const container of containers) {
-    const existing = container.querySelector<HTMLElement>(
+    let existing = container.querySelector<HTMLElement>(
       `#${WORKSPACE_SETTINGS_INJECTED_ID}, [data-enhancer-workspace-settings="true"]`
     );
+    if (existing && existing.querySelectorAll('input[data-enhancer-opt]').length !== items.length) {
+      existing.remove();
+      existing = null;
+    }
     if (existing) {
       mountedAny = true;
       // Skip DOM mutation if options have not changed since last sync (prevents MutationObserver
@@ -2278,34 +2325,16 @@ export function injectCvatWorkspaceSettingsControls(
         continue;
       }
       existing.dataset.enhancerOptsSig = optsSig;
-      const bgInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="whiteBackground"]'
-      );
-      const scInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="enableScattering"]'
-      );
-      const boxInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="colorPointsByCuboid"]'
-      );
-      const groundInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="hideGroundPoints"]'
-      );
-      const orthoInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="fixedOrthoPointSize"]'
-      );
-      const followInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="followActiveObject"]'
-      );
-      const warnInput = existing.querySelector<HTMLInputElement>(
-        'input[data-enhancer-opt="enableActiveObjectWarnings"]'
-      );
-      if (bgInput) syncCheckboxVisualState(bgInput, opts.whiteBackground);
-      if (scInput) syncCheckboxVisualState(scInput, opts.enableScattering);
-      if (boxInput) syncCheckboxVisualState(boxInput, opts.colorPointsByCuboid);
-      if (groundInput) syncCheckboxVisualState(groundInput, Boolean(opts.hideGroundPoints));
-      if (orthoInput) syncCheckboxVisualState(orthoInput, opts.fixedOrthoPointSize ?? true);
-      if (followInput) syncCheckboxVisualState(followInput, opts.followActiveObject ?? true);
-      if (warnInput) syncCheckboxVisualState(warnInput, opts.enableActiveObjectWarnings ?? true);
+      for (const item of items) {
+        const input = existing.querySelector<HTMLInputElement>(
+          `input[data-enhancer-opt="${item.key}"]`
+        );
+        if (input)
+          syncCheckboxVisualState(
+            input,
+            opts[item.key] ?? DEFAULT_CVAT_3D_RENDER_OPTIONS[item.key] ?? false
+          );
+      }
       continue;
     }
 
@@ -2316,12 +2345,7 @@ export function injectCvatWorkspaceSettingsControls(
     wrapper.dataset.enhancerOptsSig = optsSig;
 
     for (const item of items) {
-      const isChecked =
-        item.key === 'fixedOrthoPointSize' ||
-        item.key === 'followActiveObject' ||
-        item.key === 'enableActiveObjectWarnings'
-          ? (opts[item.key] ?? true)
-          : Boolean(opts[item.key]);
+      const isChecked = opts[item.key] ?? DEFAULT_CVAT_3D_RENDER_OPTIONS[item.key] ?? false;
 
       const row = doc.createElement('div');
       row.className = `ant-row ${item.rowClass} cvat-player-setting${antdHash}`;
@@ -2679,9 +2703,7 @@ export async function syncTrackCuboidDimension(
 
   const internalSave = currentState.__internal?.save;
 
-  const rawLabelName = String(
-    (currentState as { label?: { name?: string } }).label?.name ?? ''
-  )
+  const rawLabelName = String((currentState as { label?: { name?: string } }).label?.name ?? '')
     .trim()
     .toLowerCase();
   const isTwoWheels =
@@ -2689,8 +2711,10 @@ export async function syncTrackCuboidDimension(
     rawLabelName === 'two-wheel' ||
     rawLabelName === 'twowheels' ||
     rawLabelName === 'two_wheels' ||
-    Number((currentState as { label?: { id?: number }; label_id?: number }).label?.id ??
-      (currentState as { label_id?: number }).label_id) === 36192;
+    Number(
+      (currentState as { label?: { id?: number }; label_id?: number }).label?.id ??
+        (currentState as { label_id?: number }).label_id
+    ) === 36192;
 
   for (const shape of rawShapes) {
     const kfFrame = Number(shape.frame);
@@ -2714,8 +2738,7 @@ export async function syncTrackCuboidDimension(
 
     // MANDATORY CHECK: 100% attribute match with current frame
     // (For two-wheels, H and L must always fit across all frames regardless of ride_state changes)
-    const bypassAttrMatchForTwoWheelsHL =
-      isTwoWheels && (dimension === 'H' || dimension === 'L');
+    const bypassAttrMatchForTwoWheelsHL = isTwoWheels && (dimension === 'H' || dimension === 'L');
     if (
       !bypassAttrMatchForTwoWheelsHL &&
       !haveIdenticalAttributes(currentAttributes, effectiveKfAttrs)
@@ -2804,175 +2827,4 @@ export async function syncTrackCuboidDimension(
   };
 }
 
-const OBJECT_ITEM_DIM_SYNC_ROW_CLASS = 'cvat-3d-enhancer-dim-sync-row';
-
-const DIMENSION_BUTTON_CONFIGS: readonly {
-  readonly key: CuboidDimensionKey;
-  readonly className: string;
-  readonly title: string;
-  readonly svgPath: string;
-}[] = [
-  {
-    key: 'H',
-    className: 'cvat-object-item-button-sync-h',
-    title: 'Sync Height (H) across frames with 100% identical attributes',
-    svgPath:
-      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM7.5 6H10.2V10.7H13.8V6H16.5V18H13.8V13.1H10.2V18H7.5V6Z',
-  },
-  {
-    key: 'W',
-    className: 'cvat-object-item-button-sync-w',
-    title: 'Sync Width (W) across frames with 100% identical attributes',
-    svgPath:
-      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM5.5 6H8.1L9.6 13.8L11.2 6H13.4L15 13.8L16.5 6H19.1L16.4 18H13.9L12.3 10.6L10.7 18H8.2L5.5 6Z',
-  },
-  {
-    key: 'L',
-    className: 'cvat-object-item-button-sync-l',
-    title: 'Sync Length (L) across frames with 100% identical attributes',
-    svgPath:
-      'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM8.5 6H11.3V15.5H16.8V18H8.5V6Z',
-  },
-  {
-    key: 'FLIP_180',
-    className: 'cvat-object-item-button-flip-180',
-    title: 'Flip heading 180° on current frame (Lật đầu xe 180° ở frame hiện tại)',
-    svgPath:
-      'M12 2L16 6H13V11H11V6H8L12 2ZM12 22L8 18H11V13H13V18H16L12 22ZM5.64 5.64L7.05 7.05C5.17 8.93 4.69 11.74 5.62 14.12L3.77 14.9C2.5 11.74 3.16 8.12 5.64 5.64ZM18.36 18.36L16.95 16.95C18.83 15.07 19.31 12.26 18.38 9.88L20.23 9.1C21.5 12.26 20.84 15.88 18.36 18.36Z',
-  },
-];
-
-function resolveObjectItemClientId(col20: Element): number | null {
-  const card = col20.closest('[id^="cvat-objects-sidebar-state-item-"]');
-  if (card?.id) {
-    const match = /cvat-objects-sidebar-state-item-(\d+)/.exec(card.id);
-    if (match?.[1]) {
-      return Number(match[1]);
-    }
-  }
-  const stateItem = col20.closest('.cvat-objects-sidebar-state-item');
-  if (stateItem) {
-    const idAttr = stateItem.getAttribute('data-client-id') ?? stateItem.id;
-    const match = /(\d+)/.exec(idAttr);
-    if (match?.[1]) {
-      return Number(match[1]);
-    }
-  }
-  return null;
-}
-
-/**
- * Injects the 3 native-styled dimension sync icons (`H`, `W`, `L`) into each 3D Track's
- * Object Item card in the CVAT sidebar (right inside `.ant-col-20` alongside CVAT's keyframe
- * and state buttons).
- */
-export function injectCvatObjectDimensionSyncControls(
-  doc: Document,
-  onSyncDimension: (
-    clientID: number,
-    dimension: CuboidDimensionKey
-  ) => Promise<DimensionSyncResult> | DimensionSyncResult
-): number {
-  const keyframeButtons = doc.querySelectorAll('.cvat-object-item-button-first-keyframe');
-  let mountedCount = 0;
-
-  for (const kfBtn of keyframeButtons) {
-    const col20 = kfBtn.closest('.ant-col-20');
-    if (!col20) {
-      continue;
-    }
-
-    const isLocked = Boolean(col20.querySelector('.cvat-object-item-button-lock-enabled'));
-    const lockFlag = isLocked ? '1' : '0';
-    const existingRow = col20.querySelector<HTMLElement>(`.${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`);
-    if (existingRow) {
-      if (existingRow.dataset.enhancerLocked !== lockFlag) {
-        existingRow.dataset.enhancerLocked = lockFlag;
-        const icons = existingRow.querySelectorAll<HTMLElement>('.cvat-object-item-button-sync-dim');
-        for (const icon of icons) {
-          icon.style.opacity = isLocked ? '0.5' : '';
-          icon.style.pointerEvents = isLocked ? 'none' : '';
-        }
-      }
-      continue;
-    }
-
-    const sampleRow = col20.querySelector('.ant-row');
-    const sampleCol = sampleRow?.querySelector('.ant-col');
-    const rowClassName = sampleRow?.className
-      ? `${sampleRow.className} ${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`
-      : `ant-row ant-row-space-around ${OBJECT_ITEM_DIM_SYNC_ROW_CLASS}`;
-    const colClassName = sampleCol?.className || 'ant-col';
-
-    const syncRow = doc.createElement('div');
-    syncRow.className = rowClassName;
-    syncRow.dataset.enhancerLocked = lockFlag;
-
-    for (const cfg of DIMENSION_BUTTON_CONFIGS) {
-      const col = doc.createElement('div');
-      col.className = colClassName;
-
-      const span = doc.createElement('span');
-      span.setAttribute('role', 'img');
-      span.setAttribute('aria-label', `sync-${cfg.key.toLowerCase()}`);
-      span.setAttribute('tabindex', '-1');
-      span.className = `anticon cvat-object-item-button-sync-dim ${cfg.className}`;
-      span.title = cfg.title;
-      span.dataset.enhancerSyncDim = cfg.key;
-      if (isLocked) {
-        span.style.opacity = '0.5';
-        span.style.pointerEvents = 'none';
-      }
-
-      const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('viewBox', '0 0 24 24');
-      svg.setAttribute('focusable', 'false');
-      svg.setAttribute('data-icon', `sync-${cfg.key.toLowerCase()}`);
-      svg.setAttribute('width', '1em');
-      svg.setAttribute('height', '1em');
-      svg.setAttribute('fill', 'currentColor');
-      svg.setAttribute('aria-hidden', 'true');
-
-      const path = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', cfg.svgPath);
-      svg.appendChild(path);
-      span.appendChild(svg);
-
-      span.addEventListener('click', (e: MouseEvent) => {
-        e.stopPropagation();
-        e.preventDefault();
-        if (col20.querySelector('.cvat-object-item-button-lock-enabled')) {
-          return;
-        }
-        const resolvedId = resolveObjectItemClientId(col20);
-        if (resolvedId === null || !Number.isFinite(resolvedId)) {
-          return;
-        }
-        void Promise.resolve(onSyncDimension(resolvedId, cfg.key)).then((res) => {
-          if (res && res.syncedFrames > 0) {
-            span.style.color = '#52c41a';
-            if (cfg.key === 'FLIP_180') {
-              const degStr =
-                res.targetValue !== null ? `${((res.targetValue * 180) / Math.PI).toFixed(1)}°` : '';
-              span.title = `Flipped 180° on current frame (Yaw = ${degStr})`;
-            } else {
-              const valStr = res.targetValue !== null ? res.targetValue.toFixed(2) : '';
-              span.title = `${cfg.key} = ${valStr} synced to ${res.syncedFrames} keyframe(s) (${res.skippedAttributeMismatchFrames} skipped due to different attributes)`;
-            }
-            window.setTimeout(() => {
-              span.style.color = '';
-            }, 900);
-          }
-        });
-      });
-
-      col.appendChild(span);
-      syncRow.appendChild(col);
-    }
-
-    col20.appendChild(syncRow);
-    mountedCount += 1;
-  }
-
-  return mountedCount;
-}
+export { injectCvatObjectDimensionSyncControls } from './object-dimension-controls';

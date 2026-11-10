@@ -1,0 +1,69 @@
+name: Release extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Security checks
+        run: npm run test:security
+      - name: Build production extension
+        run: npm run build
+      - name: Verify built extension
+        run: npm run test:e2e
+      - name: Package ready-to-load extension
+        run: python3 scripts/package-release.py
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meow-extension
+          path: release/*
+          if-no-files-found: error
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo 'Tag and package version do not match.' >&2
+            exit 1
+          fi
+          notes="docs/releases/${tag}.md"
+          test -f "$notes"
+          if gh release view "$tag" --json isDraft --jq .isDraft > /tmp/meow-release-draft; then
+            if [[ "$(cat /tmp/meow-release-draft)" != 'true' ]]; then
+              echo 'This version is already published; bump the version for a new release.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --draft --title "Meow ${tag}" --notes-file "$notes"
+          fi
+          gh release upload "$tag" "release/meow-${tag}.zip" "release/meow-${tag}.sha256" --clobber
+          gh release edit "$tag" --draft=false --latest

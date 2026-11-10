@@ -65,6 +65,11 @@ export interface EdgeHit {
 }
 
 export interface OrthoCuboidEditorContext {
+  getKeyboardOptions?: () => {
+    enabled?: boolean;
+    highSensitivity?: boolean;
+    immediateCommit?: boolean;
+  };
   /** Legacy maximized state; keyboard activation now depends solely on hover. */
   getMaximizedView: () => OrthoViewName | null;
   /** Active, editable cuboid points on the current frame (null if none / locked). */
@@ -243,9 +248,9 @@ export function detectHoveredOrthoView(doc: Document): OrthoViewName | null {
   return null;
 }
 
-export const NUDGE_STEP_PX = 1.25;
-export const NUDGE_FALLBACK_STEP_M = 0.0125;
-export const ROTATE_STEP_RAD = (0.2 * Math.PI) / 180;
+export const NUDGE_STEP_PX = 2.5;
+export const NUDGE_FALLBACK_STEP_M = 0.025;
+export const ROTATE_STEP_RAD = (0.4 * Math.PI) / 180;
 export const COARSE_MULTIPLIER = 4;
 export const EDGE_TOLERANCE_PX = 6;
 export const CORNER_EXCLUSION_PX = 10;
@@ -717,6 +722,7 @@ export class OrthoCuboidEditor {
   }
 
   public shouldSuppressKeyEvent(event: KeyboardEvent): boolean {
+    if (this.ctx.getKeyboardOptions?.().enabled === false) return false;
     const code = resolveNudgeKeyCode(event);
     if (!code || event.ctrlKey || event.altKey || event.metaKey) {
       return false;
@@ -729,6 +735,10 @@ export class OrthoCuboidEditor {
   }
 
   private onKey(event: KeyboardEvent): void {
+    if (this.ctx.getKeyboardOptions?.().enabled === false) {
+      this.flushPendingCommit();
+      return;
+    }
     if (SUPPRESSED_KEY_EVENTS.has(event)) {
       event.preventDefault();
       event.stopPropagation();
@@ -749,6 +759,8 @@ export class OrthoCuboidEditor {
     event.stopPropagation();
     event.stopImmediatePropagation();
     if (event.type !== 'keydown') {
+      if (event.type === 'keyup' && this.ctx.getKeyboardOptions?.().immediateCommit !== false)
+        this.flushPendingCommit();
       return;
     }
     this.applyNudge(view, code, event.shiftKey);
@@ -765,7 +777,9 @@ export class OrthoCuboidEditor {
     const liveFrame = readCameraFrame(this.ctx.getViewCamera(view));
     const frame = liveFrame ?? DEFAULT_ORTHO_CAMERA_FRAMES[view];
     const base = this.pending?.clientID === active.clientID ? this.pending.points : active.points;
-    const mult = coarse ? COARSE_MULTIPLIER : 1;
+    const mult =
+      (coarse ? COARSE_MULTIPLIER : 1) *
+      (this.ctx.getKeyboardOptions?.().highSensitivity === false ? 0.5 : 1);
     const canvas = this.getViewCanvas(view);
     const width = canvas?.clientWidth || canvas?.width || 0;
     const step =

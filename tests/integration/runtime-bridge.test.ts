@@ -1,3 +1,8 @@
+import type {
+  Cvat3dPreRenderEnhancer,
+  CvatObjectStateLike,
+  CvatInternalCanvas3dLike,
+} from '../../src/integration/cvat/runtime/pre-render-enhancer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PageBridgeRuntimeHost } from '../../src/entrypoints/page-bridge';
 import { PageBridge } from '../../src/integration/cvat/bridge';
@@ -19,6 +24,39 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
         <div class="cvat-canvas3d-orthographic-view cvat-canvas3d-frontview"><canvas></canvas></div>
       </div>
     `;
+  });
+
+  it('redraws a key preview immediately without scheduling a full point-cloud recolor', () => {
+    const host = new PageBridgeRuntimeHost(
+      'instant_preview_session_token_999999',
+      window as never,
+      document
+    );
+    const mesh = {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 4, y: 2, z: 1 },
+    };
+    const entry = {
+      data: { clientID: 1, points: [0, 0, 0, 0, 0, 0, 4, 2, 1] },
+      cuboid: { perspective: mesh },
+    };
+    const internal = host as unknown as {
+      preRenderEnhancer: Cvat3dPreRenderEnhancer;
+      getActiveCanvas3dInstance: () => CvatInternalCanvas3dLike | null;
+      previewCuboidPoints: (id: number, points: number[]) => void;
+    };
+    vi.spyOn(internal, 'getActiveCanvas3dInstance').mockReturnValue({
+      view: { drawnObjects: { 1: entry } },
+    });
+    const dirty = vi.spyOn(internal.preRenderEnhancer, 'markDirty');
+    const redraw = vi
+      .spyOn(internal.preRenderEnhancer, 'requestViewsRedraw')
+      .mockImplementation(() => {});
+    internal.previewCuboidPoints(1, [0.025, 0, 0, 0, 0, 0, 4, 2, 1]);
+    expect(mesh.position.x).toBe(0.025);
+    expect(redraw).toHaveBeenCalledOnce();
+    expect(dirty).not.toHaveBeenCalled();
   });
 
   it('defers QA scans during canvas drags and resumes on release without leaking listeners', () => {
@@ -57,6 +95,121 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     } finally {
       stop();
       vi.useRealTimers();
+    }
+  });
+
+  it('updates base guides from the renderer and removes them on deselection and shutdown', () => {
+    const host = new PageBridgeRuntimeHost(
+      'base_guide_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      preRenderEnhancer: Cvat3dPreRenderEnhancer;
+      resolveActiveCuboid: () => {
+        clientID: number;
+        entry: null;
+        state: CvatObjectStateLike;
+      } | null;
+    };
+    const attach = vi.spyOn(internal.preRenderEnhancer, 'setCanvasRenderListener');
+    const active = vi.spyOn(internal, 'resolveActiveCuboid').mockReturnValue({
+      clientID: 1,
+      entry: null,
+      state: { points: [0, 0, 0, 0, 0, 0, 4, 2, 2] },
+    });
+    const stop = host.start();
+    try {
+      const canvas = document.querySelector<HTMLCanvasElement>('.cvat-canvas3d-sideview canvas')!;
+      vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 217,
+        bottom: 233,
+        width: 217,
+        height: 233,
+        toJSON() {},
+      });
+      const render = attach.mock.calls[0]![0]!;
+      const camera = {
+        isOrthographicCamera: true,
+        left: -10,
+        right: 10,
+        top: 10,
+        bottom: -10,
+        matrixWorld: { elements: [1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, -10, 0, 1] },
+      };
+      render(canvas, camera);
+      const guide = document.querySelector<SVGSVGElement>('.cvat-3d-enhancer-base-guide')!;
+      expect(guide.style.display).toBe('block');
+      active.mockReturnValue(null);
+      render(canvas, camera);
+      expect(guide.style.display).toBe('none');
+      stop();
+      expect(attach).toHaveBeenLastCalledWith(null);
+      expect(guide.isConnected).toBe(false);
+    } finally {
+      stop();
+    }
+  });
+
+  it('does not treat deselection as cuboid client ID zero', () => {
+    const host = new PageBridgeRuntimeHost(
+      'deselected_guide_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      getActiveObjectClientId: () => string | null;
+      resolveActiveCuboid: () => unknown;
+    };
+    vi.spyOn(internal, 'getActiveObjectClientId').mockReturnValue(null);
+    expect(internal.resolveActiveCuboid()).toBeNull();
+  });
+
+  it('automatically repairs removed dimension icons and settles without observer loops', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    document.body.innerHTML = `
+      <div class="cvat-objects-sidebar">
+        <div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item">
+          <span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>
+        </div>
+      </div>`;
+    const host = new PageBridgeRuntimeHost(
+      'dimension_repair_session_token_999999',
+      window as never,
+      document
+    );
+    const stop = host.start();
+    const flush = async () => {
+      await Promise.resolve();
+      for (const callback of frames.splice(0)) callback(0);
+      await Promise.resolve();
+    };
+    try {
+      await flush();
+      await flush();
+      expect(frames).toHaveLength(0);
+      document.querySelector('[data-enhancer-sync-dim="H"] svg')!.remove();
+      await flush();
+      await flush();
+      await flush();
+      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row svg path')).toHaveLength(4);
+      expect(frames).toHaveLength(0);
+      document.querySelector('.cvat-3d-enhancer-dim-sync-row')!.remove();
+      await flush();
+      await flush();
+      await flush();
+      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row')).toHaveLength(1);
+      expect(frames).toHaveLength(0);
+    } finally {
+      stop();
     }
   });
 

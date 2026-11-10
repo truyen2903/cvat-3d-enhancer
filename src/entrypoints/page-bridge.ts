@@ -1,9 +1,11 @@
+import {
+  installSidebarQuickFilterGuard,
+  resolveSidebarObjectContext,
+} from '../integration/cvat/runtime/sidebar-enhancements';
+import { BASE_GUIDE_CLASS, CuboidBaseGuide } from '../integration/cvat/runtime/cuboid-base-guide';
 import { collectQaPointNeighborhood } from '../integration/cvat/runtime/qa-point-neighborhood';
 import { MessageProtocol } from '../integration/cvat/bridge';
-import type {
-  CanvasVisualConfigInput,
-  PageRuntimeProbeResult,
-} from '../integration/cvat/runtime';
+import type { CanvasVisualConfigInput, PageRuntimeProbeResult } from '../integration/cvat/runtime';
 import {
   type CuboidDimensionKey,
   type Cvat3dWorkspaceRenderOptions,
@@ -21,11 +23,7 @@ import {
   type ThreeSceneLike,
   writeRenderOptionsToClientSettings,
 } from '../integration/cvat/runtime/pre-render-enhancer';
-import {
-  BRIDGE_CHANNEL,
-  type CameraPresetAction,
-  CVAT_DOM_SELECTORS,
-} from '../shared/constants';
+import { BRIDGE_CHANNEL, type CameraPresetAction, CVAT_DOM_SELECTORS } from '../shared/constants';
 import type { BridgeRequestEnvelope } from '../shared/types';
 import {
   installPointerButtonEventTracking,
@@ -108,6 +106,7 @@ export class PageBridgeRuntimeHost {
     () => this.getActiveObjectClientId(this.cachedInstance),
     () => this.preRenderEnhancer.getOptions().followActiveObject ?? true
   );
+  private baseGuide: CuboidBaseGuide | null = null;
   private cachedInstance: CvatCanvas3dLike | null = null;
   private qaRequestVersion = 0;
   private canvasInteracting = false;
@@ -140,6 +139,48 @@ export class PageBridgeRuntimeHost {
   }
 
   public start(): () => void {
+    const removeQuickFilterGuard = installSidebarQuickFilterGuard(
+      this.doc,
+      this.win,
+      () => this.preRenderEnhancer.getOptions().disableSidebarQuickFilter ?? true
+    );
+    const baseGuide = (this.baseGuide = new CuboidBaseGuide(
+      this.doc,
+      () => this.preRenderEnhancer.getOptions().showCuboidBaseGuide ?? true
+    ));
+    this.syncKeyboardEnabledAttribute();
+    this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) => {
+      const cam = camera as OrthoCameraLike;
+      if (!cam.isOrthographicCamera) return;
+      const active = this.resolveActiveCuboid();
+      const points = active?.entry?.data.points ?? active?.state?.points ?? null;
+      const hidden =
+        active?.state?.hidden ||
+        active?.state?.outside ||
+        active?.entry?.data.hidden ||
+        active?.entry?.data.outside;
+      const cuboid = active?.entry?.cuboid;
+      const view = canvas.closest(CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER)
+        ? 'side'
+        : canvas.closest(CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER)
+          ? 'front'
+          : null;
+      if (canvas.closest(CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER)) return;
+      const contains = (node: unknown, target: unknown): boolean => {
+        if (!node || !target) return false;
+        if (node === target) return true;
+        const children = (node as { children?: unknown[] }).children;
+        return Array.isArray(children) && children.some((child) => contains(child, target));
+      };
+      const mesh = view
+        ? cuboid?.[view]
+        : cuboid?.side && contains(scene, cuboid.side)
+          ? cuboid.side
+          : cuboid?.front && contains(scene, cuboid.front)
+            ? cuboid.front
+            : undefined;
+      baseGuide.update(canvas, cam, hidden ? null : points, mesh);
+    });
     const onPluginReady = () => {
       this.tryHookCvatUIPlugin();
     };
@@ -149,6 +190,14 @@ export class PageBridgeRuntimeHost {
     // W/A/S/D/Q/E nudge (while zoomed) + edge resize in Top/Side/Front views
     const orthoEditor = new OrthoCuboidEditor(
       {
+        getKeyboardOptions: () => {
+          const options = this.preRenderEnhancer.getOptions();
+          return {
+            enabled: options.enableOrthoKeyboard,
+            highSensitivity: options.fasterOrthoKeyboard,
+            immediateCommit: options.immediateKeyboardCommit,
+          };
+        },
         getMaximizedView: () => null,
         getActivePoints: () => this.getActiveCuboidPoints(),
         getViewCamera: (view) => this.getOrthoViewCamera(view),
@@ -202,6 +251,7 @@ export class PageBridgeRuntimeHost {
       let pendingSidebarChange = false;
       const runDomSync = () => {
         this.domSyncRafId = null;
+        baseGuide.prune();
         const hadChildList = pendingChildListChange;
         pendingChildListChange = false;
         const hadSidebarChange = pendingSidebarChange;
@@ -212,13 +262,15 @@ export class PageBridgeRuntimeHost {
             this.preRenderEnhancer.getOptions().whiteBackground
           );
           this.tryMountWorkspaceSettingsCheckboxes();
-          if (this.checkForNewlyMountedCanvases()) {
+          const mountedCanvases = this.checkForNewlyMountedCanvases();
+          if (mountedCanvases) {
             this.preRenderEnhancer.markViewStructureChanged();
           }
           const instance = this.getActiveCanvas3dInstance();
           if (instance) {
             this.preRenderEnhancer.ensureHooked(instance);
             this.ensureActiveObjectHoverLock(instance);
+            if (mountedCanvases) this.preRenderEnhancer.requestViewsRedraw();
           }
         }
         if (hadChildList || hadSidebarChange) this.tryMountObjectItemDimensionSyncControls();
@@ -233,7 +285,7 @@ export class PageBridgeRuntimeHost {
           if (
             targetNode &&
             (targetNode.closest?.(
-              `#${QA_OVERLAY_ELEMENT_ID}, .cvat-appearance-block, .cvat-3d-enhancer-dim-sync-row`
+              `#${QA_OVERLAY_ELEMENT_ID}, .cvat-appearance-block, .${BASE_GUIDE_CLASS}`
             ) ||
               targetNode.id === QA_OVERLAY_ELEMENT_ID)
           ) {
@@ -241,7 +293,7 @@ export class PageBridgeRuntimeHost {
           }
           if (
             rec.type === 'attributes' &&
-            rec.attributeName === 'class' &&
+            rec.attributeName !== 'data-frame-number' &&
             !targetNode?.closest?.(
               '.cvat-objects-sidebar, .cvat-objects-sidebar-state-item, .cvat-workspace-settings'
             )
@@ -272,7 +324,7 @@ export class PageBridgeRuntimeHost {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['data-frame-number', 'class'],
+        attributeFilter: ['data-frame-number', 'class', 'aria-label', 'id', 'data-client-id'],
       });
     }
 
@@ -283,6 +335,7 @@ export class PageBridgeRuntimeHost {
     if (initialInstance) {
       this.preRenderEnhancer.ensureHooked(initialInstance);
       this.ensureActiveObjectHoverLock(initialInstance);
+      this.preRenderEnhancer.requestViewsRedraw();
     }
     this.syncActiveObjectQaOverlay(true);
 
@@ -298,6 +351,11 @@ export class PageBridgeRuntimeHost {
       this.win.removeEventListener('blur', onCanvasPointerEnd);
       this.canvasInteracting = false;
       uninstallOrthoEditor();
+      this.preRenderEnhancer.setCanvasRenderListener(null);
+      baseGuide.clear();
+      this.baseGuide = null;
+      this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
+      removeQuickFilterGuard();
       if (this.domSyncRafId !== null) {
         this.win.cancelAnimationFrame?.(this.domSyncRafId);
         this.domSyncRafId = null;
@@ -543,8 +601,18 @@ export class PageBridgeRuntimeHost {
           this.ensureActiveObjectHoverLock(canvasInstance);
         }
         this.preRenderEnhancer.setOptions(persisted, canvasInstance);
+        this.syncKeyboardEnabledAttribute();
+        this.tryMountObjectItemDimensionSyncControls();
+        this.baseGuide?.refresh();
         this.syncActiveObjectQaOverlay(true);
       }
+    );
+  }
+
+  private syncKeyboardEnabledAttribute(): void {
+    this.doc.documentElement.setAttribute(
+      'data-meow-ortho-keyboard',
+      this.preRenderEnhancer.getOptions().enableOrthoKeyboard === false ? '0' : '1'
     );
   }
 
@@ -552,7 +620,8 @@ export class PageBridgeRuntimeHost {
     injectCvatObjectDimensionSyncControls(
       this.doc,
       (clientID: number, dimension: CuboidDimensionKey): Promise<DimensionSyncResult> =>
-        this.handleSyncObjectDimension(clientID, dimension)
+        this.handleSyncObjectDimension(clientID, dimension),
+      this.preRenderEnhancer.getOptions()
     );
   }
 
@@ -560,9 +629,11 @@ export class PageBridgeRuntimeHost {
     clientID: number,
     dimension: CuboidDimensionKey
   ): Promise<DimensionSyncResult> {
-    const instance = this.getActiveCanvas3dInstance();
+    const sidebar = resolveSidebarObjectContext(this.doc, clientID);
+    const instance = sidebar ? null : this.getActiveCanvas3dInstance();
     const drawnEntry = instance?.view?.drawnObjects?.[clientID] ?? null;
-    let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
+    let stateOnCurrentFrame: CvatObjectStateLike | null =
+      sidebar?.state ?? drawnEntry?.state ?? null;
 
     if (!stateOnCurrentFrame && this.reduxStore) {
       try {
@@ -584,7 +655,7 @@ export class PageBridgeRuntimeHost {
       }
     >('.cvat-canvas3d-perspective canvas');
 
-    return syncTrackCuboidDimension(clientID, dimension, {
+    const result = await syncTrackCuboidDimension(clientID, dimension, {
       drawnEntry,
       stateOnCurrentFrame,
       perspectiveCanvas: perspCanvas,
@@ -598,6 +669,8 @@ export class PageBridgeRuntimeHost {
         this.syncActiveObjectQaOverlay(true);
       },
     });
+    if (result.syncedFrames > 0) await sidebar?.refresh?.();
+    return result;
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
@@ -607,7 +680,8 @@ export class PageBridgeRuntimeHost {
     state: CvatObjectStateLike | null;
   } | null {
     const instance = this.getActiveCanvas3dInstance();
-    const clientID = Number(this.getActiveObjectClientId(instance));
+    const activeId = this.getActiveObjectClientId(instance);
+    const clientID = activeId === null ? NaN : Number(activeId);
     if (!Number.isFinite(clientID)) {
       return null;
     }
@@ -698,7 +772,7 @@ export class PageBridgeRuntimeHost {
     if (Array.isArray(entry.data?.points)) {
       for (let i = 0; i < 9; i += 1) entry.data.points[i] = points[i]!;
     }
-    this.preRenderEnhancer.markDirty();
+    // A preview only moves meshes. Recoloring the full point cloud here stalls every keydown.
     this.preRenderEnhancer.requestViewsRedraw();
   }
 

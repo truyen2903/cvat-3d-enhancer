@@ -174,6 +174,44 @@ describe('OrthoCuboidEditor keyboard', () => {
     document.body.innerHTML = '';
   });
 
+  it('previews the stronger step on keydown and commits on keyup without waiting for debounce', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML =
+      '<div class="cvat-canvas3d-topview"><canvas width="1000" height="1000"></canvas></div>';
+    const preview = vi.fn();
+    const commit = vi.fn();
+    const editor = new OrthoCuboidEditor(
+      {
+        getMaximizedView: () => null,
+        getActivePoints: () => ({ clientID: 7, points: [...box] }),
+        getViewCamera: () => topCamera,
+        previewPoints: preview,
+        commitPoints: commit,
+      },
+      document,
+      window
+    );
+    const uninstall = editor.install();
+    try {
+      document
+        .querySelector('canvas')!
+        .dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyD', bubbles: true }));
+      expect(preview).toHaveBeenCalledOnce();
+      expect(preview.mock.calls[0]![1][0]).toBeCloseTo(0.025);
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyQ', bubbles: true }));
+      expect(preview).toHaveBeenCalledTimes(2);
+      expect(preview.mock.calls[1]![1][5]).toBeCloseTo((0.4 * Math.PI) / 180);
+      document.body.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyQ', bubbles: true }));
+      expect(commit).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(300);
+      expect(commit).toHaveBeenCalledOnce();
+    } finally {
+      uninstall();
+      vi.useRealTimers();
+    }
+  });
+
   it('swallows WASDQE only during hover even with a maximized view and debounces commits', () => {
     vi.useFakeTimers();
     let maximized: 'top' | null = 'top';

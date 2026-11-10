@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Meow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Meow — make your workspace feel like home.",
   "icons": {
     "16": "assets/meow-16.png",
@@ -41,7 +41,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-DRPuSyLE.js"
+        "assets/content.ts-loader-Sn0XYCXQ.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -73,8 +73,8 @@
         "assets/schemas-njzct5Su.js",
         "assets/index-50c5XEHu.js",
         "assets/origin-validator--cNPonwa.js",
-        "assets/ortho-cuboid-editor-Ccn7rt4g.js",
-        "assets/content.ts-CDT9WX92.js"
+        "assets/ortho-cuboid-editor-BY_7liSn.js",
+        "assets/content.ts-DV3F7BCE.js"
       ],
       "use_dynamic_url": false
     }
