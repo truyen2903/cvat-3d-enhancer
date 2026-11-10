@@ -34,9 +34,15 @@ export interface CameraControlsLike {
   ) => unknown;
 }
 
+interface FollowStateLike {
+  readonly points?: readonly number[];
+  readonly frame?: number;
+  readonly hidden?: boolean;
+  readonly outside?: boolean;
+}
 export interface FollowEntryLike {
-  readonly data?: { readonly points?: readonly number[] } | null;
-  readonly state?: { readonly points?: readonly number[]; readonly frame?: number } | null;
+  readonly data?: FollowStateLike | null;
+  readonly state?: FollowStateLike | null;
 }
 
 export interface FollowViewLike {
@@ -65,7 +71,9 @@ interface TrackedState {
 
 const FOLLOW_MARKER = '__cvat3dEnhancerCameraFollow';
 
-export function readEntryCenter(entry: FollowEntryLike | undefined): [number, number, number] | null {
+export function readEntryCenter(
+  entry: FollowEntryLike | undefined
+): [number, number, number] | null {
   const pts = entry?.state?.points ?? entry?.data?.points;
   if (!pts || pts.length < 3) {
     return null;
@@ -99,13 +107,15 @@ export function translatePerspectiveCamera(
   ) {
     const targetOut: Vector3Like =
       typeof camPos.clone === 'function' ? camPos.clone() : { x: 0, y: 0, z: 0 };
-    const target = controls.getTarget(targetOut, true) ?? targetOut;
+    const target = controls.getTarget(targetOut, false) ?? targetOut;
     let position: Vector3Like = camPos;
     if (typeof controls.getPosition === 'function') {
       const posOut: Vector3Like =
         typeof camPos.clone === 'function' ? camPos.clone() : { x: 0, y: 0, z: 0 };
-      position = controls.getPosition(posOut, true) ?? posOut;
+      position = controls.getPosition(posOut, false) ?? posOut;
     }
+    if (![position.x, position.y, position.z, target.x, target.y, target.z].every(Number.isFinite))
+      return false;
     controls.setLookAt(
       position.x + dx,
       position.y + dy,
@@ -118,6 +128,8 @@ export function translatePerspectiveCamera(
     return true;
   }
 
+  // A partial/loading controls instance can overwrite direct camera mutations on its next update.
+  if (controls) return false;
   if (typeof camPos.set === 'function') {
     camPos.set(camPos.x + dx, camPos.y + dy, camPos.z + dz);
   } else {
@@ -154,24 +166,27 @@ export class ActiveObjectCameraFollower {
       return;
     }
 
+    if (this.tracked && this.tracked.clientID !== activeId) this.reset();
     const entry = view.drawnObjects?.[activeId];
-    const center = readEntryCenter(entry);
-    if (!center) {
-      // Object not drawn (yet) on this frame - keep the last known position until it appears
-      return;
-    }
-
-    const stateFrame = entry?.state?.frame;
+    const sources = [entry?.state, entry?.data].filter((source): source is FollowStateLike =>
+      Boolean(source)
+    );
     const modelFrame = model?.data?.imageID;
-    const frame =
-      typeof stateFrame === 'number' && Number.isFinite(stateFrame)
-        ? stateFrame
-        : typeof modelFrame === 'number' && Number.isFinite(modelFrame)
-          ? modelFrame
-          : NaN;
-    if (!Number.isFinite(frame)) {
-      return;
-    }
+    const hasFrame = (source: FollowStateLike): boolean =>
+      typeof source.frame === 'number' && Number.isFinite(source.frame);
+    const expectedFrame =
+      typeof modelFrame === 'number' && Number.isFinite(modelFrame) ? modelFrame : null;
+    // CVAT can advance imageID before replacing the drawn objects. Do not consume that transition
+    // until the annotation snapshot belongs to the displayed frame (data is ObjectState on some builds).
+    const source =
+      expectedFrame !== null
+        ? (sources.find((candidate) => candidate.frame === expectedFrame) ??
+          (sources.some(hasFrame) ? null : sources[0]))
+        : sources.find(hasFrame);
+    if (!source || source.hidden || source.outside) return;
+    const center = readEntryCenter({ state: source });
+    const frame = expectedFrame ?? source.frame;
+    if (!center || typeof frame !== 'number' || !Number.isFinite(frame)) return;
 
     const [cx, cy, cz] = center;
     const prev = this.tracked;
@@ -185,7 +200,7 @@ export class ActiveObjectCameraFollower {
       const dy = cy - prev.cy;
       const dz = cz - prev.cz;
       if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 1e-6) {
-        translatePerspectiveCamera(view, dx, dy, dz);
+        if (!translatePerspectiveCamera(view, dx, dy, dz)) return;
       }
     }
     // Same frame: follow box drag/resize silently so the next frame change is relative to the final position
@@ -199,7 +214,8 @@ export class ActiveObjectCameraFollower {
 export function attachActiveObjectCameraFollow(
   view: FollowViewLike | null | undefined,
   follower: ActiveObjectCameraFollower,
-  getModel: () => FollowModelLike | null | undefined
+  getModel: () => FollowModelLike | null | undefined,
+  isCurrentView: () => boolean = () => true
 ): boolean {
   if (!view || typeof view.render !== 'function') {
     return false;
@@ -211,7 +227,7 @@ export function attachActiveObjectCameraFollow(
   const origRender = view.render.bind(view);
   view.render = (): void => {
     try {
-      follower.tick(view, getModel());
+      if (isCurrentView()) follower.tick(view, getModel());
     } catch {
       // Never break CVAT rendering
     }

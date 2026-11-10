@@ -35,13 +35,16 @@ function cardWithState() {
   };
   const refresh = vi.fn();
   const focus = vi.fn();
+  const activateSingle = vi.fn();
   Object.assign(card, {
     __reactFiber$company: {
       memoizedProps: { children: null },
-      return: { memoizedProps: { objectState: state, refreshAnnotations: refresh, focus } },
+      return: {
+        memoizedProps: { objectState: state, refreshAnnotations: refresh, focus, activateSingle },
+      },
     },
   });
-  return { card, state, save, refresh, focus };
+  return { card, state, save, refresh, focus, activateSingle };
 }
 
 describe('custom CVAT sidebar integration', () => {
@@ -63,7 +66,7 @@ describe('custom CVAT sidebar integration', () => {
   );
 
   it('preserves CVAT native focus while blocking the combined filter handler', () => {
-    const { card, focus } = cardWithState();
+    const { card, focus, activateSingle } = cardWithState();
     const doubleClick = vi.fn(),
       click = vi.fn(),
       clear = vi.fn();
@@ -80,6 +83,10 @@ describe('custom CVAT sidebar integration', () => {
       expect(click).toHaveBeenCalledOnce();
       expect(doubleClick).not.toHaveBeenCalled();
       expect(focus).toHaveBeenCalledOnce();
+      expect(activateSingle).toHaveBeenCalledOnce();
+      expect(activateSingle.mock.invocationCallOrder[0]).toBeLessThan(
+        focus.mock.invocationCallOrder[0]!
+      );
       card.querySelector<HTMLButtonElement>('button')!.click();
       expect(click).toHaveBeenCalledTimes(2);
       document.querySelector<HTMLButtonElement>('.cvat-quick-filter-clear')!.click();

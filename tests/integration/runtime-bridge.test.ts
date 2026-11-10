@@ -12,6 +12,7 @@ import { CapabilityRegistry, CvatV2RuntimeAdapter } from '../../src/integration/
 
 describe('CVAT 3D Runtime & PageBridge Integration', () => {
   beforeEach(() => {
+    window.localStorage.clear();
     document.body.innerHTML = `
       <div id="root">
         <div class="cvat-canvas3d-perspective">
@@ -24,6 +25,72 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
         <div class="cvat-canvas3d-orthographic-view cvat-canvas3d-frontview"><canvas></canvas></div>
       </div>
     `;
+  });
+
+  it('uses fresh frame metadata when the DOM adapter replaces the model but reuses its view', () => {
+    const host = new PageBridgeRuntimeHost(
+      'follow_model_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      ensureActiveObjectHoverLock: (instance: CvatInternalCanvas3dLike) => void;
+      getActiveObjectClientId: () => string | null;
+    };
+    vi.spyOn(internal, 'getActiveObjectClientId').mockReturnValue('5');
+    const setLookAt = vi.fn();
+    const view = {
+      views: {
+        perspective: {
+          scene: { background: null, children: [] },
+          camera: { position: { x: 10, y: 10, z: 10 } },
+          controls: { getTarget: () => ({ x: 0, y: 0, z: 0 }), setLookAt },
+        },
+      },
+      drawnObjects: {
+        5: { data: { clientID: 5, frame: 10, points: [0, 0, 0, 0, 0, 0, 4, 2, 1] }, cuboid: {} },
+      },
+      render: vi.fn(),
+    };
+    internal.ensureActiveObjectHoverLock({ view, model: { data: { imageID: 10 } } });
+    view.render();
+    view.drawnObjects[5].data = { clientID: 5, frame: 11, points: [3, 0, 0, 0, 0, 0, 4, 2, 1] };
+    internal.ensureActiveObjectHoverLock({ view, model: { data: { imageID: 11 } } });
+    view.render();
+    expect(setLookAt).toHaveBeenCalledWith(13, 10, 10, 3, 0, 0, false);
+  });
+
+  it('preserves focus and Workspace options when appearance settings change', () => {
+    const host = new PageBridgeRuntimeHost(
+      'focus_settings_session_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      preRenderEnhancer: Cvat3dPreRenderEnhancer;
+      getActiveCanvas3dInstance: () => CvatInternalCanvas3dLike | null;
+      applyCanvasVisualConfig: (config: { whiteBackground: boolean }) => void;
+    };
+    vi.spyOn(internal, 'getActiveCanvas3dInstance').mockReturnValue(null);
+    internal.preRenderEnhancer.setOptions({
+      ...internal.preRenderEnhancer.getOptions(),
+      followActiveObject: false,
+      disableSidebarQuickFilter: false,
+      showCuboidBaseGuide: false,
+      enableDimensionSync: false,
+      enableOrthoKeyboard: false,
+      hideGroundPoints: true,
+    });
+    internal.applyCanvasVisualConfig({ whiteBackground: true });
+    expect(internal.preRenderEnhancer.getOptions()).toMatchObject({
+      whiteBackground: true,
+      followActiveObject: false,
+      disableSidebarQuickFilter: false,
+      showCuboidBaseGuide: false,
+      enableDimensionSync: false,
+      enableOrthoKeyboard: false,
+      hideGroundPoints: true,
+    });
   });
 
   it('redraws a key preview immediately without scheduling a full point-cloud recolor', () => {

@@ -3,7 +3,7 @@ import { defineManifest } from '@crxjs/vite-plugin';
 export default defineManifest({
   manifest_version: 3,
   name: 'Meow',
-  version: '0.2.0',
+  version: '0.2.1',
   description: 'Meow — make your workspace feel like home.',
   icons: {
     16: 'assets/meow-16.png',

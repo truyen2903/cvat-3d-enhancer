@@ -142,7 +142,8 @@ export class PageBridgeRuntimeHost {
     const removeQuickFilterGuard = installSidebarQuickFilterGuard(
       this.doc,
       this.win,
-      () => this.preRenderEnhancer.getOptions().disableSidebarQuickFilter ?? true
+      () => this.preRenderEnhancer.getOptions().disableSidebarQuickFilter ?? true,
+      () => this.cameraFollower.reset()
     );
     const baseGuide = (this.baseGuide = new CuboidBaseGuide(
       this.doc,
@@ -367,6 +368,7 @@ export class PageBridgeRuntimeHost {
   }
 
   private ensureActiveObjectHoverLock(instance: CvatCanvas3dLike): void {
+    if (this.cachedInstance?.view !== instance.view) this.cameraFollower.reset();
     this.cachedInstance = instance;
     const perspective = instance.view?.views?.perspective as
       { rayCaster?: { renderer?: RaycasterLike } } | undefined;
@@ -381,7 +383,8 @@ export class PageBridgeRuntimeHost {
       attachActiveObjectCameraFollow(
         instance.view as unknown as FollowViewLike,
         this.cameraFollower,
-        () => instance.model as FollowModelLike | undefined
+        () => this.cachedInstance?.model as FollowModelLike | undefined,
+        () => this.cachedInstance?.view === instance.view
       );
     }
   }
@@ -1120,6 +1123,7 @@ export class PageBridgeRuntimeHost {
     ) {
       const current = this.preRenderEnhancer.getOptions();
       const next: Cvat3dWorkspaceRenderOptions = {
+        ...current,
         whiteBackground: config.whiteBackground ?? current.whiteBackground,
         enableScattering: config.enableScattering ?? current.enableScattering,
         colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,

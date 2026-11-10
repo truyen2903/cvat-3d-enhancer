@@ -75,8 +75,10 @@ function resolveSidebarFocus(card: Element): (() => void) | null {
     : undefined;
   for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber?.return ?? undefined) {
     const focus = fiber.memoizedProps?.focus;
+    const activateSingle = fiber.memoizedProps?.activateSingle;
     if (typeof focus === 'function')
       return () => {
+        if (typeof activateSingle === 'function') activateSingle();
         focus();
       };
   }
@@ -87,7 +89,8 @@ function resolveSidebarFocus(card: Element): (() => void) | null {
 export function installSidebarQuickFilterGuard(
   doc: Document,
   win: Window,
-  isEnabled: () => boolean = () => true
+  isEnabled: () => boolean = () => true,
+  onFocus: () => void = () => undefined
 ): () => void {
   const guard = (event: MouseEvent): void => {
     if (!isEnabled()) return;
@@ -107,7 +110,10 @@ export function installSidebarQuickFilterGuard(
     if (!focus) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (event.type === 'dblclick') focus();
+    if (event.type === 'dblclick') {
+      onFocus();
+      focus();
+    }
   };
   const types = ['mousedown', 'click', 'dblclick'] as const;
   for (const type of types) win.addEventListener(type, guard, true);

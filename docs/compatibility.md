@@ -118,3 +118,16 @@ Values persist under `clientSettings.workspace.cvat3dEnhancer` and the standalon
 `cvat3dEnhancerSettings`. Closing CVAT Settings cannot overwrite them with stale Redux
 settings. The main point-size option preserves zoom scaling in both states; the keyboard
 sensitivity option switches between 1.25/2.5 px and 0.2/0.4 degrees per key press.
+
+## 10. Focus and frame-transition stability
+
+Sidebar double-click activates the intended object before invoking CVAT's focus action,
+and resets the previous camera-follow anchor. Camera follow reads the annotation frame
+from either `state` or native `data` and waits when it does not match the displayed frame.
+It uses the current controls position/target rather than pending animation endpoints.
+If controls are still initializing, the delta is retried after they become available;
+detached views cannot consume the current job's follow anchor. Appearance updates preserve
+all Workspace flags rather than reverting them to defaults.
+
+Regression tests simulate delayed snapshots, rapid frame jumps, object changes, loading
+controls, focus transitions, and detached views. No live point-cloud buffers are inspected.
