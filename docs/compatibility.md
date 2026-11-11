@@ -142,3 +142,13 @@ when expanded; unidentified views conservatively keep ground visible.
 
 Regression tests use synthetic point buffers and native Three.js geometry clones to check
 view isolation, toggling, newly mounted Top/Side canvases, and processing-cache stability.
+
+## 12. Mouse side buttons in 3D jobs
+
+The Workspace option **Mouse side buttons: previous / next frame** maps browser Back
+(button 3) to the native CVAT previous control and Forward (button 4) to next. It uses
+the player's active regular, filtered, empty or chapter navigation control. The mapping
+only applies on a 3D job page while the option is enabled. Missing or disabled controls,
+text inputs and modal dialogs retain the original browser behavior. Browser events do not
+identify the physical mouse, so any device sending these buttons has the same mapping.
+Device configuration software may remap or consume the buttons before Chrome sees them.

@@ -82,7 +82,7 @@ describe('recent Workspace feature options', () => {
     document.body.innerHTML =
       '<div class="cvat-workspace-settings"><div data-enhancer-workspace-settings="true"><input data-enhancer-opt="whiteBackground"></div></div>';
     injectCvatWorkspaceSettingsControls(document, () => DEFAULT_CVAT_3D_RENDER_OPTIONS, vi.fn());
-    expect(document.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(15);
+    expect(document.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(16);
   });
 
   it('independently removes and restores dimension sync and heading flip controls', () => {

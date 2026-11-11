@@ -1,3 +1,4 @@
+import { installMouseFrameNavigation } from '../integration/cvat/runtime/mouse-frame-navigation';
 import {
   installSidebarQuickFilterGuard,
   resolveSidebarObjectContext,
@@ -139,6 +140,11 @@ export class PageBridgeRuntimeHost {
   }
 
   public start(): () => void {
+    const removeMouseFrameNavigation = installMouseFrameNavigation(
+      this.doc,
+      this.win,
+      () => this.preRenderEnhancer.getOptions().enableMouseFrameNavigation ?? true
+    );
     const removeQuickFilterGuard = installSidebarQuickFilterGuard(
       this.doc,
       this.win,
@@ -368,6 +374,7 @@ export class PageBridgeRuntimeHost {
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
       removeQuickFilterGuard();
+      removeMouseFrameNavigation();
       if (this.domSyncRafId !== null) {
         this.win.cancelAnimationFrame?.(this.domSyncRafId);
         this.domSyncRafId = null;

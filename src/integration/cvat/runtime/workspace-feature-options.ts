@@ -8,6 +8,7 @@ export const WORKSPACE_FEATURE_DEFAULTS = {
   fasterOrthoKeyboard: true,
   immediateKeyboardCommit: true,
   enlargePerspectivePoints: true,
+  enableMouseFrameNavigation: true,
 } as const;
 
 export type WorkspaceFeatureOptions = {
@@ -29,6 +30,11 @@ export function normalizeWorkspaceFeatureOptions(
 }
 
 export const WORKSPACE_FEATURE_CONTROLS = [
+  {
+    key: 'enableMouseFrameNavigation',
+    title: 'Mouse side buttons: previous / next frame',
+    description: 'Use Back and Forward side buttons to navigate CVAT frames in 3D jobs',
+  },
   {
     key: 'showCuboidBaseGuide',
     title: 'Show cuboid base guide (Tia căn đáy box)',

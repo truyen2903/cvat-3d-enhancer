@@ -103,6 +103,7 @@ Meow thêm các checkbox vào tab Workspace của CVAT. Tên dưới đây khớ
 | Show QA warnings on 3D canvas for active object         | Bật cảnh báo QA cho object đang chọn.                           |
 | Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                                  |
 | Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.          |
+| Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D.       |
 | Show H/W/L dimension sync buttons                       | Hiện nút đồng bộ kích thước.                                    |
 | Show 180° heading flip button                           | Hiện nút đảo hướng.                                             |
 | Edit cuboids with W/A/S/D/Q/E                           | Bật chỉnh box bằng bàn phím trong Top/Side/Front.               |
