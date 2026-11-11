@@ -339,6 +339,19 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(controls).toHaveBeenCalledTimes(1);
       expect(canvases).not.toHaveBeenCalled();
       expect(settings).not.toHaveBeenCalled();
+      controls.mockClear();
+      document
+        .querySelector('.cvat-objects-sidebar-state-item')!
+        .appendChild(document.createElement('span'));
+      await flush();
+      expect(controls).toHaveBeenCalledOnce();
+      expect(canvases).not.toHaveBeenCalled();
+      expect(settings).not.toHaveBeenCalled();
+      document
+        .querySelector('.cvat-objects-sidebar-state-item')!
+        .appendChild(document.createElement('canvas'));
+      await flush();
+      expect(canvases).toHaveBeenCalledOnce();
     } finally {
       stop();
     }

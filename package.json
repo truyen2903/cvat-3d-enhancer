@@ -1,6 +1,6 @@
 {
   "name": "meow",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Meow \u2014 make your workspace feel like home.",
   "type": "module",

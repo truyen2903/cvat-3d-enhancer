@@ -63,6 +63,31 @@ describe('frame point-cloud processing', () => {
     expect(process).toHaveBeenCalledTimes(1);
   });
 
+  it('discovers point objects only once per scene while processing a new frame', () => {
+    let reads = 0;
+    const point = cloud();
+    const branch: ThreeObject3DLike = {
+      get children() {
+        reads++;
+        return [point];
+      },
+    };
+    const scene = { background: null, children: [branch] };
+    const canvas: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 1 } },
+      view: { views: { perspective: { scene } }, drawnObjects: { 1: entry } },
+    };
+    const enhancer = new Cvat3dPreRenderEnhancer();
+    enhancer.ensureHooked(canvas);
+    reads = 0;
+    enhancer.markDirty();
+    canvas.model!.data!.imageID = 2;
+    enhancer.applyOnceIfNeeded(canvas.view!, canvas.model);
+    // Discovery accesses children twice, and plane optimization may inspect it too.
+    // Multiple point-cloud passes used to revisit this subtree three extra times.
+    expect(reads).toBeLessThanOrEqual(6);
+  });
+
   it('still applies a loaded cloud on the next render when no objects notification is available', () => {
     const initial = cloud(),
       next = cloud();

@@ -302,11 +302,22 @@ export class PageBridgeRuntimeHost {
             continue;
           }
           hasRelevantMutation = true;
-          if (targetNode?.closest?.('.cvat-objects-sidebar, .cvat-objects-sidebar-state-item')) {
-            pendingSidebarChange = true;
-          }
+          const inSidebar = Boolean(
+            targetNode?.closest?.('.cvat-objects-sidebar, .cvat-objects-sidebar-state-item')
+          );
+          if (inSidebar) pendingSidebarChange = true;
           if (rec.type === 'childList') {
-            pendingChildListChange = true;
+            // Sidebar cards are frequently rebuilt on frame changes. Only run the
+            // expensive document-wide canvas/settings checks when those nodes change.
+            const affectsCanvasOrSettings =
+              !inSidebar ||
+              [...rec.addedNodes, ...rec.removedNodes].some(
+                (node) =>
+                  node instanceof Element &&
+                  (node.matches('canvas, .cvat-workspace-settings') ||
+                    Boolean(node.querySelector('canvas, .cvat-workspace-settings')))
+              );
+            if (affectsCanvasOrSettings) pendingChildListChange = true;
           }
         }
         if (!hasRelevantMutation) {

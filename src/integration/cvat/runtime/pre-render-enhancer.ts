@@ -1743,7 +1743,19 @@ export class Cvat3dPreRenderEnhancer {
         this.ensureThreePrototypesHooked(perspectiveScene);
       }
 
-      const perspectivePoints = findPointsObjectsInScene(perspectiveScene);
+      // Each view's scene can contain thousands of cuboid descendants. Reuse the
+      // point-object discovery for this pass instead of traversing it repeatedly.
+      const pointLists = new Map<ThreeSceneLike, ThreeObject3DLike[]>();
+      const pointsForScene = (scene?: ThreeSceneLike): ThreeObject3DLike[] => {
+        if (!scene) return [];
+        let points = pointLists.get(scene);
+        if (!points) {
+          points = findPointsObjectsInScene(scene);
+          pointLists.set(scene, points);
+        }
+        return points;
+      };
+      const perspectivePoints = pointsForScene(perspectiveScene);
       if (perspectivePoints.length === 0) {
         // Scene point cloud not yet populated for this frame; keep dirty=true so point coloring runs on PCD load
         return false;
@@ -1760,7 +1772,7 @@ export class Cvat3dPreRenderEnhancer {
       let totalPointsObjects = 0;
       for (const [, rv] of viewEntries) {
         if (rv?.scene) {
-          totalPointsObjects += findPointsObjectsInScene(rv.scene).length;
+          totalPointsObjects += pointsForScene(rv.scene).length;
         }
       }
 
@@ -1801,7 +1813,7 @@ export class Cvat3dPreRenderEnhancer {
         const viewCamera = (rv as { camera?: unknown }).camera;
         if (isTop && viewCamera && typeof viewCamera === 'object') this.topCameras.add(viewCamera);
         const isPerspective = key === 'perspective';
-        const pointsList = findPointsObjectsInScene(rv.scene);
+        const pointsList = pointsForScene(rv.scene);
         for (const ptsObj of pointsList) {
           this.preparePointGeometry(ptsObj, isTop);
           this.bindInstanceBeforeRenderHook(ptsObj);
@@ -1834,7 +1846,7 @@ export class Cvat3dPreRenderEnhancer {
       for (const [key, rv] of viewEntries) {
         const isTop = key === 'top' || this.isTopView(rv?.scene, rv?.renderer);
         const signature = `${geometryColorSignature}:ground:${isTop && this.options.hideGroundPoints ? 1 : 0}`;
-        const pointsList = findPointsObjectsInScene(rv?.scene);
+        const pointsList = pointsForScene(rv?.scene);
         for (const ptsObj of pointsList) {
           if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
             processedGeometries.add(ptsObj.geometry);
