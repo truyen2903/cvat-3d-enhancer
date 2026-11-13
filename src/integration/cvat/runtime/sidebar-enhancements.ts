@@ -1,4 +1,5 @@
 import { injectCvatObjectDimensionSyncControls } from './object-dimension-controls';
+import { getRideStateAttribute, syncTrackRideState } from './ride-state-sync';
 import {
   syncTrackCuboidDimension,
   readRenderOptionsFromClientSettings,
@@ -46,7 +47,20 @@ export function resolveSidebarObjectContext(
     const state = candidate as CvatObjectStateLike;
     if (state.clientID !== clientID || state.shapeType !== 'cuboid') continue;
     const refresh = props?.refreshAnnotations;
-    return { state, refresh: typeof refresh === 'function' ? () => refresh() : null };
+    const updateState = props?.updateState;
+    return {
+      state,
+      refresh:
+        typeof refresh === 'function'
+          ? () => refresh()
+          : typeof updateState === 'function' && state.__internal?.save
+            ? () => {
+                state.updateFlags?.reset?.();
+                const fresh = state.__internal!.save!(state.frame ?? 0, state);
+                return updateState(fresh);
+              }
+            : null,
+    };
   }
   return null;
 }
@@ -65,6 +79,18 @@ export async function syncSidebarObjectDimension(
   return result;
 }
 
+export function sidebarHasRideState(doc: Document, clientID: number): boolean {
+  return Boolean(getRideStateAttribute(resolveSidebarObjectContext(doc, clientID)?.state));
+}
+
+export async function syncSidebarRideState(doc: Document, clientID: number) {
+  const context = resolveSidebarObjectContext(doc, clientID);
+  if (!context) throw new Error('CVAT sidebar ObjectState is unavailable');
+  const result = await syncTrackRideState(clientID, context.state);
+  if (result.updatedKeyframes > 0) await context.refresh?.();
+  return result;
+}
+
 /** Resolve CVAT's own focus action without using its combined focus/Quick-filter handler. */
 function resolveSidebarFocus(card: Element): (() => void) | null {
   const key = Object.keys(card).find(
@@ -74,7 +100,7 @@ function resolveSidebarFocus(card: Element): (() => void) | null {
     ? ((card as unknown as Record<string, unknown>)[key] as FiberLike | undefined)
     : undefined;
   for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber?.return ?? undefined) {
-    const focus = fiber.memoizedProps?.focus;
+    const focus = fiber.memoizedProps?.focus ?? fiber.memoizedProps?.focusAndExpand;
     const activateSingle = fiber.memoizedProps?.activateSingle;
     if (typeof focus === 'function')
       return () => {
@@ -135,7 +161,11 @@ export function installSidebarEnhancements(doc: Document, win: Window): () => vo
     injectCvatObjectDimensionSyncControls(
       doc,
       (id, dim) => syncSidebarObjectDimension(doc, id, dim),
-      options
+      options,
+      {
+        isAvailable: (id) => sidebarHasRideState(doc, id),
+        sync: (id) => syncSidebarRideState(doc, id),
+      }
     );
     injectCvatWorkspaceSettingsControls(
       doc,

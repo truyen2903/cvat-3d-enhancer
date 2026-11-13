@@ -35,6 +35,7 @@ export interface CameraControlsLike {
 }
 
 interface FollowStateLike {
+  readonly clientID?: number | string;
   readonly points?: readonly number[];
   readonly frame?: number;
   readonly hidden?: boolean;
@@ -58,7 +59,12 @@ export interface FollowViewLike {
 }
 
 export interface FollowModelLike {
-  data?: { imageID?: number | null } | null;
+  data?: {
+    imageID?: number | null;
+    isFrameUpdating?: boolean;
+    objects?: readonly FollowStateLike[];
+  } | null;
+  objects?: readonly FollowStateLike[];
 }
 
 interface TrackedState {
@@ -160,6 +166,8 @@ export class ActiveObjectCameraFollower {
       this.tracked = null;
       return;
     }
+    // Loading may temporarily clear activation as well as advance imageID.
+    if (model?.data?.isFrameUpdating) return;
     const activeId = this.getActiveClientId();
     if (activeId === null) {
       this.tracked = null;
@@ -168,8 +176,11 @@ export class ActiveObjectCameraFollower {
 
     if (this.tracked && this.tracked.clientID !== activeId) this.reset();
     const entry = view.drawnObjects?.[activeId];
-    const sources = [entry?.state, entry?.data].filter((source): source is FollowStateLike =>
-      Boolean(source)
+    const modelState = (model?.data?.objects ?? model?.objects)?.find(
+      (state) => String(state.clientID) === activeId
+    );
+    const sources = [modelState, entry?.state, entry?.data].filter(
+      (source): source is FollowStateLike => Boolean(source)
     );
     const modelFrame = model?.data?.imageID;
     const hasFrame = (source: FollowStateLike): boolean =>

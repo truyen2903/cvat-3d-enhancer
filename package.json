@@ -1,8 +1,8 @@
 {
   "name": "meow",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
-  "description": "Meow \u2014 make your workspace feel like home.",
+  "description": "Meow — make your workspace feel like home.",
   "type": "module",
   "license": "MIT",
   "scripts": {

@@ -152,3 +152,35 @@ only applies on a 3D job page while the option is enabled. Missing or disabled c
 text inputs and modal dialogs retain the original browser behavior. Browser events do not
 identify the physical mouse, so any device sending these buttons has the same mapping.
 Device configuration software may remap or consume the buttons before Chrome sees them.
+
+## 13. Native frame loading and filter refresh
+
+Frame navigation continues through CVAT's native player controls. The enhancer waits for
+native image/annotation notifications to finish before processing the point cloud, including
+nested notifications and synchronous renders. An asynchronous image change does not recolor
+the previous cloud while the next image loads. The shared `canvas.setup` listener owns point
+processing; the perspective listener only refreshes QA.
+
+Empty annotation results complete the processing pass. Changes to the visible object IDs
+refresh cuboid color snapshots when applying or clearing filters on the same frame. Repeated
+notifications with the same IDs and canvas structure updates reuse those snapshots; moving
+an existing cuboid still keeps point colors frozen until a frame reload or option change.
+
+Regression tests use synthetic scenes for synchronous and asynchronous loads, nested renders,
+and repeated empty-filter/clear cycles. Live CVAT job performance still needs verification
+with the affected dataset; automated tests do not establish a frame-time improvement.
+
+## 14. Track-wide ride_state and loading-aware camera follow
+
+The RS sidebar control appears only on cuboid tracks whose label exposes mutable
+`ride_state`. It propagates the current boolean value to every existing keyframe,
+including outside keyframes, so native interpolation carries it through the whole track.
+It uses native ObjectState saves, skips matching values, preserves geometry and other
+attributes, and refreshes customized sidebars through `updateState` when
+`refreshAnnotations` is unavailable. Locked tracks and missing save adapters fail closed.
+The user saves annotations to the server with CVAT's normal Save control.
+
+Camera follow waits while `model.data.isFrameUpdating` is true, retaining the previous
+anchor during temporary deactivation. It prefers frame-stamped entries in `model.objects`
+over unversioned `drawnObjects.data` used by customized builds. Native sidebar
+`focusAndExpand` is supported without invoking the combined Quick-filter handler.

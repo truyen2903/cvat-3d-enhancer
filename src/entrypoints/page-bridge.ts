@@ -2,6 +2,8 @@ import { installMouseFrameNavigation } from '../integration/cvat/runtime/mouse-f
 import {
   installSidebarQuickFilterGuard,
   resolveSidebarObjectContext,
+  sidebarHasRideState,
+  syncSidebarRideState,
 } from '../integration/cvat/runtime/sidebar-enhancements';
 import { BASE_GUIDE_CLASS, CuboidBaseGuide } from '../integration/cvat/runtime/cuboid-base-guide';
 import { collectQaPointNeighborhood } from '../integration/cvat/runtime/qa-point-neighborhood';
@@ -642,7 +644,11 @@ export class PageBridgeRuntimeHost {
       this.doc,
       (clientID: number, dimension: CuboidDimensionKey): Promise<DimensionSyncResult> =>
         this.handleSyncObjectDimension(clientID, dimension),
-      this.preRenderEnhancer.getOptions()
+      this.preRenderEnhancer.getOptions(),
+      {
+        isAvailable: (id) => sidebarHasRideState(this.doc, id),
+        sync: (id) => syncSidebarRideState(this.doc, id),
+      }
     );
   }
 
@@ -982,11 +988,7 @@ export class PageBridgeRuntimeHost {
     if (!this.hookedPerspectiveCanvases.has(perspCanvas)) {
       this.hookedPerspectiveCanvases.add(perspCanvas);
       perspCanvas.addEventListener('canvas.setup', () => {
-        this.preRenderEnhancer.markDirty();
-        const inst = this.getActiveCanvas3dInstance();
-        if (inst?.view) {
-          this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
-        }
+        // The shared canvas.setup listener handles point-cloud processing once.
         this.syncActiveObjectQaOverlay(true);
       });
       perspCanvas.addEventListener('canvas.edited', () => {

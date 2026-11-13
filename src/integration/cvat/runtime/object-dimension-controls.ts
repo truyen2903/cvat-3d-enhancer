@@ -1,4 +1,5 @@
 import type { CuboidDimensionKey, DimensionSyncResult } from './pre-render-enhancer';
+import type { RideStateSyncResult } from './ride-state-sync';
 
 const ROW_CLASS = 'cvat-3d-enhancer-dim-sync-row';
 const CARD_SELECTOR = '.cvat-objects-sidebar-state-item, [id^="cvat-objects-sidebar-state-item-"]';
@@ -8,13 +9,23 @@ type SyncDimension = (
   clientID: number,
   dimension: CuboidDimensionKey
 ) => Promise<DimensionSyncResult> | DimensionSyncResult;
+export interface RideStateControl {
+  isAvailable: (clientID: number) => boolean;
+  sync: (clientID: number) => Promise<RideStateSyncResult>;
+}
+type SidebarAction = CuboidDimensionKey | 'RIDE_STATE';
 const handlers = new WeakMap<
   HTMLElement,
-  { onSync: SyncDimension; enabled: ReadonlySet<CuboidDimensionKey> }
+  {
+    onSync: SyncDimension;
+    enabled: ReadonlySet<SidebarAction>;
+    rideState?: RideStateControl;
+    busy: boolean;
+  }
 >();
 
 const DIMENSION_BUTTON_CONFIGS: readonly {
-  readonly key: CuboidDimensionKey;
+  readonly key: SidebarAction;
   readonly className: string;
   readonly title: string;
   readonly svgPath: string;
@@ -39,6 +50,12 @@ const DIMENSION_BUTTON_CONFIGS: readonly {
     title: 'Sync Length (L) across frames with 100% identical attributes',
     svgPath:
       'M2 7V3C2 2.45 2.45 2 3 2H7V4H4V7H2ZM22 7V3C22 2.45 21.55 2 21 2H17V4H20V7H22ZM2 17V21C2 21.55 2.45 22 3 22H7V20H4V17H2ZM22 17V21C22 21.55 21.55 22 21 22H17V20H20V17H22ZM8.5 6H11.3V15.5H16.8V18H8.5V6Z',
+  },
+  {
+    key: 'RIDE_STATE',
+    className: 'cvat-object-item-button-sync-ride-state',
+    title: 'Apply current ride_state to all frames of this track (Áp dụng cho mọi frame)',
+    svgPath: 'M3 3H14V6H6V18H18V12H21V21H3V3ZM10 10L13 13L20 5L22 7L13 17L8 12L10 10Z',
   },
   {
     key: 'FLIP_180',
@@ -80,6 +97,11 @@ function createButton(doc: Document, cfg: (typeof DIMENSION_BUTTON_CONFIGS)[numb
   path.setAttribute('d', cfg.svgPath);
   svg.appendChild(path);
   button.appendChild(svg);
+  if (cfg.key === 'RIDE_STATE') {
+    button.appendChild(doc.createTextNode('RS'));
+    button.style.width = '48px';
+    button.style.gap = '2px';
+  }
   return button;
 }
 
@@ -87,17 +109,21 @@ function createButton(doc: Document, cfg: (typeof DIMENSION_BUTTON_CONFIGS)[numb
 export function injectCvatObjectDimensionSyncControls(
   doc: Document,
   onSync: SyncDimension,
-  options: { enableDimensionSync?: boolean; enableHeadingFlip?: boolean } = {}
+  options: { enableDimensionSync?: boolean; enableHeadingFlip?: boolean } = {},
+  rideState?: RideStateControl
 ): number {
-  const configs = DIMENSION_BUTTON_CONFIGS.filter((cfg) =>
-    cfg.key === 'FLIP_180'
-      ? options.enableHeadingFlip !== false
-      : options.enableDimensionSync !== false
-  );
-  const enabled = new Set(configs.map((cfg) => cfg.key));
   let mountedCount = 0;
   for (const card of doc.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
-    if (clientId(card) === null) continue;
+    const id = clientId(card);
+    if (id === null) continue;
+    const configs = DIMENSION_BUTTON_CONFIGS.filter((cfg) =>
+      cfg.key === 'RIDE_STATE'
+        ? Boolean(rideState?.isAvailable(id))
+        : cfg.key === 'FLIP_180'
+          ? options.enableHeadingFlip !== false
+          : options.enableDimensionSync !== false
+    );
+    const enabled = new Set(configs.map((cfg) => cfg.key));
     if (!configs.length) {
       card.querySelector(`.${ROW_CLASS}`)?.remove();
       continue;
@@ -129,14 +155,14 @@ export function injectCvatObjectDimensionSyncControls(
       row.style.cssText =
         'display: flex !important; visibility: visible !important; justify-content: space-around; ' +
         'align-items: center; flex-wrap: wrap; width: 100%; min-height: 26px;';
-      handler = { onSync, enabled };
+      handler = { onSync, enabled, rideState, busy: false };
       handlers.set(row, handler);
       // Replace rows cloned/restored by the host: their DOM survives, their listeners do not.
       row.replaceChildren(...configs.map((cfg) => createButton(doc, cfg)));
       const activeHandler = handler;
       row.addEventListener('click', (event) => {
         const target = event.target as Element | null;
-        const button = target?.closest<HTMLElement>('[data-enhancer-sync-dim]');
+        const button = target?.closest<HTMLButtonElement>('button[data-enhancer-sync-dim]');
         if (!button || !row.contains(button)) return;
         event.stopPropagation();
         event.preventDefault();
@@ -146,10 +172,21 @@ export function injectCvatObjectDimensionSyncControls(
         const cfg = DIMENSION_BUTTON_CONFIGS.find(
           (item) => item.key === button.dataset.enhancerSyncDim
         );
-        if (!cfg || !activeHandler.enabled.has(cfg.key)) return;
+        if (!cfg || !activeHandler.enabled.has(cfg.key) || activeHandler.busy) return;
+        activeHandler.busy = true;
+        button.disabled = true;
         void Promise.resolve()
-          .then(() => activeHandler.onSync(id, cfg.key))
+          .then(async () => {
+            if (cfg.key === 'RIDE_STATE') {
+              const result = await activeHandler.rideState?.sync(id);
+              if (!result) throw new Error('ride_state is unavailable');
+              button.title = `ride_state = ${result.targetValue} across all frames (${result.updatedKeyframes}/${result.totalKeyframes} keyframes updated)`;
+              return null;
+            }
+            return activeHandler.onSync(id, cfg.key);
+          })
           .then((result) => {
+            if (!result) return;
             if (result.syncedFrames > 0) {
               button.title =
                 cfg.key === 'FLIP_180'
@@ -161,11 +198,16 @@ export function injectCvatObjectDimensionSyncControls(
           })
           .catch(() => {
             button.title = `${cfg.title} — Sync failed; check runtime compatibility`;
+          })
+          .finally(() => {
+            activeHandler.busy = false;
+            button.disabled = Boolean(row.closest(CARD_SELECTOR)?.querySelector(LOCK_SELECTOR));
           });
       });
     } else {
       handler.onSync = onSync;
       handler.enabled = enabled;
+      handler.rideState = rideState;
       for (const button of row.querySelectorAll<HTMLElement>('[data-enhancer-sync-dim]')) {
         if (!configs.some((cfg) => cfg.key === button.dataset.enhancerSyncDim)) button.remove();
       }
@@ -184,7 +226,8 @@ export function injectCvatObjectDimensionSyncControls(
     for (const button of row.querySelectorAll<HTMLButtonElement>(
       'button[data-enhancer-sync-dim]'
     )) {
-      if (button.disabled !== locked) button.disabled = locked;
+      const disabled = locked || handler.busy;
+      if (button.disabled !== disabled) button.disabled = disabled;
       const opacity = locked ? '0.5' : '1';
       if (button.style.opacity !== opacity) button.style.opacity = opacity;
     }

@@ -28,6 +28,50 @@ afterEach(() => {
 });
 
 describe('dimension controls on customized CVAT sidebars', () => {
+  it('shows RS beside dimensions only for supported tracks and prevents overlapping operations', async () => {
+    const card = mountCard('');
+    let finish!: (result: {
+      clientID: number;
+      targetValue: string;
+      updatedKeyframes: number;
+      totalKeyframes: number;
+    }) => void;
+    const rideState = {
+      isAvailable: vi.fn(() => true),
+      sync: vi.fn(
+        () =>
+          new Promise<{
+            clientID: number;
+            targetValue: string;
+            updatedKeyframes: number;
+            totalKeyframes: number;
+          }>((resolve) => {
+            finish = resolve;
+          })
+      ),
+    };
+    const onSync = sync();
+    injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
+    const button = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="RIDE_STATE"]')!;
+    expect(button.textContent).toBe('RS');
+    expect(card.querySelectorAll('button')).toHaveLength(5);
+    button.click();
+    button.click();
+    await Promise.resolve();
+    expect(rideState.sync).toHaveBeenCalledExactlyOnceWith(1);
+    injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
+    expect(button.disabled).toBe(true);
+    card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="H"]')!.click();
+    expect(onSync).not.toHaveBeenCalled();
+    finish({ clientID: 1, targetValue: 'true', updatedKeyframes: 3, totalKeyframes: 4 });
+    await vi.waitFor(() => expect(button.disabled).toBe(false));
+    expect(button.title).toContain('ride_state = true across all frames');
+    rideState.isAvailable.mockReturnValue(false);
+    injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
+    expect(card.querySelector('[data-enhancer-sync-dim="RIDE_STATE"]')).toBeNull();
+    expect(card.querySelectorAll('button')).toHaveLength(4);
+  });
+
   it.each([
     '<div class="ant-col ant-col-20 css-n0gjrg"><div class="ant-row"><span class="cvat-object-item-button-first-keyframe" style="opacity:0.5;pointer-events:none"></span></div></div>',
     '<div class="ant-col ant-col-24 css-company"><div class="company-actions"><span class="cvat-object-item-button-first-keyframe"></span></div></div>',

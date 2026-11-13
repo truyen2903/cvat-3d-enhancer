@@ -139,13 +139,24 @@ export interface CvatObjectStateLike {
   shapeType?: string;
   points?: number[] | null;
   attributes?: Record<number | string, string>;
+  label?: {
+    name?: string;
+    attributes?: readonly {
+      id: number;
+      name: string;
+      mutable: boolean;
+      input_type?: string;
+    }[];
+  };
   lock?: boolean;
   hidden?: boolean;
   outside?: boolean;
+  occluded?: boolean;
   keyframe?: boolean;
   updateFlags?: {
     reset?: () => void;
     points?: boolean;
+    attributes?: boolean;
   };
   __internal?: {
     save?: (frame: number, data: CvatObjectStateLike) => CvatObjectStateLike;
@@ -1202,6 +1213,8 @@ export class Cvat3dPreRenderEnhancer {
   private pendingFrameObjectsLoad = true;
   private isRedrawingViews = false;
   private isApplying = false;
+  private nativeNotifyDepth = 0;
+  private lastObjectIds = '';
 
   private canvasRenderListener:
     ((canvas: HTMLCanvasElement, camera: unknown, scene?: ThreeSceneLike) => void) | null = null;
@@ -1686,19 +1699,22 @@ export class Cvat3dPreRenderEnhancer {
     if (typeof view.notify === 'function') {
       const origNotify = view.notify.bind(view);
       view.notify = (model: unknown, reason: string): void => {
-        if (reason === 'image_changed') {
-          this.dirty = true;
-          this.pendingFrameObjectsLoad = true;
-          this.appliedViewBackground.delete(view);
-          this.applySceneBackgrounds(view);
+        // Let CVAT finish replacing the image and annotations before processing points.
+        // Native notify can render synchronously or emit nested objects_updated events.
+        if (reason === 'image_changed') this.pendingFrameObjectsLoad = true;
+        this.nativeNotifyDepth += 1;
+        try {
+          origNotify(model, reason);
+        } finally {
+          this.nativeNotifyDepth -= 1;
         }
-        origNotify(model, reason);
-        if (reason === 'objects_updated') this.optimizeOrientationArrows(view);
-        if (reason === 'image_changed') {
-          if (this.dirty) this.applyOnceIfNeeded(view, canvas3d?.model);
-        } else if (reason === 'objects_updated' && this.pendingFrameObjectsLoad) {
-          // Only color boxes on initial frame object load; ignore subsequent box drag/resize/rotate on same frame
-          this.dirty = true;
+        if (reason === 'objects_updated') {
+          const objectIds = Object.keys(view.drawnObjects ?? {})
+            .sort()
+            .join(',');
+          if (this.pendingFrameObjectsLoad || objectIds !== this.lastObjectIds) this.markDirty();
+        }
+        if (this.nativeNotifyDepth === 0 && this.dirty) {
           this.applyOnceIfNeeded(view, canvas3d?.model);
         }
       };
@@ -1723,7 +1739,7 @@ export class Cvat3dPreRenderEnhancer {
     view: CvatInternalViewLike,
     model?: CvatInternalCanvas3dLike['model']
   ): boolean {
-    if (!view.views || this.isApplying) {
+    if (!view.views || this.isApplying || this.nativeNotifyDepth > 0) {
       return false;
     }
     this.isApplying = true;
@@ -1765,7 +1781,7 @@ export class Cvat3dPreRenderEnhancer {
 
       this.optimizeOrientationArrows(view);
       const drawnObjects = view.drawnObjects ?? {};
-      const hasDrawnObjects = Object.keys(drawnObjects).length > 0;
+      const objectIds = Object.keys(drawnObjects).sort().join(',');
 
       const viewEntries = Object.entries(view.views);
       this.lastViewCount = viewEntries.length;
@@ -1781,7 +1797,7 @@ export class Cvat3dPreRenderEnhancer {
       const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
       const orthoFixed = this.options.fixedOrthoPointSize ?? true;
       const hideGround = Boolean(this.options.hideGroundPoints);
-      const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${hideGround ? 1 : 0}::${hasDrawnObjects ? 1 : 0}`;
+      const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${hideGround ? 1 : 0}::objects:${objectIds}`;
       const currentSignature = `${geometryColorSignature}:${orthoFixed ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
 
       if (!this.dirty && currentSignature === this.lastExecutionSignature) {
@@ -1794,9 +1810,8 @@ export class Cvat3dPreRenderEnhancer {
       this.lastExecutionSignature = currentSignature;
       this.lastGeometryColorSignature = geometryColorSignature;
       this.dirty = false;
-      if (hasDrawnObjects) {
-        this.pendingFrameObjectsLoad = false;
-      }
+      this.pendingFrameObjectsLoad = false;
+      this.lastObjectIds = objectIds;
 
       const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
 

@@ -53,6 +53,21 @@ describe('custom CVAT sidebar integration', () => {
     expect(resolveSidebarObjectContext(document, 1)?.state).toBe(state);
     expect(resolveSidebarObjectContext(document, 2)).toBeNull();
   });
+  it('refreshes customized sidebars with a fresh native state instead of a stale attribute snapshot', async () => {
+    const { card, state, save } = cardWithState();
+    const fresh: CvatObjectStateLike = { ...state, attributes: { 6260: 'true' } };
+    save.mockReturnValue(fresh);
+    const reset = vi.fn();
+    state.updateFlags = { reset };
+    const updateState = vi.fn();
+    Object.assign(card, {
+      __reactFiber$company: { memoizedProps: { objectState: state, updateState } },
+    });
+    await resolveSidebarObjectContext(document, 1)!.refresh!();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(save).toHaveBeenCalledWith(0, state);
+    expect(updateState).toHaveBeenCalledExactlyOnceWith(fresh);
+  });
 
   it.each(['H', 'W', 'L', 'FLIP_180'] as const)(
     'persists %s through the sidebar API and refreshes native annotations',
@@ -110,6 +125,23 @@ describe('custom CVAT sidebar integration', () => {
     try {
       card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
       expect(native).toHaveBeenCalledOnce();
+    } finally {
+      remove();
+    }
+  });
+  it('uses focusAndExpand on customized builds without invoking their combined filter handler', () => {
+    const { card } = cardWithState();
+    const focusAndExpand = vi.fn();
+    Object.assign(card, { __reactFiber$company: { memoizedProps: { focusAndExpand } } });
+    const native = vi.fn();
+    card.addEventListener('dblclick', native);
+    const remove = installSidebarQuickFilterGuard(document, window);
+    try {
+      card
+        .querySelector('.label')!
+        .dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+      expect(focusAndExpand).toHaveBeenCalledOnce();
+      expect(native).not.toHaveBeenCalled();
     } finally {
       remove();
     }

@@ -56,6 +56,8 @@ Trên thẻ **CUBOID TRACK** ở sidebar, Meow thêm các nút:
 | **L**    | Đồng bộ chiều dài.                                                  |
 | **180°** | Đảo hướng yaw 180° trên frame hiện tại.                             |
 
+Nút **RS** cạnh H/W/L áp dụng giá trị `ride_state` hiện tại (bật hoặc tắt) cho mọi frame của cùng track. Nút chỉ hiện khi nhãn có thuộc tính `ride_state` thay đổi theo frame. Thao tác chỉ sửa thuộc tính này tại các keyframe, giữ nguyên hình học và các thuộc tính khác; sau đó dùng **Save** của CVAT để lưu lên server.
+
 H/W/L dùng giá trị của frame hiện tại. Theo mặc định, các keyframe được đồng bộ khi thuộc tính trùng khớp; mã nguồn có xử lý riêng cho nhãn **two-wheels** đối với H và L. Các nút được vô hiệu hóa khi object bị khóa. Nếu thao tác không thực hiện được, di chuột lên nút để xem thông báo trong tooltip.
 
 Kết quả phụ thuộc ObjectState và API track của bản CVAT đang chạy. Với CVAT được tùy chỉnh, hãy kiểm tra kết quả trên job được phép sử dụng trước khi áp dụng rộng rãi.

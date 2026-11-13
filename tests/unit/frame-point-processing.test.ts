@@ -38,9 +38,12 @@ describe('frame point-cloud processing', () => {
           if (reason !== 'image_changed') return;
           canvas.model!.data!.imageID = 2;
           canvas.view!.drawnObjects = {};
+          canvas.view!.render!();
           canvas.view!.onSceneImageLoaded!(next);
+          canvas.view!.render!();
           canvas.view!.drawnObjects = { 1: entry };
           canvas.view!.notify!({}, 'objects_updated');
+          canvas.view!.render!();
         },
         render: vi.fn(),
       },
@@ -61,6 +64,85 @@ describe('frame point-cloud processing', () => {
     expect(process.mock.calls[0]![0].geometry).toBe(next.geometry);
     canvas.view!.render!();
     expect(process).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for an asynchronous image load without processing the previous cloud again', () => {
+    const initial = cloud();
+    const next = cloud();
+    const canvas: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 1 } },
+      view: {
+        views: { perspective: { scene: { background: null, children: [initial] } } },
+        drawnObjects: { 1: entry },
+        notify: () => {
+          canvas.model!.data!.imageID = 2;
+        },
+        onSceneImageLoaded: (points) => {
+          canvas.view!.views!.perspective!.scene!.children = [points];
+        },
+        render: vi.fn(),
+      },
+    };
+    const enhancer = new Cvat3dPreRenderEnhancer();
+    const process = vi.spyOn(
+      enhancer as unknown as {
+        applyPointCloudBoxColors: (points: ThreeObject3DLike) => void;
+      },
+      'applyPointCloudBoxColors'
+    );
+    enhancer.ensureHooked(canvas);
+    process.mockClear();
+    canvas.view!.notify!({}, 'image_changed');
+    canvas.view!.render!();
+    expect(process).not.toHaveBeenCalled();
+    canvas.view!.onSceneImageLoaded!(next);
+    canvas.view!.notify!({}, 'objects_updated');
+    expect(process).toHaveBeenCalledOnce();
+    expect(process.mock.calls[0]![0]).toBe(next);
+  });
+
+  it('settles empty filter results and restores boxes on clear without repeated point processing', () => {
+    const point = cloud();
+    const canvas: CvatInternalCanvas3dLike = {
+      view: {
+        views: { perspective: { scene: { background: null, children: [point] } } },
+        drawnObjects: { 1: entry },
+        notify: vi.fn(),
+        render: vi.fn(),
+      },
+    };
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: false,
+      enableScattering: true,
+      colorPointsByCuboid: true,
+    });
+    const process = vi.spyOn(
+      enhancer as unknown as {
+        applyPointCloudBoxColors: (points: ThreeObject3DLike) => void;
+      },
+      'applyPointCloudBoxColors'
+    );
+    enhancer.ensureHooked(canvas);
+    process.mockClear();
+    const snapshots: NonNullable<CvatInternalCanvas3dLike['view']>['drawnObjects'][] = [
+      {},
+      { 1: entry },
+      {},
+      { 1: entry },
+    ];
+    for (const objects of snapshots) {
+      canvas.view!.drawnObjects = objects;
+      canvas.view!.notify!({}, 'objects_updated');
+      const calls = process.mock.calls.length;
+      for (let i = 0; i < 5; i++) {
+        canvas.view!.notify!({}, 'objects_updated');
+        enhancer.markViewStructureChanged();
+        canvas.view!.render!();
+      }
+      expect(process).toHaveBeenCalledTimes(calls);
+    }
+    expect(process).toHaveBeenCalledTimes(4);
+    expect(point.geometry!.attributes!.color!.array[0]).not.toBe(1);
   });
 
   it('discovers point objects only once per scene while processing a new frame', () => {

@@ -33,6 +33,35 @@ function makeView(points: number[], frame: number) {
 }
 
 describe('Active object camera follow', () => {
+  it('waits through loading when renderer data has no frame, then uses the matching model state', () => {
+    let active: string | null = '5';
+    const { view, setLookAt } = makeView([0, 0, 0], 10);
+    view.drawnObjects = { 5: { data: { points: [0, 0, 0] } } };
+    const model = {
+      data: { imageID: 10, isFrameUpdating: false },
+      objects: [{ clientID: 5, frame: 10, points: [0, 0, 0] }],
+    };
+    const follower = new ActiveObjectCameraFollower(
+      () => active,
+      () => true
+    );
+    follower.tick(view, model);
+    model.data.imageID = 11;
+    model.data.isFrameUpdating = true;
+    active = null;
+    follower.tick(view, model);
+    model.objects = [{ clientID: 5, frame: 11, points: [4, 2, 0] }];
+    follower.tick(view, model);
+    expect(setLookAt).not.toHaveBeenCalled();
+    model.data.isFrameUpdating = false;
+    active = '5';
+    // Renderer still holds an unversioned old snapshot at this instant.
+    follower.tick(view, model);
+    follower.tick(view, model);
+    expect(setLookAt).toHaveBeenCalledOnce();
+    expect(setLookAt).toHaveBeenLastCalledWith(14, 12, 10, 5, 4, 3, false);
+  });
+
   it('translates camera by the active box delta on frame change only', () => {
     let active: string | null = '5';
     let enabled = true;
