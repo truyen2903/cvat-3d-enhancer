@@ -1,5 +1,6 @@
 import type { CuboidDimensionKey, DimensionSyncResult } from './pre-render-enhancer';
 import type { RideStateSyncResult } from './ride-state-sync';
+import { showMeowToast } from './meow-toast';
 
 const ROW_CLASS = 'cvat-3d-enhancer-dim-sync-row';
 const CARD_SELECTOR = '.cvat-objects-sidebar-state-item, [id^="cvat-objects-sidebar-state-item-"]';
@@ -65,6 +66,39 @@ const DIMENSION_BUTTON_CONFIGS: readonly {
       'M12 2L16 6H13V11H11V6H8L12 2ZM12 22L8 18H11V13H13V18H16L12 22ZM5.64 5.64L7.05 7.05C5.17 8.93 4.69 11.74 5.62 14.12L3.77 14.9C2.5 11.74 3.16 8.12 5.64 5.64ZM18.36 18.36L16.95 16.95C18.83 15.07 19.31 12.26 18.38 9.88L20.23 9.1C21.5 12.26 20.84 15.88 18.36 18.36Z',
   },
 ];
+
+const ACTION_NAMES: Readonly<Record<SidebarAction, string>> = {
+  H: 'đồng bộ chiều cao (H)',
+  W: 'đồng bộ chiều rộng (W)',
+  L: 'đồng bộ chiều dài (L)',
+  FLIP_180: 'lật hướng 180°',
+  RIDE_STATE: 'áp dụng ride_state cho mọi frame',
+};
+const feedbackTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+
+/** Visible per-button state so a click is acknowledged even without reading the toast. */
+function setButtonFeedback(button: HTMLElement, state: 'busy' | 'done' | 'failed' | 'idle'): void {
+  const previous = feedbackTimers.get(button);
+  if (previous !== undefined) clearTimeout(previous);
+  feedbackTimers.delete(button);
+  button.dataset.enhancerState = state;
+  button.setAttribute('aria-busy', state === 'busy' ? 'true' : 'false');
+  button.style.color =
+    state === 'done'
+      ? '#389e0d'
+      : state === 'failed'
+        ? '#cf1322'
+        : state === 'busy'
+          ? '#1677ff'
+          : 'inherit';
+  button.style.cursor = state === 'busy' ? 'progress' : 'pointer';
+  if (state === 'done' || state === 'failed') {
+    feedbackTimers.set(
+      button,
+      setTimeout(() => setButtonFeedback(button, 'idle'), 1600)
+    );
+  }
+}
 
 function clientId(card: Element): number | null {
   const raw = card.getAttribute('data-client-id');
@@ -168,36 +202,68 @@ export function injectCvatObjectDimensionSyncControls(
         event.preventDefault();
         const currentCard = row.closest(CARD_SELECTOR);
         const id = currentCard ? clientId(currentCard) : null;
-        if (id === null || currentCard?.querySelector(LOCK_SELECTOR)) return;
+        if (id === null) return;
         const cfg = DIMENSION_BUTTON_CONFIGS.find(
           (item) => item.key === button.dataset.enhancerSyncDim
         );
-        if (!cfg || !activeHandler.enabled.has(cfg.key) || activeHandler.busy) return;
+        if (!cfg || !activeHandler.enabled.has(cfg.key)) return;
+        const name = ACTION_NAMES[cfg.key];
+        if (currentCard?.querySelector(LOCK_SELECTOR)) {
+          showMeowToast(doc, `#${id}: object đang bị khóa — mở khóa để ${name}`, 'error');
+          return;
+        }
+        if (activeHandler.busy) {
+          showMeowToast(doc, `#${id}: đang xử lý thao tác trước, vui lòng chờ…`, 'info');
+          return;
+        }
         activeHandler.busy = true;
         button.disabled = true;
+        setButtonFeedback(button, 'busy');
+        // Acknowledge the click immediately; native saves can take a moment on long tracks.
+        const toast = showMeowToast(doc, `#${id}: đang ${name}…`, 'loading');
         void Promise.resolve()
           .then(async () => {
             if (cfg.key === 'RIDE_STATE') {
               const result = await activeHandler.rideState?.sync(id);
               if (!result) throw new Error('ride_state is unavailable');
+              const outsideNote = result.outsideKeyframes
+                ? `, gồm ${result.outsideKeyframes} keyframe outside`
+                : '';
+              const message =
+                result.updatedKeyframes > 0
+                  ? `#${id}: ride_state = ${result.targetValue} cho toàn track (đã cập nhật ${result.updatedKeyframes}/${result.totalKeyframes} keyframe${outsideNote})`
+                  : `#${id}: ride_state = ${result.targetValue} đã đồng nhất trên ${result.totalKeyframes} keyframe${outsideNote} — không cần thay đổi`;
               button.title = `ride_state = ${result.targetValue} across all frames (${result.updatedKeyframes}/${result.totalKeyframes} keyframes updated)`;
-              return null;
+              return { ok: true, message };
             }
-            return activeHandler.onSync(id, cfg.key);
-          })
-          .then((result) => {
-            if (!result) return;
+            const result = await activeHandler.onSync(id, cfg.key);
             if (result.syncedFrames > 0) {
+              const message =
+                cfg.key === 'FLIP_180'
+                  ? `#${id}: đã lật 180° ở frame hiện tại (Yaw = ${result.targetValue === null ? '' : ((result.targetValue * 180) / Math.PI).toFixed(1)}°)`
+                  : `#${id}: ${cfg.key} = ${result.targetValue?.toFixed(2) ?? ''} đã đồng bộ ${result.syncedFrames} keyframe` +
+                    (result.skippedAttributeMismatchFrames
+                      ? ` (bỏ qua ${result.skippedAttributeMismatchFrames} do khác attribute)`
+                      : '');
               button.title =
                 cfg.key === 'FLIP_180'
                   ? `Flipped 180° on current frame (Yaw = ${result.targetValue === null ? '' : ((result.targetValue * 180) / Math.PI).toFixed(1)}°)`
                   : `${cfg.key} = ${result.targetValue?.toFixed(2) ?? ''} synced to ${result.syncedFrames} keyframe(s) (${result.skippedAttributeMismatchFrames} skipped due to different attributes)`;
-            } else {
-              button.title = `${cfg.title} — No frames updated; check track state and runtime compatibility`;
+              return { ok: true, message };
             }
+            const message = `#${id}: ${name} — không có frame nào được cập nhật`;
+            button.title = `${cfg.title} — No frames updated; check track state and runtime compatibility`;
+            return { ok: false, message };
           })
-          .catch(() => {
+          .then(({ ok, message }) => {
+            toast.update(message, ok ? 'success' : 'info');
+            setButtonFeedback(button, ok ? 'done' : 'idle');
+          })
+          .catch((error: unknown) => {
+            const reason = error instanceof Error && error.message ? `: ${error.message}` : '';
             button.title = `${cfg.title} — Sync failed; check runtime compatibility`;
+            toast.update(`#${id}: ${name} thất bại${reason}`, 'error');
+            setButtonFeedback(button, 'failed');
           })
           .finally(() => {
             activeHandler.busy = false;

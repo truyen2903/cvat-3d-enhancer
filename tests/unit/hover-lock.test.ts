@@ -44,3 +44,29 @@ describe('Active object hover lock', () => {
     expect(rayCaster.intersectObjects()).toEqual([hit('1')]);
   });
 });
+
+describe('hover raycast prefilter', () => {
+  it('only intersects the active cuboid and unnamed helpers during hover', async () => {
+    const { prefilterHoverCandidates } =
+      await import('../../src/integration/cvat/runtime/hover-lock');
+    const objects = [{ name: '1' }, { name: '2' }, { name: 'plane' }, { name: '3' }, {}];
+    expect(prefilterHoverCandidates(objects, '2')).toEqual([{ name: '2' }, { name: 'plane' }, {}]);
+    expect(prefilterHoverCandidates(objects, null)).toBe(objects);
+  });
+
+  it('passes the reduced candidate list to the native raycast, but not for recursive casts', () => {
+    const seen: unknown[][] = [];
+    const rayCaster = {
+      intersectObjects: (objects: unknown[], _recursive?: boolean): unknown[] => {
+        seen.push(objects);
+        return objects.map((object) => ({ object }));
+      },
+    };
+    lockRaycasterHoverToActiveObject(rayCaster, () => '5');
+    const cuboids = Array.from({ length: 1000 }, (_, i) => ({ name: String(i) }));
+    expect(rayCaster.intersectObjects(cuboids, false)).toEqual([{ object: { name: '5' } }]);
+    expect(seen[0]).toHaveLength(1);
+    rayCaster.intersectObjects(cuboids, true);
+    expect(seen[1]).toHaveLength(1000);
+  });
+});

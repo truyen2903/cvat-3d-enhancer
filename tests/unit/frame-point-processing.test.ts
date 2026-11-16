@@ -196,3 +196,41 @@ describe('frame point-cloud processing', () => {
     expect(next.geometry!.attributes!.color!.needsUpdate).toBe(true);
   });
 });
+
+describe('outside/hidden toggles on the current frame', () => {
+  it('recolors points when a box becomes outside or visible again, but not while dragging', () => {
+    const point = cloud();
+    const box = { data: { clientID: 1, points: [0, 0, 0, 0, 0, 0, 2, 2, 2], outside: false } };
+    const canvas: CvatInternalCanvas3dLike = {
+      model: { data: { imageID: 1 } },
+      view: {
+        views: { perspective: { scene: { background: null, children: [point] } } },
+        drawnObjects: { 1: box as never },
+        notify: vi.fn(),
+        render: vi.fn(),
+      },
+    };
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      whiteBackground: false,
+      enableScattering: true,
+      colorPointsByCuboid: true,
+    });
+    enhancer.ensureHooked(canvas);
+    const colors = point.geometry!.attributes!.color!.array;
+    const inside = Array.from(colors);
+    expect(inside).not.toEqual([1, 1, 1]);
+
+    box.data.outside = true;
+    canvas.view!.notify!({}, 'objects_updated');
+    expect(Array.from(colors)).toEqual([1, 1, 1]);
+
+    box.data.outside = false;
+    canvas.view!.notify!({}, 'objects_updated');
+    expect(Array.from(colors)).toEqual(inside);
+
+    // Same-frame geometry edits keep the frozen snapshot (no full recolor per drag event).
+    box.data.points[0] = 50;
+    canvas.view!.notify!({}, 'objects_updated');
+    expect(Array.from(colors)).toEqual(inside);
+  });
+});

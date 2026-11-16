@@ -47,6 +47,7 @@ describe('ride_state across a track', () => {
       targetValue: 'true',
       updatedKeyframes: 3,
       totalKeyframes: 3,
+      outsideKeyframes: 1,
     });
     snapshots.forEach((state, index) => {
       expect(state.attributes).toEqual({ 6260: 'true', 6261: before[index]!.type });
@@ -68,6 +69,17 @@ describe('ride_state across a track', () => {
     expect(snapshots[1]!.save).toHaveBeenCalledOnce();
     expect(snapshots[2]!.save).not.toHaveBeenCalled();
     expect((await syncTrackRideState(1, current)).updatedKeyframes).toBe(0);
+  });
+
+  it('turns ride_state off on an outside keyframe without bringing the box back inside', async () => {
+    const { current, snapshots } = track('false');
+    const outside = snapshots[2]!;
+    outside.attributes![6260] = 'true';
+    const result = await syncTrackRideState(1, current);
+    expect(result).toMatchObject({ updatedKeyframes: 1, outsideKeyframes: 1 });
+    expect(outside.attributes![6260]).toBe('false');
+    expect(outside.outside).toBe(true);
+    expect(outside.save).toHaveBeenCalledOnce();
   });
 
   it.each(['locked', 'missing attribute', 'wrong track', 'invalid value', 'unsupported save'])(

@@ -647,7 +647,14 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.getOptions(),
       {
         isAvailable: (id) => sidebarHasRideState(this.doc, id),
-        sync: (id) => syncSidebarRideState(this.doc, id),
+        sync: async (id) => {
+          const result = await syncSidebarRideState(this.doc, id);
+          // ride_state feeds the QA overlay; show the applied value without waiting for
+          // the next unrelated DOM mutation or frame change.
+          this.lastQaSignature = '';
+          this.syncActiveObjectQaOverlay(true);
+          return result;
+        },
       }
     );
   }

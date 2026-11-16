@@ -21,6 +21,7 @@ import {
 } from './workspace-feature-options';
 import type { GuideMeshLike } from './cuboid-base-guide';
 import { deferHiddenOrientationArrowUpdates } from './hidden-orientation-arrows';
+import { showMeowToast } from './meow-toast';
 
 export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
   readonly whiteBackground: boolean;
@@ -705,7 +706,7 @@ export function normalizedRgbToHex(r: number, g: number, b: number): string {
   return `#${toByte(r)}${toByte(g)}${toByte(b)}`;
 }
 
-interface OrientedBoxBounds {
+export interface OrientedBoxBounds {
   readonly clientID: number;
   readonly cx: number;
   readonly cy: number;
@@ -801,7 +802,11 @@ export function compileOrientedCuboids(
       continue;
     }
 
-    if (sx <= 0 || sy <= 0 || sz <= 0) {
+    // NaN extents/rotations would make every point test pass (NaN comparisons are false).
+    if (
+      !(sx > 0 && sy > 0 && sz > 0) ||
+      ![cx, cy, cz, rx, ry, rz, sx, sy, sz].every(Number.isFinite)
+    ) {
       continue;
     }
 
@@ -877,6 +882,166 @@ export function compileOrientedCuboids(
   }
 
   return result;
+}
+
+/**
+ * IDs plus outside/hidden flags of drawn objects. Toggling Outside/Hidden on the current frame
+ * changes which cuboids color points, so it must invalidate the point colors like an ID change.
+ */
+export function drawnObjectsVisibilitySignature(
+  drawnObjects?: Record<number, CvatDrawnObjectEntry> | null
+): string {
+  if (!drawnObjects) return '';
+  const parts: string[] = [];
+  for (const [id, entry] of Object.entries(drawnObjects)) {
+    const hidden = Boolean(entry?.data?.hidden ?? entry?.state?.hidden);
+    const outside = Boolean(entry?.data?.outside ?? entry?.state?.outside);
+    parts.push(hidden || outside ? `${id}:${outside ? 'o' : ''}${hidden ? 'h' : ''}` : id);
+  }
+  return parts.sort().join(',');
+}
+
+/**
+ * Uniform XY grid over compiled cuboids (CSR layout). With hundreds of boxes, the union AABB
+ * covers most of the scan, so a linear box loop per point costs O(points × boxes) and stalls
+ * every frame change. The grid limits each point to the few boxes overlapping its cell.
+ */
+export interface BoxSpatialIndex {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minY: number;
+  readonly maxY: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+  readonly invCell: number;
+  readonly cols: number;
+  readonly rows: number;
+  readonly cellStart: Int32Array;
+  readonly cellItems: Int32Array;
+}
+
+const BOX_GRID_MAX_CELLS_PER_AXIS = 256;
+const BOX_GRID_MIN_CELL_SIZE = 1.5;
+export const POINT_OUTSIDE_BOXES = -1;
+export const POINT_IN_OVERLAP = -2;
+
+export function buildBoxSpatialIndex(boxes: readonly OrientedBoxBounds[]): BoxSpatialIndex | null {
+  const count = boxes.length;
+  if (count === 0) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (let b = 0; b < count; b += 1) {
+    const box = boxes[b]!;
+    if (box.minX < minX) minX = box.minX;
+    if (box.maxX > maxX) maxX = box.maxX;
+    if (box.minY < minY) minY = box.minY;
+    if (box.maxY > maxY) maxY = box.maxY;
+    if (box.minZ < minZ) minZ = box.minZ;
+    if (box.maxZ > maxZ) maxZ = box.maxZ;
+  }
+  if (![minX, maxX, minY, maxY, minZ, maxZ].every(Number.isFinite)) return null;
+  const spanX = maxX - minX;
+  const spanY = maxY - minY;
+  const cellSize = Math.max(
+    BOX_GRID_MIN_CELL_SIZE,
+    spanX / BOX_GRID_MAX_CELLS_PER_AXIS,
+    spanY / BOX_GRID_MAX_CELLS_PER_AXIS
+  );
+  const invCell = 1 / cellSize;
+  const cols = Math.min(BOX_GRID_MAX_CELLS_PER_AXIS, Math.floor(spanX * invCell) + 1);
+  const rows = Math.min(BOX_GRID_MAX_CELLS_PER_AXIS, Math.floor(spanY * invCell) + 1);
+  const cellOf = (value: number, origin: number, limit: number): number =>
+    Math.min(limit - 1, Math.max(0, Math.floor((value - origin) * invCell)));
+
+  const cellStart = new Int32Array(cols * rows + 1);
+  for (let b = 0; b < count; b += 1) {
+    const box = boxes[b]!;
+    const x0 = cellOf(box.minX, minX, cols);
+    const x1 = cellOf(box.maxX, minX, cols);
+    const y0 = cellOf(box.minY, minY, rows);
+    const y1 = cellOf(box.maxY, minY, rows);
+    for (let gy = y0; gy <= y1; gy += 1) {
+      for (let gx = x0; gx <= x1; gx += 1) cellStart[gy * cols + gx + 1]! += 1;
+    }
+  }
+  for (let c = 1; c < cellStart.length; c += 1) cellStart[c]! += cellStart[c - 1]!;
+  const cellItems = new Int32Array(cellStart[cellStart.length - 1]!);
+  const cursor = cellStart.slice(0, cols * rows);
+  for (let b = 0; b < count; b += 1) {
+    const box = boxes[b]!;
+    const x0 = cellOf(box.minX, minX, cols);
+    const x1 = cellOf(box.maxX, minX, cols);
+    const y0 = cellOf(box.minY, minY, rows);
+    const y1 = cellOf(box.maxY, minY, rows);
+    for (let gy = y0; gy <= y1; gy += 1) {
+      for (let gx = x0; gx <= x1; gx += 1) {
+        const cell = gy * cols + gx;
+        cellItems[cursor[cell]!] = b;
+        cursor[cell]! += 1;
+      }
+    }
+  }
+  return { minX, maxX, minY, maxY, minZ, maxZ, invCell, cols, rows, cellStart, cellItems };
+}
+
+/**
+ * Returns the index of the single cuboid containing the point, `POINT_IN_OVERLAP` when two or
+ * more cuboids contain it, or `POINT_OUTSIDE_BOXES`.
+ */
+export function classifyPointInBoxes(
+  index: BoxSpatialIndex,
+  boxes: readonly OrientedBoxBounds[],
+  px: number,
+  py: number,
+  pz: number
+): number {
+  if (
+    px < index.minX ||
+    px > index.maxX ||
+    py < index.minY ||
+    py > index.maxY ||
+    pz < index.minZ ||
+    pz > index.maxZ
+  ) {
+    return POINT_OUTSIDE_BOXES;
+  }
+  let gx = ((px - index.minX) * index.invCell) | 0;
+  let gy = ((py - index.minY) * index.invCell) | 0;
+  if (gx >= index.cols) gx = index.cols - 1;
+  if (gy >= index.rows) gy = index.rows - 1;
+  const cell = gy * index.cols + gx;
+  const end = index.cellStart[cell + 1]!;
+  let matched = POINT_OUTSIDE_BOXES;
+  for (let k = index.cellStart[cell]!; k < end; k += 1) {
+    const b = index.cellItems[k]!;
+    const box = boxes[b]!;
+    if (
+      px < box.minX ||
+      px > box.maxX ||
+      py < box.minY ||
+      py > box.maxY ||
+      pz < box.minZ ||
+      pz > box.maxZ
+    ) {
+      continue;
+    }
+    const dx = px - box.cx;
+    const dy = py - box.cy;
+    const dz = pz - box.cz;
+    const lx = box.r00 * dx + box.r01 * dy + box.r02 * dz;
+    if (lx < -box.hx || lx > box.hx) continue;
+    const ly = box.r10 * dx + box.r11 * dy + box.r12 * dz;
+    if (ly < -box.hy || ly > box.hy) continue;
+    const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
+    if (lz < -box.hz || lz > box.hz) continue;
+    if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
+    matched = b;
+  }
+  return matched;
 }
 
 /**
@@ -1709,9 +1874,7 @@ export class Cvat3dPreRenderEnhancer {
           this.nativeNotifyDepth -= 1;
         }
         if (reason === 'objects_updated') {
-          const objectIds = Object.keys(view.drawnObjects ?? {})
-            .sort()
-            .join(',');
+          const objectIds = drawnObjectsVisibilitySignature(view.drawnObjects);
           if (this.pendingFrameObjectsLoad || objectIds !== this.lastObjectIds) this.markDirty();
         }
         if (this.nativeNotifyDepth === 0 && this.dirty) {
@@ -1781,7 +1944,7 @@ export class Cvat3dPreRenderEnhancer {
 
       this.optimizeOrientationArrows(view);
       const drawnObjects = view.drawnObjects ?? {};
-      const objectIds = Object.keys(drawnObjects).sort().join(',');
+      const objectIds = drawnObjectsVisibilitySignature(drawnObjects);
 
       const viewEntries = Object.entries(view.views);
       this.lastViewCount = viewEntries.length;
@@ -1926,6 +2089,18 @@ export class Cvat3dPreRenderEnhancer {
     }
   }
 
+  private boxIndexSource: readonly OrientedBoxBounds[] | null = null;
+  private boxIndexCache: BoxSpatialIndex | null = null;
+
+  /** Build the grid once per compiled box snapshot; all views/geometries reuse it. */
+  private getBoxSpatialIndex(boxes: readonly OrientedBoxBounds[]): BoxSpatialIndex | null {
+    if (this.boxIndexSource !== boxes) {
+      this.boxIndexSource = boxes;
+      this.boxIndexCache = buildBoxSpatialIndex(boxes);
+    }
+    return this.boxIndexCache;
+  }
+
   private applyPointCloudBoxColors(
     ptsObj: ThreeObject3DLike,
     boxes: readonly OrientedBoxBounds[],
@@ -2019,23 +2194,9 @@ export class Cvat3dPreRenderEnhancer {
     const boxCount = boxes.length;
     const solidBase = this.options.whiteBackground ? 0 : colorScale;
 
-    // Precompute global union AABB of all boxes so 90%+ of points outside all boxes skip the box loop in O(1)
-    let globalMinX = Infinity;
-    let globalMaxX = -Infinity;
-    let globalMinY = Infinity;
-    let globalMaxY = -Infinity;
-    let globalMinZ = Infinity;
-    let globalMaxZ = -Infinity;
-    for (let b = 0; b < boxCount; b += 1) {
-      const box = boxes[b]!;
-      if (box.minX < globalMinX) globalMinX = box.minX;
-      if (box.maxX > globalMaxX) globalMaxX = box.maxX;
-      if (box.minY < globalMinY) globalMinY = box.minY;
-      if (box.maxY > globalMaxY) globalMaxY = box.maxY;
-      if (box.minZ < globalMinZ) globalMinZ = box.minZ;
-      if (box.maxZ > globalMaxZ) globalMaxZ = box.maxZ;
-    }
-    const checkBoxes = (colorBoxes || hideGround) && boxCount > 0;
+    // Spatial grid: each point only tests cuboids overlapping its XY cell (see buildBoxSpatialIndex).
+    const boxIndex = boxCount > 0 ? this.getBoxSpatialIndex(boxes) : null;
+    const checkBoxes = (colorBoxes || hideGround) && boxIndex !== null;
 
     if (!hideGround) {
       // Fast non-compacting path: bulk-initialize unboxed colors with native TypedArray `.fill()` / `.set()`
@@ -2062,61 +2223,20 @@ export class Cvat3dPreRenderEnhancer {
         }
       }
 
-      if (colorBoxes && boxCount > 0) {
+      if (colorBoxes && boxIndex) {
         for (let i = 0; i < len; i += 3) {
-          const px = srcPositions[i] ?? 0;
-          if (px < globalMinX || px > globalMaxX) continue;
-          const py = srcPositions[i + 1] ?? 0;
-          if (py < globalMinY || py > globalMaxY) continue;
-          const pz = srcPositions[i + 2] ?? 0;
-          if (pz < globalMinZ || pz > globalMaxZ) continue;
-
-          let matchedBox: OrientedBoxBounds | null = null;
-          let isOverlapping = false;
-
-          for (let b = 0; b < boxCount; b += 1) {
-            const box = boxes[b]!;
-            if (
-              px < box.minX ||
-              px > box.maxX ||
-              py < box.minY ||
-              py > box.maxY ||
-              pz < box.minZ ||
-              pz > box.maxZ
-            ) {
-              continue;
-            }
-
-            const dx = px - box.cx;
-            const dy = py - box.cy;
-            const dz = pz - box.cz;
-
-            const lx = box.r00 * dx + box.r01 * dy + box.r02 * dz;
-            if (lx < -box.hx || lx > box.hx) continue;
-
-            const ly = box.r10 * dx + box.r11 * dy + box.r12 * dz;
-            if (ly < -box.hy || ly > box.hy) continue;
-
-            const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
-            if (lz < -box.hz || lz > box.hz) continue;
-
-            if (matchedBox === null) {
-              matchedBox = box;
-            } else {
-              isOverlapping = true;
-              break;
-            }
-          }
-
-          if (isOverlapping) {
-            colorArray[i] = overlapRgb[0] * colorScale;
-            colorArray[i + 1] = overlapRgb[1] * colorScale;
-            colorArray[i + 2] = overlapRgb[2] * colorScale;
-          } else if (matchedBox) {
-            colorArray[i] = matchedBox.r * colorScale;
-            colorArray[i + 1] = matchedBox.g * colorScale;
-            colorArray[i + 2] = matchedBox.b * colorScale;
-          }
+          const hit = classifyPointInBoxes(
+            boxIndex,
+            boxes,
+            srcPositions[i] ?? 0,
+            srcPositions[i + 1] ?? 0,
+            srcPositions[i + 2] ?? 0
+          );
+          if (hit === POINT_OUTSIDE_BOXES) continue;
+          const rgb = hit === POINT_IN_OVERLAP ? null : boxes[hit]!;
+          colorArray[i] = (rgb ? rgb.r : overlapRgb[0]) * colorScale;
+          colorArray[i + 1] = (rgb ? rgb.g : overlapRgb[1]) * colorScale;
+          colorArray[i + 2] = (rgb ? rgb.b : overlapRgb[2]) * colorScale;
         }
       }
 
@@ -2134,52 +2254,12 @@ export class Cvat3dPreRenderEnhancer {
       const py = srcPositions[i + 1] ?? 0;
       const pz = srcPositions[i + 2] ?? 0;
 
-      let matchedBox: OrientedBoxBounds | null = null;
-      let isOverlapping = false;
-
-      if (
-        checkBoxes &&
-        px >= globalMinX &&
-        px <= globalMaxX &&
-        py >= globalMinY &&
-        py <= globalMaxY &&
-        pz >= globalMinZ &&
-        pz <= globalMaxZ
-      ) {
-        for (let b = 0; b < boxCount; b += 1) {
-          const box = boxes[b]!;
-          if (
-            px < box.minX ||
-            px > box.maxX ||
-            py < box.minY ||
-            py > box.maxY ||
-            pz < box.minZ ||
-            pz > box.maxZ
-          ) {
-            continue;
-          }
-
-          const dx = px - box.cx;
-          const dy = py - box.cy;
-          const dz = pz - box.cz;
-
-          const lx = box.r00 * dx + box.r01 * dy + box.r02 * dz;
-          if (lx < -box.hx || lx > box.hx) continue;
-
-          const ly = box.r10 * dx + box.r11 * dy + box.r12 * dz;
-          if (ly < -box.hy || ly > box.hy) continue;
-
-          const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
-          if (lz < -box.hz || lz > box.hz) continue;
-
-          if (matchedBox === null) {
-            matchedBox = box;
-          } else {
-            isOverlapping = true;
-            break;
-          }
-        }
-      }
+      const hit = checkBoxes
+        ? classifyPointInBoxes(boxIndex!, boxes, px, py, pz)
+        : POINT_OUTSIDE_BOXES;
+      const isOverlapping = hit === POINT_IN_OVERLAP;
+      const matchedBox: OrientedBoxBounds | null =
+        hit === POINT_OUTSIDE_BOXES ? null : isOverlapping ? boxes[0]! : boxes[hit]!;
 
       // Points outside all 3D bounding boxes are tested against the local 2D ground elevation grid
       if (matchedBox === null) {
@@ -2519,7 +2599,13 @@ export function injectCvatWorkspaceSettingsControls(
           [item.key]: nextChecked,
         };
         wrapper.dataset.enhancerOptsSig = computeOptionsSignature(updated);
-        onChange(updated);
+        try {
+          onChange(updated);
+          showMeowToast(doc, `${nextChecked ? 'Đã bật' : 'Đã tắt'}: ${item.title}`, 'success');
+        } catch (error) {
+          showMeowToast(doc, `Không áp dụng được: ${item.title}`, 'error');
+          throw error;
+        }
       };
 
       checkboxInput.addEventListener('change', () => {

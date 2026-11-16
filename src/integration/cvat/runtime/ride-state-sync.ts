@@ -5,6 +5,8 @@ export interface RideStateSyncResult {
   readonly targetValue: string;
   readonly updatedKeyframes: number;
   readonly totalKeyframes: number;
+  /** Outside keyframes included in the sync (their outside flag is preserved). */
+  readonly outsideKeyframes?: number;
 }
 
 export function getRideStateAttribute(state: CvatObjectStateLike | null | undefined) {
@@ -62,6 +64,9 @@ export async function syncTrackRideState(
   });
 
   let updatedKeyframes = 0;
+  const outsideKeyframes = snapshots.filter((state) => state.outside).length;
+  // Outside keyframes are updated too: when the object reappears, CVAT carries the value
+  // from the last keyframe, so a stale outside keyframe would revert ride_state.
   for (const state of snapshots) {
     if (state.attributes?.[attribute.id] === targetValue) continue;
     state.updateFlags!.reset!();
@@ -70,5 +75,11 @@ export async function syncTrackRideState(
     await state.save!();
     updatedKeyframes += 1;
   }
-  return { clientID, targetValue, updatedKeyframes, totalKeyframes: frames.length };
+  return {
+    clientID,
+    targetValue,
+    updatedKeyframes,
+    totalKeyframes: frames.length,
+    outsideKeyframes,
+  };
 }

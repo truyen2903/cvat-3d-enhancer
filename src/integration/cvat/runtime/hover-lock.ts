@@ -33,7 +33,15 @@ export function installPointerButtonEventTracking(win: Window = window): void {
     return;
   }
   pointerTrackingInstalled = true;
-  const types = ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'pointerdown', 'pointerup'];
+  const types = [
+    'mousedown',
+    'mouseup',
+    'click',
+    'dblclick',
+    'contextmenu',
+    'pointerdown',
+    'pointerup',
+  ];
   const begin = (): void => {
     pointerButtonEventDepth += 1;
     // Safety net in case a handler stops propagation and the bubble listener never fires
@@ -71,6 +79,24 @@ export function filterHoverIntersections(
   });
 }
 
+const CLIENT_ID_NAME = /^\d+$/;
+
+/** Drop top-level cuboids (named by clientID) other than the active one before raycasting. */
+export function prefilterHoverCandidates(
+  objects: unknown[],
+  activeClientId: string | null
+): unknown[] {
+  if (activeClientId === null || !Array.isArray(objects) || objects.length === 0) return objects;
+  let filtered: unknown[] | null = null;
+  for (let i = 0; i < objects.length; i += 1) {
+    const name = (objects[i] as { name?: unknown } | null)?.name;
+    const drop = typeof name === 'string' && name !== activeClientId && CLIENT_ID_NAME.test(name);
+    if (drop && filtered === null) filtered = objects.slice(0, i);
+    else if (!drop && filtered !== null) filtered.push(objects[i]);
+  }
+  return filtered ?? objects;
+}
+
 /**
  * Wraps a THREE.Raycaster instance (idempotent).
  */
@@ -88,11 +114,17 @@ export function lockRaycasterHoverToActiveObject(
   }
   const original = rayCaster.intersectObjects.bind(rayCaster);
   rayCaster.intersectObjects = (objects: unknown[], recursive?: boolean, ...rest: unknown[]) => {
-    const hits = original(objects, recursive, ...rest);
-    if (!Array.isArray(hits) || hits.length === 0 || !isEnabled() || isInsidePointerButtonEvent()) {
-      return hits;
+    if (!isEnabled() || isInsidePointerButtonEvent()) {
+      return original(objects, recursive, ...rest);
     }
-    return filterHoverIntersections(hits, getActiveClientId());
+    const activeClientId = getActiveClientId();
+    // Hover hits on other cuboids are discarded anyway; skip intersecting them. With hundreds
+    // of cuboids this removes most of CVAT's per-animation-frame hover raycast cost.
+    // Recursive casts may target unnamed children of other cuboids; keep those native.
+    const candidates = recursive ? objects : prefilterHoverCandidates(objects, activeClientId);
+    const hits = original(candidates, recursive, ...rest);
+    if (!Array.isArray(hits) || hits.length === 0) return hits;
+    return filterHoverIntersections(hits, activeClientId);
   };
   marked[LOCKED_MARKER] = true;
   return true;
