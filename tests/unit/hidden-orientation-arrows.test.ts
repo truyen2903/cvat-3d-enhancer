@@ -1,10 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ArrowHelper, Group, Scene, Vector3 } from 'three';
+import {
+  ArrowHelper,
+  BoxGeometry,
+  Group,
+  LineBasicMaterial,
+  LineSegments,
+  Mesh,
+  MeshBasicMaterial,
+  Scene,
+  Vector3,
+} from 'three';
 import {
   Cvat3dPreRenderEnhancer,
   type CvatInternalCanvas3dLike,
 } from '../../src/integration/cvat/runtime/pre-render-enhancer';
-import { deferHiddenOrientationArrowUpdates } from '../../src/integration/cvat/runtime/hidden-orientation-arrows';
+import {
+  deferHiddenCuboidMeshUpdates,
+  deferHiddenOrientationArrowUpdates,
+} from '../../src/integration/cvat/runtime/hidden-orientation-arrows';
 
 function fixture() {
   const scene = new Scene();
@@ -140,5 +153,100 @@ describe('hidden cuboid orientation arrows (Three.js r184)', () => {
     deferHiddenOrientationArrowUpdates(arrow, new WeakSet());
     arrow.updateMatrixWorld();
     expect(custom).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares a single wrapper function across all hooked ArrowHelpers without per-instance closure interference', () => {
+    const hooked = new WeakSet<object>();
+    const arrows = Array.from(
+      { length: 32 },
+      (_, idx) => new ArrowHelper(new Vector3(1, idx % 2, 0), new Vector3(idx, 0, 0), 1)
+    );
+    for (const a of arrows) {
+      deferHiddenOrientationArrowUpdates(a, hooked);
+    }
+    const sharedFn = arrows[0]!.updateMatrixWorld;
+    for (let i = 1; i < arrows.length; i += 1) {
+      expect(arrows[i]!.updateMatrixWorld).toBe(sharedFn);
+    }
+
+    // Independent per-instance skipped flags when only arrow[0] is hidden
+    const compose0 = vi.spyOn(arrows[0]!.matrix, 'compose');
+    const compose1 = vi.spyOn(arrows[1]!.matrix, 'compose');
+    arrows[0]!.visible = false;
+    arrows[1]!.visible = true;
+
+    arrows[0]!.updateMatrixWorld();
+    arrows[1]!.updateMatrixWorld();
+    expect(compose0).not.toHaveBeenCalled();
+    expect(compose1).toHaveBeenCalledTimes(1);
+
+    arrows[0]!.visible = true;
+    arrows[0]!.updateMatrixWorld();
+    expect(compose0).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers and accurately restores world matrices for hidden cuboid meshes and their entire subtrees', () => {
+    const scene = new Scene();
+    const parent = new Group();
+    const cuboidMesh = new Mesh(
+      new BoxGeometry(4, 2, 1.5),
+      new MeshBasicMaterial({ transparent: true, opacity: 0.35 })
+    );
+    const wireframe = new LineSegments(new BoxGeometry(4, 2, 1.5), new LineBasicMaterial());
+    const cornerDot = new Mesh(new BoxGeometry(0.1, 0.1, 0.1), new MeshBasicMaterial());
+    cuboidMesh.add(wireframe);
+    cuboidMesh.add(cornerDot);
+    parent.add(cuboidMesh);
+    scene.add(parent);
+
+    const reference = scene.clone(true);
+    const expectedParent = reference.children[0] as Group;
+    const expectedMesh = expectedParent.children[0] as Mesh;
+
+    const hooked = new WeakSet<object>();
+    const secondMesh = new Mesh(new BoxGeometry(1, 1, 1), new MeshBasicMaterial());
+    deferHiddenCuboidMeshUpdates(cuboidMesh, hooked);
+    deferHiddenCuboidMeshUpdates(secondMesh, hooked);
+    expect(cuboidMesh.updateMatrixWorld).toBe(secondMesh.updateMatrixWorld);
+
+    const meshCompose = vi.spyOn(cuboidMesh.matrix, 'compose');
+    const wireCompose = vi.spyOn(wireframe.matrix, 'compose');
+    const dotCompose = vi.spyOn(cornerDot.matrix, 'compose');
+
+    cuboidMesh.visible = false;
+    expectedMesh.visible = false;
+    for (let i = 0; i < 100; i += 1) {
+      scene.updateMatrixWorld();
+    }
+    expect(meshCompose).not.toHaveBeenCalled();
+    expect(wireCompose).not.toHaveBeenCalled();
+    expect(dotCompose).not.toHaveBeenCalled();
+
+    parent.position.set(12, -7, 3);
+    parent.rotation.set(0.1, -0.2, 0.9);
+    cuboidMesh.position.set(-4, 5, 1.2);
+    cuboidMesh.rotation.set(0.05, 0.15, -0.45);
+    cuboidMesh.scale.set(4.5, 2.1, 1.7);
+
+    expectedParent.position.copy(parent.position);
+    expectedParent.rotation.copy(parent.rotation);
+    expectedMesh.position.copy(cuboidMesh.position);
+    expectedMesh.rotation.copy(cuboidMesh.rotation);
+    expectedMesh.scale.copy(cuboidMesh.scale);
+
+    scene.updateMatrixWorld();
+    reference.updateMatrixWorld();
+
+    cuboidMesh.visible = true;
+    expectedMesh.visible = true;
+    cuboidMesh.updateMatrixWorld();
+    expectedMesh.updateMatrixWorld(true);
+
+    expect(cuboidMesh.matrixWorld.elements).toEqual(expectedMesh.matrixWorld.elements);
+    for (let i = 0; i < cuboidMesh.children.length; i += 1) {
+      expect(cuboidMesh.children[i]!.matrixWorld.elements).toEqual(
+        expectedMesh.children[i]!.matrixWorld.elements
+      );
+    }
   });
 });

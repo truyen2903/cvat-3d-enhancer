@@ -26,10 +26,17 @@ import {
   type ThreeSceneLike,
   writeRenderOptionsToClientSettings,
 } from '../integration/cvat/runtime/pre-render-enhancer';
+import {
+  DrawnObjectsCache,
+  findObjectStateByClientId,
+  invalidateSpatial2DBoxLookup,
+  isNumericClientIdName,
+} from '../integration/cvat/runtime/state-lookup';
 import { BRIDGE_CHANNEL, type CameraPresetAction, CVAT_DOM_SELECTORS } from '../shared/constants';
 import type { BridgeRequestEnvelope } from '../shared/types';
 import {
   installPointerButtonEventTracking,
+  invalidateHoverSpatialIndex,
   lockRaycasterHoverToActiveObject,
   type RaycasterLike,
 } from '../integration/cvat/runtime/hover-lock';
@@ -77,6 +84,34 @@ interface CvatWindowGlobals {
   };
 }
 
+type PerspDomCanvasElement = HTMLCanvasElement & {
+  scene?: ThreeSceneLike;
+  getDrawnObjects?: () => CvatDrawnObjectEntry[];
+  updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
+};
+
+type SceneDomCanvasElement = HTMLCanvasElement & {
+  scene?: ThreeSceneLike;
+};
+
+type CanvasOrthoRole = 'top' | 'side' | 'front' | 'other';
+
+const SIDEBAR_ITEM_ID_PREFIX = 'cvat-objects-sidebar-state-item-';
+const SIDEBAR_CARD_SELECTOR =
+  '.cvat-objects-sidebar-state-item, [id^="cvat-objects-sidebar-state-item-"]';
+const MAX_TARGETED_SIDEBAR_CARDS = 128;
+
+const IGNORED_MUTATION_SELECTOR =
+  `#${QA_OVERLAY_ELEMENT_ID}, .cvat-appearance-block, .${BASE_GUIDE_CLASS}, ` +
+  '#meow-toast-stack, #cvat-3d-enhancer-workspace-settings-section, ' +
+  '[data-enhancer-workspace-settings], .ant-select-dropdown, .ant-tooltip, .ant-popover';
+
+const INTERACTIVE_IGNORE_SELECTOR =
+  '.cvat-workspace-settings, #cvat-3d-enhancer-workspace-settings, ' +
+  '#cvat-3d-enhancer-workspace-settings-section, [data-enhancer-workspace-settings], ' +
+  '.cvat-annotations-filters-input, .ant-select-dropdown, ' +
+  '.cvat-player-buttons, .cvat-player-frame-selector';
+
 const CAMERA_KEY_MAPPING: Record<
   CameraPresetAction,
   { readonly code: string; readonly altKey: boolean; readonly shiftKey: boolean }
@@ -93,6 +128,72 @@ const CAMERA_KEY_MAPPING: Record<
   ROTATE_RIGHT: { code: 'ArrowRight', altKey: false, shiftKey: true },
 };
 
+function isIgnoredMutationNode(node: Node): boolean {
+  if (node.nodeType !== 1) {
+    return true;
+  }
+  const el = node as Element;
+  if (
+    el.id === QA_OVERLAY_ELEMENT_ID ||
+    el.id === 'meow-toast-stack' ||
+    el.id === 'meow-toast-style' ||
+    el.id === 'cvat-3d-enhancer-workspace-settings-section' ||
+    el.classList.contains(BASE_GUIDE_CLASS) ||
+    el.classList.contains('cvat-appearance-block') ||
+    el.classList.contains('ant-select-dropdown') ||
+    el.classList.contains('ant-tooltip') ||
+    el.classList.contains('ant-popover') ||
+    el.hasAttribute('data-enhancer-workspace-settings')
+  ) {
+    return true;
+  }
+  const firstChild = el.firstElementChild;
+  if (
+    firstChild &&
+    el.childElementCount === 1 &&
+    (firstChild.classList.contains('ant-select-dropdown') ||
+      firstChild.classList.contains('ant-tooltip') ||
+      firstChild.classList.contains('ant-popover'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isOnlyEnhancerRowAdded(rec: MutationRecord): boolean {
+  if (rec.removedNodes.length > 0 || rec.addedNodes.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < rec.addedNodes.length; i += 1) {
+    const node = rec.addedNodes[i]!;
+    if (
+      node.nodeType !== 1 ||
+      !(node as Element).classList.contains('cvat-3d-enhancer-dim-sync-row')
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isInScene(root: unknown, target: unknown): boolean {
+  if (!root || !target) {
+    return false;
+  }
+  let cur: unknown = target;
+  for (let depth = 0; cur && depth < 16; depth += 1) {
+    if (cur === root) {
+      return true;
+    }
+    cur = (cur as { parent?: unknown }).parent;
+  }
+  if ((target as { parent?: unknown }).parent === undefined) {
+    const topChildren = (root as { children?: unknown[] }).children;
+    return Array.isArray(topChildren) && topChildren.length <= 64 && topChildren.includes(target);
+  }
+  return false;
+}
+
 export class PageBridgeRuntimeHost {
   private readonly win: Window & CvatWindowGlobals;
   private readonly doc: Document;
@@ -102,12 +203,27 @@ export class PageBridgeRuntimeHost {
   private pluginRegistered = false;
   private settingsObserver: MutationObserver | null = null;
   private readonly hookedPerspectiveCanvases = new WeakSet<HTMLCanvasElement>();
+  private readonly hookedSetupCanvases = new WeakSet<HTMLCanvasElement>();
   private readonly knownDomCanvases = new WeakSet<HTMLCanvasElement>();
+  private readonly canvasOrthoRoleCache = new WeakMap<HTMLCanvasElement, CanvasOrthoRole>();
+  private readonly domDrawnObjectsCache = new DrawnObjectsCache<CvatDrawnObjectEntry>();
+  private lastDrawnLookupCanvas: object | null = null;
+  private lastDrawnLookupGen = -1;
+  private lastDrawnLookupClientId = NaN;
+  private lastDrawnLookupEntry: CvatDrawnObjectEntry | null = null;
   private domBackedViewRef: CvatInternalViewLike | null = null;
   private lastDomCanvasRef: HTMLCanvasElement | null = null;
+  private cachedDomInstanceView: CvatInternalViewLike | null = null;
+  private cachedDomFrameAttr: string | null = null;
+  private cachedDomInstance: CvatCanvas3dLike | null = null;
+  private cachedHybridSourceInstance: CvatCanvas3dLike | null = null;
+  private cachedHybridDomView: CvatInternalViewLike | null = null;
+  private cachedHybridModel: CvatInternalCanvas3dLike['model'] | undefined = undefined;
+  private cachedHybridModelFrame: number | null | undefined = undefined;
+  private cachedHybridWrapper: CvatCanvas3dLike | null = null;
   private readonly cameraFollower = new ActiveObjectCameraFollower(
     () => this.getActiveObjectClientId(this.cachedInstance),
-    () => this.preRenderEnhancer.getOptions().followActiveObject ?? true
+    () => this.preRenderEnhancer.getOptionsReadonly().followActiveObject ?? true
   );
   private baseGuide: CuboidBaseGuide | null = null;
   private cachedInstance: CvatCanvas3dLike | null = null;
@@ -117,15 +233,30 @@ export class PageBridgeRuntimeHost {
   private qaEvalTimer: ReturnType<typeof setTimeout> | null = null;
   private domSyncRafId: number | null = null;
   private globalStateUpdateRafId: number | null = null;
-  private cachedPerspCanvas:
-    | (HTMLCanvasElement & {
-        scene?: ThreeSceneLike;
-        getDrawnObjects?: () => CvatDrawnObjectEntry[];
-      })
-    | null = null;
-  private cachedTopCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
-  private cachedSideCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
-  private cachedFrontCanvas: (HTMLCanvasElement & { scene?: ThreeSceneLike }) | null = null;
+  private cachedPerspCanvas: PerspDomCanvasElement | null = null;
+  private cachedTopCanvas: SceneDomCanvasElement | null = null;
+  private cachedSideCanvas: SceneDomCanvasElement | null = null;
+  private cachedFrontCanvas: SceneDomCanvasElement | null = null;
+  private readonly extraSceneCanvases = new Set<SceneDomCanvasElement>();
+  private readonly extraCanvasScenes = new WeakMap<HTMLCanvasElement, ThreeSceneLike | undefined>();
+  private initialCanvasScanDone = false;
+  private viewsMapDirty = true;
+  private cachedViewsMap: NonNullable<CvatInternalViewLike['views']> | null = null;
+  private cachedPerspScene: ThreeSceneLike | undefined = undefined;
+  private cachedTopScene: ThreeSceneLike | undefined = undefined;
+  private cachedSideScene: ThreeSceneLike | undefined = undefined;
+  private cachedFrontScene: ThreeSceneLike | undefined = undefined;
+  private hasReduxSnapshot = false;
+  private lastReduxFrame: unknown = undefined;
+  private lastReduxActivatedId: unknown = undefined;
+  private lastReduxStatesRef: unknown = undefined;
+  private lastReduxCanvasInstance: unknown = undefined;
+  private lastNumericActiveId = NaN;
+  private lastNumericActiveIdStr = '';
+  private liveActiveSidebarItems: HTMLCollectionOf<Element> | null = null;
+  private cachedActiveSidebarEl: Element | null = null;
+  private cachedActiveSidebarRawId = '';
+  private cachedActiveSidebarParsedId: string | null = null;
 
   public constructor(
     sessionToken: string,
@@ -141,27 +272,55 @@ export class PageBridgeRuntimeHost {
     this.tryHookCvatUIPlugin();
   }
 
+  private getCanvasOrthoRole(canvas: HTMLCanvasElement): CanvasOrthoRole {
+    const cached = this.canvasOrthoRoleCache.get(canvas);
+    if (cached !== undefined) {
+      return cached;
+    }
+    let role: CanvasOrthoRole = 'other';
+    const wrapper = canvas.closest?.(
+      `${CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER}, ${CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER}, ${CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER}`
+    );
+    if (wrapper) {
+      if (wrapper.classList.contains('cvat-canvas3d-topview')) {
+        role = 'top';
+      } else if (wrapper.classList.contains('cvat-canvas3d-sideview')) {
+        role = 'side';
+      } else if (wrapper.classList.contains('cvat-canvas3d-frontview')) {
+        role = 'front';
+      }
+    }
+    this.canvasOrthoRoleCache.set(canvas, role);
+    return role;
+  }
+
   public start(): () => void {
     const removeMouseFrameNavigation = installMouseFrameNavigation(
       this.doc,
       this.win,
-      () => this.preRenderEnhancer.getOptions().enableMouseFrameNavigation ?? true
+      () => this.preRenderEnhancer.getOptionsReadonly().enableMouseFrameNavigation ?? true
     );
     const removeQuickFilterGuard = installSidebarQuickFilterGuard(
       this.doc,
       this.win,
-      () => this.preRenderEnhancer.getOptions().disableSidebarQuickFilter ?? true,
+      () => this.preRenderEnhancer.getOptionsReadonly().disableSidebarQuickFilter ?? true,
       () => this.cameraFollower.reset()
     );
     const baseGuide = (this.baseGuide = new CuboidBaseGuide(
       this.doc,
-      () => this.preRenderEnhancer.getOptions().showCuboidBaseGuide ?? true
+      () => this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true
     ));
     this.syncKeyboardEnabledAttribute();
     this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) => {
       const cam = camera as OrthoCameraLike;
-      if (!cam.isOrthographicCamera) return;
-      const active = this.resolveActiveCuboid();
+      if (!cam?.isOrthographicCamera) return;
+      if ((this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true) === false) {
+        baseGuide.update(canvas, cam, null);
+        return;
+      }
+      const role = this.getCanvasOrthoRole(canvas);
+      if (role === 'top') return;
+      const active = this.resolveActiveCuboid(false);
       const points = active?.entry?.data.points ?? active?.state?.points ?? null;
       const hidden =
         active?.state?.hidden ||
@@ -169,25 +328,14 @@ export class PageBridgeRuntimeHost {
         active?.entry?.data.hidden ||
         active?.entry?.data.outside;
       const cuboid = active?.entry?.cuboid;
-      const view = canvas.closest(CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER)
-        ? 'side'
-        : canvas.closest(CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER)
-          ? 'front'
-          : null;
-      if (canvas.closest(CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER)) return;
-      const contains = (node: unknown, target: unknown): boolean => {
-        if (!node || !target) return false;
-        if (node === target) return true;
-        const children = (node as { children?: unknown[] }).children;
-        return Array.isArray(children) && children.some((child) => contains(child, target));
-      };
-      const mesh = view
-        ? cuboid?.[view]
-        : cuboid?.side && contains(scene, cuboid.side)
-          ? cuboid.side
-          : cuboid?.front && contains(scene, cuboid.front)
-            ? cuboid.front
-            : undefined;
+      const mesh =
+        role === 'side' || role === 'front'
+          ? cuboid?.[role]
+          : cuboid?.side && isInScene(scene, cuboid.side)
+            ? cuboid.side
+            : cuboid?.front && isInScene(scene, cuboid.front)
+              ? cuboid.front
+              : undefined;
       baseGuide.update(canvas, cam, hidden ? null : points, mesh);
     });
     const onPluginReady = () => {
@@ -200,7 +348,7 @@ export class PageBridgeRuntimeHost {
     const orthoEditor = new OrthoCuboidEditor(
       {
         getKeyboardOptions: () => {
-          const options = this.preRenderEnhancer.getOptions();
+          const options = this.preRenderEnhancer.getOptionsReadonly();
           return {
             enabled: options.enableOrthoKeyboard,
             highSensitivity: options.fasterOrthoKeyboard,
@@ -239,14 +387,21 @@ export class PageBridgeRuntimeHost {
     this.win.addEventListener('pointercancel', onCanvasPointerEnd, true);
     this.win.addEventListener('blur', onCanvasPointerEnd);
 
-    const onInteractiveChange = (event: Event) => {
+    const onInteractiveChange = (event: Event): void => {
       const targetEl = event.target as Element | null;
-      if (
-        targetEl &&
-        typeof targetEl.closest === 'function' &&
-        targetEl.closest('.cvat-workspace-settings, #cvat-3d-enhancer-workspace-settings')
-      ) {
-        return;
+      if (targetEl && typeof targetEl.closest === 'function') {
+        if (targetEl.closest(INTERACTIVE_IGNORE_SELECTOR)) {
+          return;
+        }
+        if (
+          event.type === 'keyup' &&
+          (targetEl.tagName === 'INPUT' ||
+            targetEl.tagName === 'TEXTAREA' ||
+            (targetEl as HTMLElement).isContentEditable === true) &&
+          !targetEl.closest('.cvat-objects-sidebar-state-active-item')
+        ) {
+          return;
+        }
       }
       this.syncActiveObjectQaOverlay(event.type === 'change');
     };
@@ -258,17 +413,33 @@ export class PageBridgeRuntimeHost {
     if (this.doc.documentElement) {
       let pendingChildListChange = false;
       let pendingSidebarChange = false;
-      const runDomSync = () => {
+      let fullSidebarReconcile = false;
+      const dirtySidebarCards = new Set<HTMLElement>();
+
+      const runDomSync = (): void => {
         this.domSyncRafId = null;
         baseGuide.prune();
         const hadChildList = pendingChildListChange;
         pendingChildListChange = false;
         const hadSidebarChange = pendingSidebarChange;
         pendingSidebarChange = false;
+        const reconcileAllSidebar = fullSidebarReconcile;
+        fullSidebarReconcile = false;
+        let cardsSnapshot: HTMLElement[] | undefined;
+        if (!reconcileAllSidebar && dirtySidebarCards.size > 0) {
+          cardsSnapshot = [];
+          for (const c of dirtySidebarCards) {
+            if (c.isConnected) {
+              cardsSnapshot.push(c);
+            }
+          }
+        }
+        dirtySidebarCards.clear();
+
         if (hadChildList) {
           syncEarlyViewportBackgroundDom(
             this.doc,
-            this.preRenderEnhancer.getOptions().whiteBackground
+            this.preRenderEnhancer.getOptionsReadonly().whiteBackground
           );
           this.tryMountWorkspaceSettingsCheckboxes();
           const mountedCanvases = this.checkForNewlyMountedCanvases();
@@ -282,50 +453,223 @@ export class PageBridgeRuntimeHost {
             if (mountedCanvases) this.preRenderEnhancer.requestViewsRedraw();
           }
         }
-        if (hadChildList || hadSidebarChange) this.tryMountObjectItemDimensionSyncControls();
+        if (hadSidebarChange) {
+          if (reconcileAllSidebar) {
+            this.tryMountObjectItemDimensionSyncControls();
+          } else if (cardsSnapshot && cardsSnapshot.length > 0) {
+            this.tryMountObjectItemDimensionSyncControls(cardsSnapshot);
+          }
+        }
         this.syncActiveObjectQaOverlay();
+        this.settingsObserver?.takeRecords();
       };
 
       this.settingsObserver = new MutationObserver((records) => {
         let hasRelevantMutation = false;
         for (let i = 0; i < records.length; i += 1) {
           const rec = records[i]!;
-          const targetNode = rec.target as Element | null;
-          if (
-            targetNode &&
-            (targetNode.closest?.(
-              `#${QA_OVERLAY_ELEMENT_ID}, .cvat-appearance-block, .${BASE_GUIDE_CLASS}`
-            ) ||
-              targetNode.id === QA_OVERLAY_ELEMENT_ID)
-          ) {
+          const targetNode =
+            rec.target.nodeType === 1 ? (rec.target as Element) : rec.target.parentElement;
+          if (!targetNode) {
             continue;
           }
           if (
-            rec.type === 'attributes' &&
-            rec.attributeName !== 'data-frame-number' &&
-            !targetNode?.closest?.(
-              '.cvat-objects-sidebar, .cvat-objects-sidebar-state-item, .cvat-workspace-settings'
-            )
+            targetNode.id === QA_OVERLAY_ELEMENT_ID ||
+            targetNode.closest?.(IGNORED_MUTATION_SELECTOR)
           ) {
             continue;
           }
+          if (targetNode.closest?.('.cvat-3d-enhancer-dim-sync-row')) {
+            if (rec.type !== 'childList' || rec.removedNodes.length === 0) {
+              continue;
+            }
+          }
+
+          if (rec.type === 'attributes') {
+            if (
+              rec.attributeName !== 'data-frame-number' &&
+              !targetNode.closest?.(
+                '.cvat-objects-sidebar, .cvat-objects-sidebar-state-item, .cvat-workspace-settings'
+              )
+            ) {
+              continue;
+            }
+            hasRelevantMutation = true;
+            if (rec.attributeName === 'data-frame-number') {
+              this.invalidateSceneObjectCaches();
+              pendingChildListChange = true;
+            }
+            const card = targetNode.closest?.<HTMLElement>(SIDEBAR_CARD_SELECTOR);
+            if (card) {
+              pendingSidebarChange = true;
+              if (!fullSidebarReconcile) {
+                if (dirtySidebarCards.size >= MAX_TARGETED_SIDEBAR_CARDS) {
+                  fullSidebarReconcile = true;
+                  dirtySidebarCards.clear();
+                } else {
+                  dirtySidebarCards.add(card);
+                }
+              }
+            } else if (targetNode.closest?.('.cvat-objects-sidebar')) {
+              pendingSidebarChange = true;
+              fullSidebarReconcile = true;
+              dirtySidebarCards.clear();
+            }
+            continue;
+          }
+
+          // rec.type === 'childList'
+          if (isOnlyEnhancerRowAdded(rec)) {
+            continue;
+          }
+          let allIgnored = rec.addedNodes.length + rec.removedNodes.length > 0;
+          if (allIgnored) {
+            for (let j = 0; j < rec.addedNodes.length; j += 1) {
+              if (!isIgnoredMutationNode(rec.addedNodes[j]!)) {
+                allIgnored = false;
+                break;
+              }
+            }
+            if (allIgnored) {
+              for (let j = 0; j < rec.removedNodes.length; j += 1) {
+                if (!isIgnoredMutationNode(rec.removedNodes[j]!)) {
+                  allIgnored = false;
+                  break;
+                }
+              }
+            }
+            if (allIgnored) {
+              continue;
+            }
+          }
+
+          const card = targetNode.closest?.<HTMLElement>(SIDEBAR_CARD_SELECTOR);
+          const inSidebar = Boolean(card) || Boolean(targetNode.closest?.('.cvat-objects-sidebar'));
+
+          if (inSidebar) {
+            hasRelevantMutation = true;
+            if (rec.addedNodes.length > 0 || rec.removedNodes.length > 0) {
+              this.domDrawnObjectsCache.invalidate();
+            }
+            if (card) {
+              pendingSidebarChange = true;
+              if (!fullSidebarReconcile) {
+                if (dirtySidebarCards.size >= MAX_TARGETED_SIDEBAR_CARDS) {
+                  fullSidebarReconcile = true;
+                  dirtySidebarCards.clear();
+                } else {
+                  dirtySidebarCards.add(card);
+                }
+              }
+            } else if (rec.addedNodes.length > 0) {
+              pendingSidebarChange = true;
+              if (!fullSidebarReconcile) {
+                if (
+                  rec.addedNodes.length > MAX_TARGETED_SIDEBAR_CARDS ||
+                  dirtySidebarCards.size + rec.addedNodes.length > MAX_TARGETED_SIDEBAR_CARDS
+                ) {
+                  fullSidebarReconcile = true;
+                  dirtySidebarCards.clear();
+                } else {
+                  for (let j = 0; j < rec.addedNodes.length; j += 1) {
+                    const added = rec.addedNodes[j]!;
+                    if (added.nodeType !== 1) continue;
+                    const addedEl = added as HTMLElement;
+                    if (
+                      addedEl.classList.contains('cvat-objects-sidebar-state-item') ||
+                      addedEl.id.startsWith(SIDEBAR_ITEM_ID_PREFIX)
+                    ) {
+                      dirtySidebarCards.add(addedEl);
+                    } else if (addedEl.childElementCount > MAX_TARGETED_SIDEBAR_CARDS) {
+                      fullSidebarReconcile = true;
+                      dirtySidebarCards.clear();
+                      break;
+                    } else {
+                      const nested = addedEl.getElementsByClassName(
+                        'cvat-objects-sidebar-state-item'
+                      );
+                      if (dirtySidebarCards.size + nested.length > MAX_TARGETED_SIDEBAR_CARDS) {
+                        fullSidebarReconcile = true;
+                        dirtySidebarCards.clear();
+                        break;
+                      }
+                      for (let k = 0; k < nested.length; k += 1) {
+                        dirtySidebarCards.add(nested[k] as HTMLElement);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // Never run querySelector('canvas, .cvat-workspace-settings') on sidebar nodes;
+            // only check direct O(1) tagName === 'CANVAS'.
+            for (let j = 0; j < rec.addedNodes.length; j += 1) {
+              const n = rec.addedNodes[j]!;
+              if (n.nodeType === 1 && (n as Element).tagName === 'CANVAS') {
+                pendingChildListChange = true;
+                break;
+              }
+            }
+            if (!pendingChildListChange) {
+              for (let j = 0; j < rec.removedNodes.length; j += 1) {
+                const n = rec.removedNodes[j]!;
+                if (n.nodeType === 1 && (n as Element).tagName === 'CANVAS') {
+                  pendingChildListChange = true;
+                  break;
+                }
+              }
+            }
+            continue;
+          }
+
           hasRelevantMutation = true;
-          const inSidebar = Boolean(
-            targetNode?.closest?.('.cvat-objects-sidebar, .cvat-objects-sidebar-state-item')
-          );
-          if (inSidebar) pendingSidebarChange = true;
-          if (rec.type === 'childList') {
-            // Sidebar cards are frequently rebuilt on frame changes. Only run the
-            // expensive document-wide canvas/settings checks when those nodes change.
-            const affectsCanvasOrSettings =
-              !inSidebar ||
-              [...rec.addedNodes, ...rec.removedNodes].some(
-                (node) =>
-                  node instanceof Element &&
-                  (node.matches('canvas, .cvat-workspace-settings') ||
-                    Boolean(node.querySelector('canvas, .cvat-workspace-settings')))
-              );
-            if (affectsCanvasOrSettings) pendingChildListChange = true;
+          let affectsCanvasOrSettings = Boolean(targetNode.closest?.('.cvat-workspace-settings'));
+          if (!inSidebar) {
+            for (let j = 0; j < rec.addedNodes.length; j += 1) {
+              const node = rec.addedNodes[j]!;
+              if (node.nodeType !== 1 || isIgnoredMutationNode(node)) continue;
+              const el = node as Element;
+              if (
+                !affectsCanvasOrSettings &&
+                (el.tagName === 'CANVAS' ||
+                  el.classList.contains('cvat-workspace-settings') ||
+                  Boolean(el.querySelector('canvas, .cvat-workspace-settings')))
+              ) {
+                affectsCanvasOrSettings = true;
+              }
+              if (
+                !fullSidebarReconcile &&
+                (el.classList.contains('cvat-objects-sidebar') ||
+                  el.classList.contains('cvat-objects-sidebar-state-item') ||
+                  el.id.startsWith(SIDEBAR_ITEM_ID_PREFIX) ||
+                  Boolean(
+                    el.querySelector('.cvat-objects-sidebar, .cvat-objects-sidebar-state-item')
+                  ))
+              ) {
+                pendingSidebarChange = true;
+                fullSidebarReconcile = true;
+                dirtySidebarCards.clear();
+              }
+            }
+            if (!affectsCanvasOrSettings) {
+              for (let j = 0; j < rec.removedNodes.length; j += 1) {
+                const node = rec.removedNodes[j]!;
+                if (node.nodeType !== 1 || isIgnoredMutationNode(node)) continue;
+                const el = node as Element;
+                if (
+                  el.tagName === 'CANVAS' ||
+                  el.classList.contains('cvat-workspace-settings') ||
+                  Boolean(el.querySelector('canvas, .cvat-workspace-settings'))
+                ) {
+                  affectsCanvasOrSettings = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (affectsCanvasOrSettings) {
+            pendingChildListChange = true;
           }
         }
         if (!hasRelevantMutation) {
@@ -348,9 +692,14 @@ export class PageBridgeRuntimeHost {
       });
     }
 
-    syncEarlyViewportBackgroundDom(this.doc, this.preRenderEnhancer.getOptions().whiteBackground);
+    syncEarlyViewportBackgroundDom(
+      this.doc,
+      this.preRenderEnhancer.getOptionsReadonly().whiteBackground
+    );
     this.tryMountWorkspaceSettingsCheckboxes();
     this.tryMountObjectItemDimensionSyncControls();
+    this.initialCanvasScanDone = true;
+    this.checkForNewlyMountedCanvases();
     const initialInstance = this.getActiveCanvas3dInstance();
     if (initialInstance) {
       this.preRenderEnhancer.ensureHooked(initialInstance);
@@ -358,6 +707,7 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.requestViewsRedraw();
     }
     this.syncActiveObjectQaOverlay(true);
+    this.settingsObserver?.takeRecords();
 
     return () => {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
@@ -387,13 +737,59 @@ export class PageBridgeRuntimeHost {
     };
   }
 
+  private invalidateSceneObjectCaches(): void {
+    this.domDrawnObjectsCache.invalidate();
+    invalidateSpatial2DBoxLookup();
+    invalidateHoverSpatialIndex();
+  }
+
+  private getDrawnObjectEntryById(
+    instance: CvatCanvas3dLike | null | undefined,
+    clientID: number
+  ): CvatDrawnObjectEntry | null {
+    if (!instance?.view || !Number.isFinite(clientID)) {
+      return null;
+    }
+    if (instance.view === this.domBackedViewRef) {
+      const perspCanvas = this.bindDomPerspectiveCanvasEvents();
+      if (!perspCanvas) {
+        return null;
+      }
+      const gen = this.domDrawnObjectsCache.getGeneration();
+      if (
+        this.lastDrawnLookupCanvas === perspCanvas &&
+        this.lastDrawnLookupGen === gen &&
+        this.lastDrawnLookupClientId === clientID
+      ) {
+        return this.lastDrawnLookupEntry;
+      }
+      const entry = this.domDrawnObjectsCache.getEntryById(perspCanvas, clientID);
+      this.lastDrawnLookupCanvas = perspCanvas;
+      this.lastDrawnLookupGen = gen;
+      this.lastDrawnLookupClientId = clientID;
+      this.lastDrawnLookupEntry = entry;
+      return entry;
+    }
+    return instance.view.drawnObjects?.[clientID] ?? null;
+  }
+
   private ensureActiveObjectHoverLock(instance: CvatCanvas3dLike): void {
     if (this.cachedInstance?.view !== instance.view) this.cameraFollower.reset();
     this.cachedInstance = instance;
     const perspective = instance.view?.views?.perspective as
       { rayCaster?: { renderer?: RaycasterLike } } | undefined;
-    lockRaycasterHoverToActiveObject(perspective?.rayCaster?.renderer, () =>
-      this.getActiveObjectClientId(instance)
+    lockRaycasterHoverToActiveObject(
+      perspective?.rayCaster?.renderer,
+      () => this.getActiveObjectClientId(this.cachedInstance ?? instance),
+      undefined,
+      {
+        resolveActiveObject: (activeId) => {
+          const id = Number(activeId);
+          return Number.isFinite(id)
+            ? this.getDrawnObjectEntryById(this.cachedInstance ?? instance, id)?.cuboid?.perspective
+            : undefined;
+        },
+      }
     );
 
     // Keep the active object pinned at the same screen position across frame changes
@@ -409,6 +805,16 @@ export class PageBridgeRuntimeHost {
     }
   }
 
+  private formatNumericClientId(id: number): string {
+    if (id === this.lastNumericActiveId) {
+      return this.lastNumericActiveIdStr;
+    }
+    const formatted = String(id);
+    this.lastNumericActiveId = id;
+    this.lastNumericActiveIdStr = formatted;
+    return formatted;
+  }
+
   private getActiveObjectClientId(instance?: CvatCanvas3dLike | null): string | null {
     if (this.reduxStore) {
       try {
@@ -416,7 +822,7 @@ export class PageBridgeRuntimeHost {
           { annotations?: { activatedStateID?: number | null } } | undefined;
         const activated = annotation?.annotations?.activatedStateID;
         if (typeof activated === 'number' && Number.isFinite(activated)) {
-          return String(activated);
+          return this.formatNumericClientId(activated);
         }
         if (activated === null) {
           return null;
@@ -430,19 +836,44 @@ export class PageBridgeRuntimeHost {
         { data?: { activeElement?: { clientID?: string | number | null } } } | undefined
     )?.data;
     const fallback = modelData?.activeElement?.clientID;
+    if (typeof fallback === 'number' && Number.isFinite(fallback)) {
+      return this.formatNumericClientId(fallback);
+    }
     if (fallback !== undefined && fallback !== null && String(fallback) !== '') {
       return String(fallback);
     }
 
-    const activeSidebarEl = this.doc.querySelector<HTMLElement>(
-      '.cvat-objects-sidebar-state-active-item[id^="cvat-objects-sidebar-state-item-"]'
-    );
-    if (activeSidebarEl) {
-      const match = /^cvat-objects-sidebar-state-item-(\d+)$/.exec(activeSidebarEl.id);
-      if (match?.[1]) {
-        return match[1];
+    const cachedEl = this.cachedActiveSidebarEl;
+    if (
+      cachedEl &&
+      cachedEl.isConnected &&
+      cachedEl.classList.contains('cvat-objects-sidebar-state-active-item') &&
+      cachedEl.id === this.cachedActiveSidebarRawId
+    ) {
+      return this.cachedActiveSidebarParsedId;
+    }
+
+    const activeItems =
+      this.liveActiveSidebarItems ??
+      (this.liveActiveSidebarItems = this.doc.getElementsByClassName(
+        'cvat-objects-sidebar-state-active-item'
+      ));
+    for (let i = 0; i < activeItems.length; i += 1) {
+      const el = activeItems[i]!;
+      const rawId = el.id;
+      if (rawId.startsWith(SIDEBAR_ITEM_ID_PREFIX)) {
+        const suffix = rawId.slice(SIDEBAR_ITEM_ID_PREFIX.length);
+        if (isNumericClientIdName(suffix)) {
+          this.cachedActiveSidebarEl = el;
+          this.cachedActiveSidebarRawId = rawId;
+          this.cachedActiveSidebarParsedId = suffix;
+          return suffix;
+        }
       }
     }
+    this.cachedActiveSidebarEl = null;
+    this.cachedActiveSidebarRawId = '';
+    this.cachedActiveSidebarParsedId = null;
     return null;
   }
 
@@ -457,7 +888,7 @@ export class PageBridgeRuntimeHost {
   private syncActiveObjectQaOverlay(force = false): void {
     // Point-cloud QA scans must not compete with native camera/object drags.
     if (this.canvasInteracting) return;
-    const enabled = this.preRenderEnhancer.getOptions().enableActiveObjectWarnings ?? true;
+    const enabled = this.preRenderEnhancer.getOptionsReadonly().enableActiveObjectWarnings ?? true;
     if (!enabled) {
       this.clearQaEvalTimer();
       if (this.lastQaSignature !== 'disabled') {
@@ -485,15 +916,14 @@ export class PageBridgeRuntimeHost {
       return;
     }
 
-    const drawnObjects = instance.view.drawnObjects ?? {};
-    const drawnEntry = drawnObjects[clientID] ?? null;
+    const drawnEntry = this.getDrawnObjectEntryById(instance, clientID);
     let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
 
     if (!stateOnCurrentFrame) {
       const modelObjects = (instance.model as { objects?: CvatObjectStateLike[] } | undefined)
         ?.objects;
       if (Array.isArray(modelObjects)) {
-        stateOnCurrentFrame = modelObjects.find((s) => Number(s?.clientID) === clientID) ?? null;
+        stateOnCurrentFrame = findObjectStateByClientId(modelObjects, clientID);
       }
     }
 
@@ -504,14 +934,18 @@ export class PageBridgeRuntimeHost {
         const annotations = annotation?.annotations as Record<string, unknown> | undefined;
         const states = annotations?.states as CvatObjectStateLike[] | undefined;
         if (Array.isArray(states)) {
-          stateOnCurrentFrame = states.find((s) => Number(s?.clientID) === clientID) ?? null;
+          stateOnCurrentFrame = findObjectStateByClientId(states, clientID);
         }
       } catch {
         // Ignore fallback lookup errors
       }
     }
 
-    const pts = stateOnCurrentFrame?.points ?? drawnEntry?.data?.points ?? [];
+    const liveDataPts = drawnEntry?.data?.points;
+    const pts =
+      Array.isArray(liveDataPts) && liveDataPts.length >= 9
+        ? liveDataPts
+        : (stateOnCurrentFrame?.points ?? liveDataPts ?? []);
     const domFrameAttr =
       instance.view.views?.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ??
       null;
@@ -524,7 +958,9 @@ export class PageBridgeRuntimeHost {
       domAttributes,
       isOutsideInDom,
       domPos,
-    } = extractSidebarDomLabelAndAttributes(this.doc, clientID);
+    } = extractSidebarDomLabelAndAttributes(this.doc, clientID, {
+      skipHudPos: pts.length >= 3,
+    });
     const isOutside =
       isOutsideInDom ||
       Boolean(stateOnCurrentFrame?.outside) ||
@@ -591,12 +1027,14 @@ export class PageBridgeRuntimeHost {
           if (requestVersion === this.qaRequestVersion) this.lastQaSignature = '';
           return;
         }
+        const latestDrawnEntry = this.getDrawnObjectEntryById(instance, clientID) ?? drawnEntry;
+        const fullDrawnObjects = instance.view?.drawnObjects ?? {};
         const report = evaluateActiveObjectQaReport({
           clientID,
           frame: Number.isFinite(frame) ? frame : 0,
-          drawnEntry,
+          drawnEntry: latestDrawnEntry,
           stateOnCurrentFrame,
-          drawnObjects,
+          drawnObjects: fullDrawnObjects,
           positionArray: nearby,
           fallbackLabelName: domLabelName,
           domAttributes,
@@ -614,7 +1052,7 @@ export class PageBridgeRuntimeHost {
   private tryMountWorkspaceSettingsCheckboxes(): void {
     injectCvatWorkspaceSettingsControls(
       this.doc,
-      () => this.preRenderEnhancer.getOptions(),
+      () => this.preRenderEnhancer.getOptionsReadonly(),
       (next: Cvat3dWorkspaceRenderOptions) => {
         const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
         syncEarlyViewportBackgroundDom(this.doc, persisted.whiteBackground);
@@ -635,18 +1073,27 @@ export class PageBridgeRuntimeHost {
   private syncKeyboardEnabledAttribute(): void {
     this.doc.documentElement.setAttribute(
       'data-meow-ortho-keyboard',
-      this.preRenderEnhancer.getOptions().enableOrthoKeyboard === false ? '0' : '1'
+      this.preRenderEnhancer.getOptionsReadonly().enableOrthoKeyboard === false ? '0' : '1'
     );
   }
 
-  private tryMountObjectItemDimensionSyncControls(): void {
+  private tryMountObjectItemDimensionSyncControls(
+    targetCards?: Iterable<HTMLElement> | null
+  ): void {
+    const opts = this.preRenderEnhancer.getOptionsReadonly();
     injectCvatObjectDimensionSyncControls(
       this.doc,
       (clientID: number, dimension: CuboidDimensionKey): Promise<DimensionSyncResult> =>
         this.handleSyncObjectDimension(clientID, dimension),
-      this.preRenderEnhancer.getOptions(),
+      targetCards != null
+        ? {
+            enableDimensionSync: opts.enableDimensionSync,
+            enableHeadingFlip: opts.enableHeadingFlip,
+            targetCards,
+          }
+        : opts,
       {
-        isAvailable: (id) => sidebarHasRideState(this.doc, id),
+        isAvailable: (id, card) => sidebarHasRideState(this.doc, id, card),
         sync: async (id) => {
           const result = await syncSidebarRideState(this.doc, id);
           // ride_state feeds the QA overlay; show the applied value without waiting for
@@ -665,9 +1112,17 @@ export class PageBridgeRuntimeHost {
   ): Promise<DimensionSyncResult> {
     const sidebar = resolveSidebarObjectContext(this.doc, clientID);
     const instance = sidebar ? null : this.getActiveCanvas3dInstance();
-    const drawnEntry = instance?.view?.drawnObjects?.[clientID] ?? null;
+    const drawnEntry = this.getDrawnObjectEntryById(instance, clientID);
     let stateOnCurrentFrame: CvatObjectStateLike | null =
       sidebar?.state ?? drawnEntry?.state ?? null;
+
+    if (!stateOnCurrentFrame && instance) {
+      const modelObjects = (instance.model as { objects?: CvatObjectStateLike[] } | undefined)
+        ?.objects;
+      if (Array.isArray(modelObjects)) {
+        stateOnCurrentFrame = findObjectStateByClientId(modelObjects, clientID);
+      }
+    }
 
     if (!stateOnCurrentFrame && this.reduxStore) {
       try {
@@ -676,24 +1131,23 @@ export class PageBridgeRuntimeHost {
         const annotations = annotation?.annotations as Record<string, unknown> | undefined;
         const states = annotations?.states as CvatObjectStateLike[] | undefined;
         if (Array.isArray(states)) {
-          stateOnCurrentFrame = states.find((s) => Number(s?.clientID) === clientID) ?? null;
+          stateOnCurrentFrame = findObjectStateByClientId(states, clientID);
         }
       } catch {
         // Ignore fallback lookup errors
       }
     }
 
-    const perspCanvas = this.doc.querySelector<
-      HTMLCanvasElement & {
-        updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
-      }
-    >('.cvat-canvas3d-perspective canvas');
+    const perspCanvas =
+      this.bindDomPerspectiveCanvasEvents() ??
+      this.doc.querySelector<PerspDomCanvasElement>('.cvat-canvas3d-perspective canvas');
 
     const result = await syncTrackCuboidDimension(clientID, dimension, {
       drawnEntry,
       stateOnCurrentFrame,
       perspectiveCanvas: perspCanvas,
       onAfterSync: () => {
+        this.invalidateSceneObjectCaches();
         this.preRenderEnhancer.markDirty();
         const inst = this.getActiveCanvas3dInstance();
         if (inst?.view) {
@@ -708,7 +1162,7 @@ export class PageBridgeRuntimeHost {
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
-  private resolveActiveCuboid(): {
+  private resolveActiveCuboid(allowReduxFallback = true): {
     clientID: number;
     entry: CvatDrawnObjectEntry | null;
     state: CvatObjectStateLike | null;
@@ -719,15 +1173,22 @@ export class PageBridgeRuntimeHost {
     if (!Number.isFinite(clientID)) {
       return null;
     }
-    const entry = instance?.view?.drawnObjects?.[clientID] ?? null;
+    const entry = this.getDrawnObjectEntryById(instance, clientID);
     let state: CvatObjectStateLike | null = entry?.state ?? null;
-    if (!state && this.reduxStore) {
+    if (!state && allowReduxFallback) {
+      const modelObjects = (instance?.model as { objects?: CvatObjectStateLike[] } | undefined)
+        ?.objects;
+      if (Array.isArray(modelObjects)) {
+        state = findObjectStateByClientId(modelObjects, clientID);
+      }
+    }
+    if (!state && allowReduxFallback && this.reduxStore) {
       try {
         const annotation = this.reduxStore.getState().annotation as
           { annotations?: { states?: CvatObjectStateLike[] } } | undefined;
         const states = annotation?.annotations?.states;
         if (Array.isArray(states)) {
-          state = states.find((s) => Number(s?.clientID) === clientID) ?? null;
+          state = findObjectStateByClientId(states, clientID);
         }
       } catch {
         // Ignore fallback lookup errors
@@ -737,7 +1198,7 @@ export class PageBridgeRuntimeHost {
   }
 
   private getActiveCuboidPoints(): { clientID: number; points: number[] } | null {
-    const active = this.resolveActiveCuboid();
+    const active = this.resolveActiveCuboid(true);
     if (!active || active.state?.lock) {
       return null;
     }
@@ -763,19 +1224,28 @@ export class PageBridgeRuntimeHost {
     if (isOrtho(viewCam)) {
       return viewCam;
     }
+    const cachedCanvas =
+      view === 'top'
+        ? this.cachedTopCanvas
+        : view === 'side'
+          ? this.cachedSideCanvas
+          : this.cachedFrontCanvas;
     const selectors: Record<OrthoViewName, string> = {
       top: CVAT_DOM_SELECTORS.TOP_VIEW_WRAPPER,
       side: CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER,
       front: CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER,
     };
-    const canvas = this.doc.querySelector<HTMLCanvasElement>(`${selectors[view]} canvas`);
+    const canvas =
+      cachedCanvas?.isConnected === true
+        ? cachedCanvas
+        : this.doc.querySelector<HTMLCanvasElement>(`${selectors[view]} canvas`);
     const rendered = this.preRenderEnhancer.getLastRenderCameraForCanvas(canvas);
     return isOrtho(rendered) ? rendered : null;
   }
 
   /** Live visual update of the active cuboid meshes (no persistence / undo entry). */
   private previewCuboidPoints(clientID: number, points: number[]): void {
-    const entry = this.getActiveCanvas3dInstance()?.view?.drawnObjects?.[clientID];
+    const entry = this.getDrawnObjectEntryById(this.getActiveCanvas3dInstance(), clientID);
     if (!entry) {
       return;
     }
@@ -812,11 +1282,11 @@ export class PageBridgeRuntimeHost {
 
   /** Persists cuboid points through CVAT (same path as the existing dimension tools). */
   private async commitCuboidPoints(clientID: number, points: number[]): Promise<void> {
-    const active = this.resolveActiveCuboid();
+    const active = this.resolveActiveCuboid(true);
     const state =
       active?.clientID === clientID
         ? active.state
-        : (this.getActiveCanvas3dInstance()?.view?.drawnObjects?.[clientID]?.state ?? null);
+        : (this.getDrawnObjectEntryById(this.getActiveCanvas3dInstance(), clientID)?.state ?? null);
     if (!state || state.lock) {
       return;
     }
@@ -839,11 +1309,9 @@ export class PageBridgeRuntimeHost {
       // Fall back to CVAT's canvas.edited handler below
     }
 
-    const perspCanvas = this.doc.querySelector<
-      HTMLCanvasElement & {
-        updatePosition?: (state: CvatObjectStateLike, points: number[]) => void;
-      }
-    >('.cvat-canvas3d-perspective canvas');
+    const perspCanvas =
+      this.bindDomPerspectiveCanvasEvents() ??
+      this.doc.querySelector<PerspDomCanvasElement>('.cvat-canvas3d-perspective canvas');
     if (perspCanvas && dispatchState) {
       if (typeof perspCanvas.updatePosition === 'function') {
         perspCanvas.updatePosition(dispatchState, [...nextPoints]);
@@ -858,12 +1326,10 @@ export class PageBridgeRuntimeHost {
       }
     }
 
-    this.preRenderEnhancer.markDirty();
-    const inst = this.getActiveCanvas3dInstance();
-    if (inst?.view) {
-      this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
-      this.preRenderEnhancer.requestViewsRedraw();
-    }
+    // Same-frame cuboid edit: do NOT call markDirty() (which resets pendingFrameObjectsLoad=true
+    // and recompiles/recolors all 100k cuboids + full LiDAR buffer mid-edit).
+    this.invalidateSceneObjectCaches();
+    this.preRenderEnhancer.requestViewsRedraw();
     this.syncActiveObjectQaOverlay(true);
   }
 
@@ -876,6 +1342,7 @@ export class PageBridgeRuntimeHost {
       try {
         cvatUI.registerComponent(({ store }) => {
           this.reduxStore = store;
+          this.hasReduxSnapshot = false;
           const instance = this.getActiveCanvas3dInstance();
           if (instance) {
             this.preRenderEnhancer.ensureHooked(instance);
@@ -889,6 +1356,7 @@ export class PageBridgeRuntimeHost {
                 this.globalStateUpdateRafId = null;
               }
               this.reduxStore = null;
+              this.hasReduxSnapshot = false;
             },
             globalStateDidUpdate: () => {
               if (this.globalStateUpdateRafId !== null) {
@@ -914,6 +1382,48 @@ export class PageBridgeRuntimeHost {
   }
 
   private handleGlobalStateUpdate(): void {
+    if (this.reduxStore) {
+      try {
+        const state = this.reduxStore.getState();
+        const annotation = state.annotation as Record<string, unknown> | undefined;
+        const annotations = annotation?.annotations as
+          { activatedStateID?: unknown; states?: unknown } | undefined;
+        const player = annotation?.player as { frame?: { number?: unknown } } | undefined;
+        const canvas = annotation?.canvas as { instance?: CvatCanvas3dLike } | undefined;
+
+        const nextCanvasInstance = canvas?.instance ?? null;
+        const nextFrame = player?.frame?.number ?? nextCanvasInstance?.model?.data?.imageID ?? null;
+        const nextActivatedId = annotations?.activatedStateID ?? null;
+        const nextStatesRef = annotations?.states ?? null;
+
+        if (
+          this.hasReduxSnapshot &&
+          nextFrame === this.lastReduxFrame &&
+          nextActivatedId === this.lastReduxActivatedId &&
+          nextStatesRef === this.lastReduxStatesRef &&
+          nextCanvasInstance === this.lastReduxCanvasInstance
+        ) {
+          return;
+        }
+
+        if (
+          !this.hasReduxSnapshot ||
+          nextFrame !== this.lastReduxFrame ||
+          nextStatesRef !== this.lastReduxStatesRef
+        ) {
+          this.invalidateSceneObjectCaches();
+        }
+
+        this.hasReduxSnapshot = true;
+        this.lastReduxFrame = nextFrame;
+        this.lastReduxActivatedId = nextActivatedId;
+        this.lastReduxStatesRef = nextStatesRef;
+        this.lastReduxCanvasInstance = nextCanvasInstance;
+      } catch {
+        // Proceed with standard sync if Redux state inspection fails
+      }
+    }
+
     const activeInstance = this.getActiveCanvas3dInstance();
     if (activeInstance) {
       this.preRenderEnhancer.ensureHooked(activeInstance);
@@ -935,13 +1445,30 @@ export class PageBridgeRuntimeHost {
           }
           const domInstance = this.resolveDomBackedCanvas3dInstance();
           if (domInstance?.view) {
-            return {
+            const effectiveModel = instance.model ?? domInstance.model;
+            const modelFrame = effectiveModel?.data?.imageID;
+            if (
+              this.cachedHybridWrapper !== null &&
+              this.cachedHybridSourceInstance === instance &&
+              this.cachedHybridDomView === domInstance.view &&
+              this.cachedHybridModel === effectiveModel &&
+              this.cachedHybridModelFrame === modelFrame
+            ) {
+              return this.cachedHybridWrapper;
+            }
+            const wrapper: CvatCanvas3dLike = {
               configure: instance.configure?.bind(instance),
               keyControls: instance.keyControls?.bind(instance),
               fit: instance.fit?.bind(instance),
               view: domInstance.view,
-              model: instance.model ?? domInstance.model,
+              model: effectiveModel,
             };
+            this.cachedHybridSourceInstance = instance;
+            this.cachedHybridDomView = domInstance.view;
+            this.cachedHybridModel = effectiveModel;
+            this.cachedHybridModelFrame = modelFrame;
+            this.cachedHybridWrapper = wrapper;
+            return wrapper;
           }
           return instance;
         }
@@ -953,38 +1480,93 @@ export class PageBridgeRuntimeHost {
     return this.resolveDomBackedCanvas3dInstance();
   }
 
+  private attachCanvasSetupListener(canvas: HTMLCanvasElement, isPerspective: boolean): void {
+    if (this.hookedSetupCanvases.has(canvas)) {
+      return;
+    }
+    this.hookedSetupCanvases.add(canvas);
+    canvas.addEventListener('canvas.setup', () => {
+      this.invalidateSceneObjectCaches();
+      this.viewsMapDirty = true;
+      this.preRenderEnhancer.markViewStructureChanged();
+      const inst = this.getActiveCanvas3dInstance();
+      if (inst?.view) {
+        this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
+      }
+      if (
+        isPerspective ||
+        canvas === this.cachedPerspCanvas ||
+        Boolean(canvas.closest?.('.cvat-canvas3d-perspective'))
+      ) {
+        this.syncActiveObjectQaOverlay(false);
+      }
+    });
+  }
+
+  private refreshPrimaryDomCanvases(): void {
+    if (!this.cachedPerspCanvas?.isConnected) {
+      this.cachedPerspCanvas = this.doc.querySelector<PerspDomCanvasElement>(
+        '.cvat-canvas3d-perspective canvas'
+      );
+    }
+    if (!this.cachedTopCanvas?.isConnected) {
+      this.cachedTopCanvas = this.doc.querySelector<SceneDomCanvasElement>(
+        '.cvat-canvas3d-topview canvas'
+      );
+    }
+    if (!this.cachedSideCanvas?.isConnected) {
+      this.cachedSideCanvas = this.doc.querySelector<SceneDomCanvasElement>(
+        '.cvat-canvas3d-sideview canvas'
+      );
+    }
+    if (!this.cachedFrontCanvas?.isConnected) {
+      this.cachedFrontCanvas = this.doc.querySelector<SceneDomCanvasElement>(
+        '.cvat-canvas3d-frontview canvas'
+      );
+    }
+  }
+
   private checkForNewlyMountedCanvases(): boolean {
-    const allCanvases = this.doc.querySelectorAll<HTMLCanvasElement>('canvas');
+    this.initialCanvasScanDone = true;
+    this.refreshPrimaryDomCanvases();
+    const p = this.cachedPerspCanvas;
+    const t = this.cachedTopCanvas;
+    const s = this.cachedSideCanvas;
+    const f = this.cachedFrontCanvas;
+
+    for (const extra of this.extraSceneCanvases) {
+      if (!extra.isConnected || extra === p || extra === t || extra === s || extra === f) {
+        this.extraSceneCanvases.delete(extra);
+        this.viewsMapDirty = true;
+      }
+    }
+
+    const allCanvases = this.doc.querySelectorAll<SceneDomCanvasElement>('canvas');
     let foundNew = false;
     for (const c of allCanvases) {
+      const isPersp = c === p || Boolean(c.closest?.('.cvat-canvas3d-perspective'));
       if (!this.knownDomCanvases.has(c)) {
         this.knownDomCanvases.add(c);
         foundNew = true;
-        c.addEventListener('canvas.setup', () => {
-          this.preRenderEnhancer.markViewStructureChanged();
-          const inst = this.getActiveCanvas3dInstance();
-          if (inst?.view) {
-            this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
-          }
-        });
+        this.attachCanvasSetupListener(c, isPersp);
       }
+      if (c !== p && c !== t && c !== s && c !== f && !this.extraSceneCanvases.has(c)) {
+        this.extraSceneCanvases.add(c);
+        this.viewsMapDirty = true;
+      }
+    }
+    if (foundNew) {
+      this.viewsMapDirty = true;
     }
     return foundNew;
   }
 
-  private bindDomPerspectiveCanvasEvents():
-    | (HTMLCanvasElement & {
-        scene?: ThreeSceneLike;
-        getDrawnObjects?: () => CvatDrawnObjectEntry[];
-      })
-    | null {
+  private bindDomPerspectiveCanvasEvents(): PerspDomCanvasElement | null {
     if (!this.cachedPerspCanvas || !this.cachedPerspCanvas.isConnected) {
-      this.cachedPerspCanvas = this.doc.querySelector<
-        HTMLCanvasElement & {
-          scene?: ThreeSceneLike;
-          getDrawnObjects?: () => CvatDrawnObjectEntry[];
-        }
-      >('.cvat-canvas3d-perspective canvas');
+      this.cachedPerspCanvas = this.doc.querySelector<PerspDomCanvasElement>(
+        '.cvat-canvas3d-perspective canvas'
+      );
+      this.viewsMapDirty = true;
     }
     const perspCanvas = this.cachedPerspCanvas;
 
@@ -994,47 +1576,72 @@ export class PageBridgeRuntimeHost {
 
     if (!this.hookedPerspectiveCanvases.has(perspCanvas)) {
       this.hookedPerspectiveCanvases.add(perspCanvas);
-      perspCanvas.addEventListener('canvas.setup', () => {
-        // The shared canvas.setup listener handles point-cloud processing once.
-        this.syncActiveObjectQaOverlay(true);
-      });
+      this.knownDomCanvases.add(perspCanvas);
+      this.attachCanvasSetupListener(perspCanvas, true);
       perspCanvas.addEventListener('canvas.edited', () => {
+        this.invalidateSceneObjectCaches();
         this.syncActiveObjectQaOverlay(true);
       });
+      const onCanvasObjectsMutated = (): void => {
+        this.invalidateSceneObjectCaches();
+        this.syncActiveObjectQaOverlay(false);
+      };
+      perspCanvas.addEventListener('canvas.drawn', onCanvasObjectsMutated);
+      perspCanvas.addEventListener('canvas.deleted', onCanvasObjectsMutated);
+      perspCanvas.addEventListener('canvas.canceled', onCanvasObjectsMutated);
     }
 
     return perspCanvas;
   }
 
   private getViewsMap(): NonNullable<CvatInternalViewLike['views']> {
-    if (!this.cachedPerspCanvas?.isConnected) {
-      this.cachedPerspCanvas = this.doc.querySelector<
-        HTMLCanvasElement & {
-          scene?: ThreeSceneLike;
-          getDrawnObjects?: () => CvatDrawnObjectEntry[];
-        }
-      >('.cvat-canvas3d-perspective canvas');
-    }
-    if (!this.cachedTopCanvas?.isConnected) {
-      this.cachedTopCanvas = this.doc.querySelector<HTMLCanvasElement & { scene?: ThreeSceneLike }>(
-        '.cvat-canvas3d-topview canvas'
-      );
-    }
-    if (!this.cachedSideCanvas?.isConnected) {
-      this.cachedSideCanvas = this.doc.querySelector<
-        HTMLCanvasElement & { scene?: ThreeSceneLike }
-      >('.cvat-canvas3d-sideview canvas');
-    }
-    if (!this.cachedFrontCanvas?.isConnected) {
-      this.cachedFrontCanvas = this.doc.querySelector<
-        HTMLCanvasElement & { scene?: ThreeSceneLike }
-      >('.cvat-canvas3d-frontview canvas');
+    if (!this.initialCanvasScanDone) {
+      this.checkForNewlyMountedCanvases();
     }
 
+    if (
+      (this.cachedPerspCanvas !== null && !this.cachedPerspCanvas.isConnected) ||
+      (this.cachedTopCanvas !== null && !this.cachedTopCanvas.isConnected) ||
+      (this.cachedSideCanvas !== null && !this.cachedSideCanvas.isConnected) ||
+      (this.cachedFrontCanvas !== null && !this.cachedFrontCanvas.isConnected)
+    ) {
+      this.viewsMapDirty = true;
+    }
+
+    if (!this.viewsMapDirty) {
+      if (
+        this.cachedPerspCanvas?.scene !== this.cachedPerspScene ||
+        this.cachedTopCanvas?.scene !== this.cachedTopScene ||
+        this.cachedSideCanvas?.scene !== this.cachedSideScene ||
+        this.cachedFrontCanvas?.scene !== this.cachedFrontScene
+      ) {
+        this.viewsMapDirty = true;
+      } else if (this.extraSceneCanvases.size > 0) {
+        for (const extra of this.extraSceneCanvases) {
+          if (!extra.isConnected) {
+            this.extraSceneCanvases.delete(extra);
+            this.viewsMapDirty = true;
+          } else if (this.extraCanvasScenes.get(extra) !== extra.scene) {
+            this.viewsMapDirty = true;
+          }
+        }
+      }
+    }
+
+    if (!this.viewsMapDirty && this.cachedViewsMap !== null) {
+      return this.cachedViewsMap;
+    }
+
+    this.refreshPrimaryDomCanvases();
     const p = this.cachedPerspCanvas;
     const t = this.cachedTopCanvas;
     const s = this.cachedSideCanvas;
     const f = this.cachedFrontCanvas;
+
+    this.cachedPerspScene = p?.scene;
+    this.cachedTopScene = t?.scene;
+    this.cachedSideScene = s?.scene;
+    this.cachedFrontScene = f?.scene;
 
     const viewsMap: NonNullable<CvatInternalViewLike['views']> = {
       perspective: p?.scene ? { scene: p.scene, renderer: { domElement: p } } : undefined,
@@ -1043,14 +1650,16 @@ export class PageBridgeRuntimeHost {
       front: f?.scene ? { scene: f.scene, renderer: { domElement: f } } : undefined,
     };
 
-    // Also include any zoomed/expanded Top/Side/Front canvas mounted anywhere in the DOM
+    // Include any zoomed/expanded Top/Side/Front canvas tracked via MutationObserver
     // (must have its own distinct THREE.Scene so we never alias the perspective scene!)
-    const allSceneCanvases = this.doc.querySelectorAll<
-      HTMLCanvasElement & { scene?: ThreeSceneLike }
-    >('canvas');
     let extraIdx = 0;
-    for (const c of allSceneCanvases) {
-      if (c !== p && c !== t && c !== s && c !== f && c.scene && c.scene !== p?.scene) {
+    for (const c of this.extraSceneCanvases) {
+      if (!c.isConnected || c === p || c === t || c === s || c === f) {
+        this.extraSceneCanvases.delete(c);
+        continue;
+      }
+      this.extraCanvasScenes.set(c, c.scene);
+      if (c.scene && c.scene !== p?.scene) {
         viewsMap[`ortho_zoom_${extraIdx}`] = {
           scene: c.scene,
           renderer: { domElement: c },
@@ -1059,6 +1668,8 @@ export class PageBridgeRuntimeHost {
       }
     }
 
+    this.cachedViewsMap = viewsMap;
+    this.viewsMapDirty = false;
     return viewsMap;
   }
 
@@ -1076,35 +1687,40 @@ export class PageBridgeRuntimeHost {
 
     if (!this.domBackedViewRef || this.lastDomCanvasRef !== perspCanvas) {
       this.lastDomCanvasRef = perspCanvas;
-      const docRef = this.doc;
+      this.domDrawnObjectsCache.invalidate();
+      this.viewsMapDirty = true;
       const getViews = () => this.getViewsMap();
-      this.domBackedViewRef = {
+      const getDrawnObjectsMap = () =>
+        this.domDrawnObjectsCache.getMap(this.bindDomPerspectiveCanvasEvents());
+      const getSingleDrawnObject = (id: number) =>
+        this.domDrawnObjectsCache.getEntryById(this.bindDomPerspectiveCanvasEvents(), id);
+      const viewRef: CvatInternalViewLike & {
+        getDrawnObjectById: (id: number) => CvatDrawnObjectEntry | null;
+      } = {
         get views() {
           return getViews();
         },
         get drawnObjects() {
-          const map: Record<number, CvatDrawnObjectEntry> = {};
-          const p = docRef.querySelector<
-            HTMLCanvasElement & { getDrawnObjects?: () => CvatDrawnObjectEntry[] }
-          >('.cvat-canvas3d-perspective canvas');
-          if (typeof p?.getDrawnObjects === 'function') {
-            const list = p.getDrawnObjects();
-            if (Array.isArray(list)) {
-              list.forEach((item, idx) => {
-                const id = item?.data?.clientID ?? item?.state?.clientID ?? idx;
-                map[id] = item;
-              });
-            }
-          }
-          return map;
+          return getDrawnObjectsMap();
+        },
+        getDrawnObjectById(id: number) {
+          return getSingleDrawnObject(id);
         },
       };
+      this.domBackedViewRef = viewRef;
     }
 
     const frameAttr = perspCanvas.getAttribute('data-frame-number');
-    const parsedFrame = frameAttr !== null ? Number(frameAttr) : null;
+    if (
+      this.cachedDomInstance !== null &&
+      this.cachedDomInstanceView === this.domBackedViewRef &&
+      this.cachedDomFrameAttr === frameAttr
+    ) {
+      return this.cachedDomInstance;
+    }
 
-    return {
+    const parsedFrame = frameAttr !== null ? Number(frameAttr) : null;
+    const domInstance: CvatCanvas3dLike = {
       view: this.domBackedViewRef,
       model: {
         data: {
@@ -1112,6 +1728,10 @@ export class PageBridgeRuntimeHost {
         },
       },
     };
+    this.cachedDomInstanceView = this.domBackedViewRef;
+    this.cachedDomFrameAttr = frameAttr;
+    this.cachedDomInstance = domInstance;
+    return domInstance;
   }
 
   public probeRuntime(): PageRuntimeProbeResult {
@@ -1148,7 +1768,7 @@ export class PageBridgeRuntimeHost {
       config.enableScattering !== undefined ||
       config.colorPointsByCuboid !== undefined
     ) {
-      const current = this.preRenderEnhancer.getOptions();
+      const current = this.preRenderEnhancer.getOptionsReadonly();
       const next: Cvat3dWorkspaceRenderOptions = {
         ...current,
         whiteBackground: config.whiteBackground ?? current.whiteBackground,
@@ -1164,46 +1784,79 @@ export class PageBridgeRuntimeHost {
     }
 
     if (this.reduxStore) {
-      if (config.shapeOpacity !== undefined) {
+      let shapesState: Record<string, unknown> | undefined;
+      let workspaceState: Record<string, unknown> | undefined;
+      try {
+        const rootSettings = this.reduxStore.getState().settings as
+          { shapes?: Record<string, unknown>; workspace?: Record<string, unknown> } | undefined;
+        shapesState = rootSettings?.shapes;
+        workspaceState = rootSettings?.workspace;
+      } catch {
+        shapesState = undefined;
+        workspaceState = undefined;
+      }
+
+      if (config.shapeOpacity !== undefined && shapesState?.opacity !== config.shapeOpacity) {
         this.reduxStore.dispatch({
           type: 'CHANGE_SHAPES_OPACITY',
           payload: { opacity: config.shapeOpacity },
         });
       }
-      if (config.selectedShapeOpacity !== undefined) {
+      if (
+        config.selectedShapeOpacity !== undefined &&
+        shapesState?.selectedOpacity !== config.selectedShapeOpacity
+      ) {
         this.reduxStore.dispatch({
           type: 'CHANGE_SELECTED_SHAPES_OPACITY',
           payload: { selectedOpacity: config.selectedShapeOpacity },
         });
       }
       if (config.outlinedBorders !== undefined || config.outlineColor !== undefined) {
-        this.reduxStore.dispatch({
-          type: 'CHANGE_SHAPES_OUTLINED_BORDERS',
-          payload: {
-            outlined: config.outlinedBorders ?? true,
-            color: config.outlineColor ?? '#000000',
-          },
-        });
+        const targetOutlined = config.outlinedBorders ?? true;
+        const targetColor = config.outlineColor ?? '#000000';
+        const alreadyMatches =
+          shapesState?.outlined === targetOutlined &&
+          (shapesState?.outlinedBorders === targetColor || shapesState?.color === targetColor);
+        if (!alreadyMatches) {
+          this.reduxStore.dispatch({
+            type: 'CHANGE_SHAPES_OUTLINED_BORDERS',
+            payload: {
+              outlined: targetOutlined,
+              color: targetColor,
+            },
+          });
+        }
       }
-      if (config.orientationVisibility !== undefined) {
+      if (
+        config.orientationVisibility !== undefined &&
+        shapesState?.orientationVisibility !== config.orientationVisibility
+      ) {
         this.reduxStore.dispatch({
           type: 'CHANGE_SHAPES_ORIENTATION_VISIBILITY',
           payload: { orientationVisibility: config.orientationVisibility },
         });
       }
-      if (config.colorBy !== undefined) {
+      if (config.colorBy !== undefined && shapesState?.colorBy !== config.colorBy) {
         this.reduxStore.dispatch({
           type: 'CHANGE_SHAPES_COLOR_BY',
           payload: { colorBy: config.colorBy },
         });
       }
-      if (config.controlPointsSize !== undefined) {
+      if (
+        config.controlPointsSize !== undefined &&
+        (shapesState?.controlPointsSize ?? workspaceState?.controlPointsSize) !==
+          config.controlPointsSize
+      ) {
         this.reduxStore.dispatch({
           type: 'SWITCH_CONTROL_POINTS_SIZE',
           payload: { controlPointsSize: config.controlPointsSize },
         });
       }
-      if (config.focusedObjectPadding !== undefined) {
+      if (
+        config.focusedObjectPadding !== undefined &&
+        (shapesState?.focusedObjectPadding ?? workspaceState?.focusedObjectPadding) !==
+          config.focusedObjectPadding
+      ) {
         this.reduxStore.dispatch({
           type: 'CHANGE_FOCUSED_OBJECT_PADDING',
           payload: { focusedObjectPadding: config.focusedObjectPadding },
@@ -1212,24 +1865,49 @@ export class PageBridgeRuntimeHost {
     }
 
     if (canvasInstance?.configure) {
+      const currentModelCfg = (
+        canvasInstance.model?.data as { configuration?: Record<string, unknown> } | undefined
+      )?.configuration;
       const directPatch: Record<string, unknown> = {};
-      if (config.shapeOpacity !== undefined) directPatch.shapeOpacity = config.shapeOpacity;
-      if (config.selectedShapeOpacity !== undefined) {
+      if (
+        config.shapeOpacity !== undefined &&
+        currentModelCfg?.shapeOpacity !== config.shapeOpacity
+      ) {
+        directPatch.shapeOpacity = config.shapeOpacity;
+      }
+      if (
+        config.selectedShapeOpacity !== undefined &&
+        currentModelCfg?.selectedShapeOpacity !== config.selectedShapeOpacity
+      ) {
         directPatch.selectedShapeOpacity = config.selectedShapeOpacity;
       }
       if (config.outlinedBorders !== undefined || config.outlineColor !== undefined) {
-        directPatch.outlinedBorders = config.outlinedBorders
+        const targetOutlinedValue = config.outlinedBorders
           ? (config.outlineColor ?? '#000000')
           : false;
+        if (currentModelCfg?.outlinedBorders !== targetOutlinedValue) {
+          directPatch.outlinedBorders = targetOutlinedValue;
+        }
       }
-      if (config.orientationVisibility !== undefined) {
+      if (
+        config.orientationVisibility !== undefined &&
+        currentModelCfg?.orientationVisibility !== config.orientationVisibility
+      ) {
         directPatch.orientationVisibility = config.orientationVisibility;
       }
-      if (config.colorBy !== undefined) directPatch.colorBy = config.colorBy;
-      if (config.controlPointsSize !== undefined) {
+      if (config.colorBy !== undefined && currentModelCfg?.colorBy !== config.colorBy) {
+        directPatch.colorBy = config.colorBy;
+      }
+      if (
+        config.controlPointsSize !== undefined &&
+        currentModelCfg?.controlPointsSize !== config.controlPointsSize
+      ) {
         directPatch.controlPointsSize = config.controlPointsSize;
       }
-      if (config.focusedObjectPadding !== undefined) {
+      if (
+        config.focusedObjectPadding !== undefined &&
+        currentModelCfg?.focusedObjectPadding !== config.focusedObjectPadding
+      ) {
         directPatch.focusedObjectPadding = config.focusedObjectPadding;
       }
       if (Object.keys(directPatch).length > 0) {

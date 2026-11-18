@@ -12,6 +12,8 @@
  * - Changing the active object (or deactivating) resets tracking without moving the camera.
  */
 
+import { findObjectStateByClientId, isNumericClientIdName } from './state-lookup';
+
 export interface Vector3Like {
   x: number;
   y: number;
@@ -55,6 +57,7 @@ export interface FollowViewLike {
     [key: string]: unknown;
   };
   drawnObjects?: Record<number | string, FollowEntryLike | undefined>;
+  getDrawnObjectById?: (clientID: number) => FollowEntryLike | null | undefined;
   render?: () => void;
 }
 
@@ -76,6 +79,10 @@ interface TrackedState {
 }
 
 const FOLLOW_MARKER = '__cvat3dEnhancerCameraFollow';
+
+function hasValidFrame(source: FollowStateLike | null | undefined): source is FollowStateLike {
+  return Boolean(source && typeof source.frame === 'number' && Number.isFinite(source.frame));
+}
 
 export function readEntryCenter(
   entry: FollowEntryLike | undefined
@@ -120,8 +127,16 @@ export function translatePerspectiveCamera(
         typeof camPos.clone === 'function' ? camPos.clone() : { x: 0, y: 0, z: 0 };
       position = controls.getPosition(posOut, false) ?? posOut;
     }
-    if (![position.x, position.y, position.z, target.x, target.y, target.z].every(Number.isFinite))
+    if (
+      !Number.isFinite(position.x) ||
+      !Number.isFinite(position.y) ||
+      !Number.isFinite(position.z) ||
+      !Number.isFinite(target.x) ||
+      !Number.isFinite(target.y) ||
+      !Number.isFinite(target.z)
+    ) {
       return false;
+    }
     controls.setLookAt(
       position.x + dx,
       position.y + dy,
@@ -148,6 +163,10 @@ export function translatePerspectiveCamera(
 
 export class ActiveObjectCameraFollower {
   private tracked: TrackedState | null = null;
+  private cachedModelObjects: readonly FollowStateLike[] | null = null;
+  private cachedModelObjectsLen = -1;
+  private cachedLookupId: string | null = null;
+  private cachedModelState: FollowStateLike | null = null;
 
   public constructor(
     private readonly getActiveClientId: () => string | null,
@@ -156,6 +175,49 @@ export class ActiveObjectCameraFollower {
 
   public reset(): void {
     this.tracked = null;
+    this.cachedModelObjects = null;
+    this.cachedModelObjectsLen = -1;
+    this.cachedLookupId = null;
+    this.cachedModelState = null;
+  }
+
+  private resolveModelState(
+    modelObjects: readonly FollowStateLike[] | undefined,
+    activeId: string
+  ): FollowStateLike | undefined {
+    if (!modelObjects || modelObjects.length === 0) {
+      return undefined;
+    }
+    if (
+      this.cachedModelObjects === modelObjects &&
+      this.cachedModelObjectsLen === modelObjects.length &&
+      this.cachedLookupId === activeId
+    ) {
+      return this.cachedModelState ?? undefined;
+    }
+
+    let found: FollowStateLike | undefined;
+    if (isNumericClientIdName(activeId as unknown)) {
+      const numericId = Number(activeId);
+      if (Number.isFinite(numericId)) {
+        found = findObjectStateByClientId(modelObjects, numericId) ?? undefined;
+      }
+    } else {
+      const trimmed = activeId.trim();
+      const parsed = trimmed.length > 0 ? Number(trimmed) : NaN;
+      if (Number.isFinite(parsed)) {
+        found = findObjectStateByClientId(modelObjects, parsed) ?? undefined;
+      }
+      if (!found) {
+        found = modelObjects.find((state) => String(state.clientID) === activeId);
+      }
+    }
+
+    this.cachedModelObjects = modelObjects;
+    this.cachedModelObjectsLen = modelObjects.length;
+    this.cachedLookupId = activeId;
+    this.cachedModelState = found ?? null;
+    return found;
   }
 
   /**
@@ -175,31 +237,68 @@ export class ActiveObjectCameraFollower {
     }
 
     if (this.tracked && this.tracked.clientID !== activeId) this.reset();
-    const entry = view.drawnObjects?.[activeId];
-    const modelState = (model?.data?.objects ?? model?.objects)?.find(
-      (state) => String(state.clientID) === activeId
-    );
-    const sources = [modelState, entry?.state, entry?.data].filter(
-      (source): source is FollowStateLike => Boolean(source)
-    );
+
+    let entry: FollowEntryLike | undefined;
+    if (typeof view.getDrawnObjectById === 'function' && isNumericClientIdName(activeId)) {
+      const numericId = Number(activeId);
+      if (Number.isFinite(numericId)) {
+        entry = view.getDrawnObjectById(numericId) ?? undefined;
+      }
+    } else {
+      entry = view.drawnObjects?.[activeId];
+    }
+    const entryState = entry?.state ?? undefined;
+    const entryData = entry?.data ?? undefined;
     const modelFrame = model?.data?.imageID;
-    const hasFrame = (source: FollowStateLike): boolean =>
-      typeof source.frame === 'number' && Number.isFinite(source.frame);
     const expectedFrame =
       typeof modelFrame === 'number' && Number.isFinite(modelFrame) ? modelFrame : null;
-    // CVAT can advance imageID before replacing the drawn objects. Do not consume that transition
-    // until the annotation snapshot belongs to the displayed frame (data is ObjectState on some builds).
-    const source =
-      expectedFrame !== null
-        ? (sources.find((candidate) => candidate.frame === expectedFrame) ??
-          (sources.some(hasFrame) ? null : sources[0]))
-        : sources.find(hasFrame);
-    if (!source || source.hidden || source.outside) return;
-    const center = readEntryCenter({ state: source });
-    const frame = expectedFrame ?? source.frame;
-    if (!center || typeof frame !== 'number' || !Number.isFinite(frame)) return;
 
-    const [cx, cy, cz] = center;
+    // Fast-path O(1): if drawnObjects already holds a snapshot matching expectedFrame
+    // (or any valid frame when modelFrame is unavailable), use it without touching model.objects.
+    let source: FollowStateLike | undefined;
+    if (expectedFrame !== null) {
+      if (entryState && entryState.frame === expectedFrame) {
+        source = entryState;
+      } else if (entryData && entryData.frame === expectedFrame) {
+        source = entryData;
+      }
+    } else if (hasValidFrame(entryState)) {
+      source = entryState;
+    } else if (hasValidFrame(entryData)) {
+      source = entryData;
+    }
+
+    // CVAT can advance imageID before replacing the drawn objects. Only consult model.objects
+    // via O(log N) / O(1)-cached lookup when drawnObjects does not yet match expectedFrame.
+    if (!source) {
+      const modelObjects = model?.data?.objects ?? model?.objects;
+      const modelState = this.resolveModelState(modelObjects, activeId);
+      if (expectedFrame !== null) {
+        if (modelState && modelState.frame === expectedFrame) {
+          source = modelState;
+        } else if (
+          !hasValidFrame(modelState) &&
+          !hasValidFrame(entryState) &&
+          !hasValidFrame(entryData)
+        ) {
+          source = modelState ?? entryState ?? entryData;
+        }
+      } else if (hasValidFrame(modelState)) {
+        source = modelState;
+      }
+    }
+
+    if (!source || source.hidden || source.outside) return;
+    const pts = source.points;
+    if (!pts || pts.length < 3) return;
+    const cx = Number(pts[0]);
+    const cy = Number(pts[1]);
+    const cz = Number(pts[2]);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)) return;
+
+    const frame = expectedFrame ?? source.frame;
+    if (typeof frame !== 'number' || !Number.isFinite(frame)) return;
+
     const prev = this.tracked;
     if (!prev || prev.clientID !== activeId) {
       this.tracked = { clientID: activeId, frame, cx, cy, cz };
@@ -214,8 +313,11 @@ export class ActiveObjectCameraFollower {
         if (!translatePerspectiveCamera(view, dx, dy, dz)) return;
       }
     }
-    // Same frame: follow box drag/resize silently so the next frame change is relative to the final position
-    this.tracked = { clientID: activeId, frame, cx, cy, cz };
+    // Same frame: follow box drag/resize in-place (zero allocation) so next frame delta is exact.
+    prev.frame = frame;
+    prev.cx = cx;
+    prev.cy = cy;
+    prev.cz = cz;
   }
 }
 

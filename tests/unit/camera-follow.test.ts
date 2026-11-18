@@ -214,4 +214,79 @@ describe('Active object camera follow', () => {
     view.render!();
     expect(setLookAt).toHaveBeenCalledWith(13, 10, 10, 4, 2, 3, false);
   });
+
+  it('avoids linear model.objects scans across 100,000 states on same-frame and frame-change ticks', () => {
+    const totalObjects = 100_000;
+    let clientIdReads = 0;
+    const states100k = Array.from({ length: totalObjects }, (_, i) => {
+      let frame = 10;
+      let points = [i * 0.1, 0, 0];
+      return {
+        get clientID(): number {
+          clientIdReads += 1;
+          return i;
+        },
+        get frame(): number {
+          return frame;
+        },
+        set frame(next: number) {
+          frame = next;
+        },
+        get points(): readonly number[] {
+          return points;
+        },
+        set points(next: readonly number[]) {
+          points = [...next];
+        },
+      };
+    });
+
+    const targetId = 99_999;
+    const { view, setLookAt } = makeView([0, 0, 0], 10);
+    view.drawnObjects = {
+      [targetId]: {
+        state: { clientID: targetId, frame: 10, points: [10, 20, 30] },
+      },
+    };
+    const model = {
+      data: {
+        imageID: 10,
+        isFrameUpdating: false,
+        objects: states100k,
+      },
+      objects: states100k,
+    };
+
+    const follower = new ActiveObjectCameraFollower(
+      () => String(targetId),
+      () => true
+    );
+
+    // 60 steady-state ticks on frame 10: drawnObjects already matches expectedFrame -> 0 model reads
+    clientIdReads = 0;
+    for (let tick = 0; tick < 60; tick += 1) {
+      follower.tick(view, model);
+    }
+    expect(clientIdReads).toBe(0);
+    expect(setLookAt).not.toHaveBeenCalled();
+
+    // Frame transition to frame 11 before drawnObjects updates (drawnObjects still holds frame 10):
+    // Binary search on 100,000 sorted states must read <= 20 clientIDs, then 0 on subsequent ticks.
+    states100k[targetId]!.frame = 11;
+    states100k[targetId]!.points = [14, 22, 30];
+    model.data.imageID = 11;
+
+    clientIdReads = 0;
+    follower.tick(view, model);
+    expect(setLookAt).toHaveBeenCalledOnce();
+    expect(setLookAt).toHaveBeenLastCalledWith(14, 12, 10, 5, 4, 3, false);
+    expect(clientIdReads).toBeLessThanOrEqual(20);
+
+    clientIdReads = 0;
+    for (let tick = 0; tick < 59; tick += 1) {
+      follower.tick(view, model);
+    }
+    expect(clientIdReads).toBe(0);
+    expect(setLookAt).toHaveBeenCalledOnce();
+  });
 });

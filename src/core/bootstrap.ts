@@ -32,7 +32,7 @@ import {
   CvatV2RuntimeAdapter,
   RuntimeManager,
 } from '../integration/cvat/runtime';
-import type { CameraPresetAction } from '../shared/constants';
+import { type CameraPresetAction, CVAT_DOM_SELECTORS } from '../shared/constants';
 import type { EnhancerConfig, PartialEnhancerConfig } from '../shared/types';
 import { useEnhancerUiStore } from '../ui/settings/store';
 
@@ -102,17 +102,25 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   } catch {
     /* Keep default when settings are unavailable. */
   }
+  const processedEarlyEvents = new WeakSet<KeyboardEvent>();
   const onEarlyZoomKeyCapture = (event: KeyboardEvent): void => {
-    const keyboardFlag = document.documentElement.getAttribute('data-meow-ortho-keyboard');
-    if (keyboardFlag === '0' || (keyboardFlag === null && !savedKeyboardEnabled)) return;
-    const code = resolveNudgeKeyCode(event);
-    if (!code || event.ctrlKey || event.altKey || event.metaKey) {
+    if (processedEarlyEvents.has(event)) {
       return;
     }
+    processedEarlyEvents.add(event);
+    if (earlyKeysSuspended || event.ctrlKey || event.altKey || event.metaKey) {
+      return;
+    }
+    const code = resolveNudgeKeyCode(event);
+    if (!code) {
+      return;
+    }
+    const keyboardFlag = document.documentElement.getAttribute('data-meow-ortho-keyboard');
+    if (keyboardFlag === '0' || (keyboardFlag === null && !savedKeyboardEnabled)) return;
     if (isEditableEventTarget(event.target)) {
       return;
     }
-    if (!earlyKeysSuspended && detectHoveredOrthoView(document)) {
+    if (detectHoveredOrthoView(document)) {
       event.preventDefault();
       event.stopPropagation();
     }
@@ -192,8 +200,13 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
   featureRegistry.register(new ShortcutsFeature(commandRegistry, window));
   featureRegistry.register(new PresetsFeature(configManager));
 
+  let lastPerspectiveEl: Element | null = document.querySelector(
+    CVAT_DOM_SELECTORS.PERSPECTIVE_WRAPPER
+  );
+
   const syncAll = async () => {
     currentRoute = runtimeDetector.detectRouteContext();
+    lastPerspectiveEl = document.querySelector(CVAT_DOM_SELECTORS.PERSPECTIVE_WRAPPER);
     currentConfig = await configManager.resolveEffectiveConfig(getScopeContext());
     const runtimeSnapshot = await runtimeManager.refresh();
     const presets = await configManager.getPresets();
@@ -283,7 +296,33 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
 
   // Observe SPA DOM transitions to detect when user enters/exits a 3D annotation job
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  lifecycle.observeMutations(document.documentElement, { childList: true, subtree: true }, () => {
+  let routeCheckRafId: number | null = null;
+  let routeCheckQueued = false;
+
+  const runCoalescedRouteCheck = (): void => {
+    routeCheckQueued = false;
+    routeCheckRafId = null;
+    if (lifecycle.isDisposed()) {
+      return;
+    }
+    // O(1) fast-path inside an active 3D workspace: avoid querySelector and URL parsing
+    // when CVAT mutates 100,000 sidebar cards on the same pathname.
+    if (
+      window.location.pathname === currentRoute.pathname &&
+      currentRoute.is3DWorkspace &&
+      lastPerspectiveEl?.isConnected
+    ) {
+      return;
+    }
+
+    lastPerspectiveEl = document.querySelector(CVAT_DOM_SELECTORS.PERSPECTIVE_WRAPPER);
+    if (
+      window.location.pathname === currentRoute.pathname &&
+      Boolean(lastPerspectiveEl) === currentRoute.is3DWorkspace
+    ) {
+      return;
+    }
+
     removeLegacyFloatingHost();
     const nextRoute = runtimeDetector.detectRouteContext();
     if (
@@ -295,8 +334,25 @@ export async function bootstrapContentExtension(): Promise<BootstrapController> 
         void syncAll();
       }, 250);
     }
+  };
+
+  lifecycle.observeMutations(document.documentElement, { childList: true, subtree: true }, () => {
+    if (routeCheckQueued) {
+      return;
+    }
+    routeCheckQueued = true;
+    if (typeof window.requestAnimationFrame === 'function') {
+      routeCheckRafId = window.requestAnimationFrame(runCoalescedRouteCheck);
+    } else {
+      queueMicrotask(runCoalescedRouteCheck);
+    }
   });
   lifecycle.registerCleanup(() => {
+    if (routeCheckRafId !== null && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(routeCheckRafId);
+      routeCheckRafId = null;
+    }
+    routeCheckQueued = false;
     if (debounceTimer) clearTimeout(debounceTimer);
   });
 

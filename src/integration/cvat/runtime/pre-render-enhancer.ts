@@ -20,8 +20,12 @@ import {
   type WorkspaceFeatureOptions,
 } from './workspace-feature-options';
 import type { GuideMeshLike } from './cuboid-base-guide';
-import { deferHiddenOrientationArrowUpdates } from './hidden-orientation-arrows';
+import {
+  deferHiddenCuboidMeshUpdates,
+  deferHiddenOrientationArrowUpdates,
+} from './hidden-orientation-arrows';
 import { showMeowToast } from './meow-toast';
+import { isNumericClientIdName } from './state-lookup';
 
 export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
   readonly whiteBackground: boolean;
@@ -524,20 +528,45 @@ export function computeHueSeparationDegrees(
   return diff > 180 ? 360 - diff : diff;
 }
 
+const CUBOID_VIEW_KEYS = ['perspective', 'top', 'side', 'front'] as const;
+
+function isHexCharCode(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+}
+
+function normalizeHex6Color(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const clean = raw.length === 7 || raw.length === 6 ? raw : raw.trim();
+  const hasHash = clean.length === 7 && clean.charCodeAt(0) === 35;
+  if (!hasHash && clean.length !== 6) {
+    return undefined;
+  }
+  const offset = hasHash ? 1 : 0;
+  for (let i = 0; i < 6; i += 1) {
+    if (!isHexCharCode(clean.charCodeAt(offset + i))) {
+      return undefined;
+    }
+  }
+  return hasHash ? clean : `#${clean}`;
+}
+
 /**
  * Extracts the native CVAT Label color of a 3D cuboid box (`data.labelColor` or `state.label.color`).
- * Also checks `cuboid.perspective.material.color` as fallback if labelColor is not directly populated.
+ * Prioritizes `entry.data` fields before touching `entry.state` getters, and checks
+ * `cuboid.perspective.material.color` as fallback if labelColor is not directly populated.
  */
 export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): string | undefined {
-  const stateLabelColor = (
-    entry?.state as { label?: { color?: string }; color?: string } | undefined
-  )?.label?.color;
+  const dataLabelHex = normalizeHex6Color(entry?.data?.labelColor);
+  if (dataLabelHex) {
+    return dataLabelHex;
+  }
 
-  for (const labelCandidate of [entry?.data?.labelColor, stateLabelColor]) {
-    if (typeof labelCandidate === 'string' && /^#?[0-9a-fA-F]{6}$/.test(labelCandidate.trim())) {
-      const clean = labelCandidate.trim();
-      return clean.startsWith('#') ? clean : `#${clean}`;
-    }
+  const stateObj = entry?.state as { label?: { color?: string }; color?: string } | undefined;
+  const stateLabelHex = normalizeHex6Color(stateObj?.label?.color);
+  if (stateLabelHex) {
+    return stateLabelHex;
   }
 
   const meshColor = entry?.cuboid?.perspective?.material?.color;
@@ -553,14 +582,11 @@ export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): str
     return normalizedRgbToHex(meshColor.r, meshColor.g, meshColor.b);
   }
 
-  const stateColor = (entry?.state as { color?: string } | undefined)?.color;
-  for (const c of [entry?.data?.color, stateColor, entry?.data?.groupColor]) {
-    if (typeof c === 'string' && /^#?[0-9a-fA-F]{6}$/.test(c.trim())) {
-      const clean = c.trim();
-      return clean.startsWith('#') ? clean : `#${clean}`;
-    }
-  }
-  return undefined;
+  return (
+    normalizeHex6Color(entry?.data?.color) ??
+    normalizeHex6Color(stateObj?.color) ??
+    normalizeHex6Color(entry?.data?.groupColor)
+  );
 }
 
 /**
@@ -570,19 +596,13 @@ export function resolveRenderedCuboidColorHex(entry?: CvatDrawnObjectEntry): str
  * destroy CVAT's white/configured `outlinedBorders`).
  */
 export function ensureCuboidKeepsLabelColor(entry?: CvatDrawnObjectEntry): string | undefined {
-  const stateLabelColor = (entry?.state as { label?: { color?: string } } | undefined)?.label
-    ?.color;
-  const rawLabelColor = entry?.data?.labelColor ?? stateLabelColor;
   const labelColor =
-    typeof rawLabelColor === 'string' && /^#?[0-9a-fA-F]{6}$/.test(rawLabelColor.trim())
-      ? rawLabelColor.trim().startsWith('#')
-        ? rawLabelColor.trim()
-        : `#${rawLabelColor.trim()}`
-      : undefined;
+    normalizeHex6Color(entry?.data?.labelColor) ??
+    normalizeHex6Color((entry?.state as { label?: { color?: string } } | undefined)?.label?.color);
 
   if (labelColor && entry?.cuboid) {
-    for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
-      const matColor = entry.cuboid[viewKey]?.material?.color;
+    for (let v = 0; v < CUBOID_VIEW_KEYS.length; v += 1) {
+      const matColor = entry.cuboid[CUBOID_VIEW_KEYS[v]!]?.material?.color;
       if (matColor && typeof matColor.set === 'function') {
         matColor.set(labelColor);
       }
@@ -594,55 +614,45 @@ export function ensureCuboidKeepsLabelColor(entry?: CvatDrawnObjectEntry): strin
 
 /**
  * Persistent per-session / per-background cache mapping each cuboid's `clientID` (or `serverID`)
- * to its assigned internal point cloud RGB color (`[r, g, b]`), so that switching across frames
- * (Next/Prev frame) ALWAYS renders the exact same cached point color for the same box ID.
+ * to its assigned internal point cloud RGB color (`[r, g, b]`), bounded to prevent unbounded
+ * memory growth on multi-hour 100k-box sessions.
  */
+const MAX_COLOR_CACHE_ENTRIES = 250_000;
+const MAX_LABEL_PALETTE_CACHE_ENTRIES = 512;
 const cuboidPointColorCacheWhiteBg = new Map<number, [number, number, number]>();
 const cuboidPointColorCacheBlackBg = new Map<number, [number, number, number]>();
+const labelPaletteChoiceCache = new Map<string, readonly [number, number, number][]>();
+
+function setBoundedColorCache(
+  cache: Map<number, [number, number, number]>,
+  stableId: number,
+  color: [number, number, number]
+): void {
+  if (cache.size >= MAX_COLOR_CACHE_ENTRIES) {
+    cache.clear();
+  }
+  cache.set(stableId, color);
+}
 
 export function clearCuboidPointColorCache(): void {
   cuboidPointColorCacheWhiteBg.clear();
   cuboidPointColorCacheBlackBg.clear();
+  labelPaletteChoiceCache.clear();
 }
 
-export function getDistinctCuboidColor(
-  clientID: number,
-  fallbackIndex: number,
-  whiteBackground: boolean,
-  labelColorHex?: string
-): [number, number, number] {
-  const hasStableId = Number.isFinite(clientID) && clientID >= 0;
-  const stableId = hasStableId ? Math.floor(clientID) : -1;
-  const cache = whiteBackground ? cuboidPointColorCacheWhiteBg : cuboidPointColorCacheBlackBg;
-
-  if (hasStableId) {
-    const cached = cache.get(stableId);
-    if (cached) {
-      return [cached[0], cached[1], cached[2]];
-    }
+function getOrBuildLabelPaletteChoices(
+  normalizedLabelHex: string,
+  whiteBackground: boolean
+): readonly [number, number, number][] {
+  const cacheKey = `${whiteBackground ? 'W' : 'B'}:${normalizedLabelHex.toLowerCase()}`;
+  const existing = labelPaletteChoiceCache.get(cacheKey);
+  if (existing) {
+    return existing;
   }
 
   const palette = whiteBackground ? WHITE_BG_BOX_PALETTE : BLACK_BG_BOX_PALETTE;
   const bgRgb: readonly [number, number, number] = whiteBackground ? [1, 1, 1] : [0, 0, 0];
-  const idNum = hasStableId ? stableId : fallbackIndex;
-  // Knuth multiplicative hash for pseudo-random per-cuboid color distribution
-  const hashedIndex = Math.abs((idNum * 2654435761) >>> 0) % palette.length;
-
-  const hasValidLabelColor =
-    typeof labelColorHex === 'string' && /^#?[0-9a-fA-F]{6}$/.test(labelColorHex.trim());
-  if (!hasValidLabelColor) {
-    const entry = palette[hashedIndex]!;
-    const chosen: [number, number, number] = [entry[0], entry[1], entry[2]];
-    if (hasStableId) {
-      cache.set(stableId, chosen);
-    }
-    return [chosen[0], chosen[1], chosen[2]];
-  }
-
-  const labelRgb = parseHexColorToNormalizedRgb(labelColorHex!);
-  // CVAT renders the cuboid mesh with translucent fill blended over the background (`opacity ~ 0.35..0.5`),
-  // so points inside the box must contrast strongly with BOTH the pure background AND the label-tinted box interior,
-  // AND belong to a distinctly different hue family (>= 65 deg hue angle separation) from the box color!
+  const labelRgb = parseHexColorToNormalizedRgb(normalizedLabelHex);
   const blendedInteriorRgb: readonly [number, number, number] = [
     bgRgb[0] * 0.55 + labelRgb[0] * 0.45,
     bgRgb[1] * 0.55 + labelRgb[1] * 0.45,
@@ -653,49 +663,102 @@ export function getDistinctCuboidColor(
   const MIN_HUE_SEPARATION_DEG = 65;
   const MIN_BG_CONTRAST_RATIO = 4.2;
 
-  let bestEntry = palette[hashedIndex]!;
-  let bestScore = -Infinity;
+  const choices: [number, number, number][] = new Array(palette.length);
+  for (let hashedIndex = 0; hashedIndex < palette.length; hashedIndex += 1) {
+    let bestEntry = palette[hashedIndex]!;
+    let bestScore = -Infinity;
+    let locked: readonly [number, number, number] | null = null;
 
-  for (let offset = 0; offset < palette.length; offset += 1) {
-    const candidate = palette[(hashedIndex + offset) % palette.length]!;
-    const boxDist = computePerceptualColorDistance(candidate, labelRgb);
-    const hueDiff = computeHueSeparationDegrees(candidate, labelRgb);
-    const interiorDist = computePerceptualColorDistance(candidate, blendedInteriorRgb);
-    const interiorContrast = computeWcagContrastRatio(candidate, blendedInteriorRgb);
-    const bgContrast = computeWcagContrastRatio(candidate, bgRgb);
+    for (let offset = 0; offset < palette.length; offset += 1) {
+      const candidate = palette[(hashedIndex + offset) % palette.length]!;
+      const boxDist = computePerceptualColorDistance(candidate, labelRgb);
+      const hueDiff = computeHueSeparationDegrees(candidate, labelRgb);
+      const interiorDist = computePerceptualColorDistance(candidate, blendedInteriorRgb);
+      const interiorContrast = computeWcagContrastRatio(candidate, blendedInteriorRgb);
+      const bgContrast = computeWcagContrastRatio(candidate, bgRgb);
 
-    // If the candidate has strong perceptual distance, distinct hue family (>= 65°),
-    // and clear contrast against both background and the box's translucent interior, lock & cache it.
-    if (
-      boxDist >= MIN_BOX_PERCEPTUAL_DIST &&
-      hueDiff >= MIN_HUE_SEPARATION_DEG &&
-      bgContrast >= MIN_BG_CONTRAST_RATIO &&
-      interiorDist >= 0.35
-    ) {
-      const chosen: [number, number, number] = [candidate[0], candidate[1], candidate[2]];
-      if (hasStableId) {
-        cache.set(stableId, chosen);
+      if (
+        boxDist >= MIN_BOX_PERCEPTUAL_DIST &&
+        hueDiff >= MIN_HUE_SEPARATION_DEG &&
+        bgContrast >= MIN_BG_CONTRAST_RATIO &&
+        interiorDist >= 0.35
+      ) {
+        locked = candidate;
+        break;
       }
-      return [chosen[0], chosen[1], chosen[2]];
+
+      const score =
+        boxDist * 4.5 +
+        (hueDiff / 180) * 3.0 +
+        interiorDist * 1.5 +
+        Math.min(bgContrast, 10) * 0.1 +
+        Math.min(interiorContrast, 10) * 0.1;
+      if (score > bestScore) {
+        bestScore = score;
+        bestEntry = candidate;
+      }
     }
 
-    const score =
-      boxDist * 4.5 +
-      (hueDiff / 180) * 3.0 +
-      interiorDist * 1.5 +
-      Math.min(bgContrast, 10) * 0.1 +
-      Math.min(interiorContrast, 10) * 0.1;
-    if (score > bestScore) {
-      bestScore = score;
-      bestEntry = candidate;
-    }
+    const picked = locked ?? bestEntry;
+    choices[hashedIndex] = [picked[0], picked[1], picked[2]];
   }
 
-  const chosen: [number, number, number] = [bestEntry[0], bestEntry[1], bestEntry[2]];
+  if (labelPaletteChoiceCache.size >= MAX_LABEL_PALETTE_CACHE_ENTRIES) {
+    labelPaletteChoiceCache.clear();
+  }
+  labelPaletteChoiceCache.set(cacheKey, choices);
+  return choices;
+}
+
+function getDistinctCuboidColorRef(
+  clientID: number,
+  fallbackIndex: number,
+  whiteBackground: boolean,
+  labelColorHex?: string
+): readonly [number, number, number] {
+  const hasStableId = Number.isFinite(clientID) && clientID >= 0;
+  const stableId = hasStableId ? Math.floor(clientID) : -1;
+  const cache = whiteBackground ? cuboidPointColorCacheWhiteBg : cuboidPointColorCacheBlackBg;
+
   if (hasStableId) {
-    cache.set(stableId, chosen);
+    const cached = cache.get(stableId);
+    if (cached) {
+      return cached;
+    }
   }
-  return [chosen[0], chosen[1], chosen[2]];
+
+  const palette = whiteBackground ? WHITE_BG_BOX_PALETTE : BLACK_BG_BOX_PALETTE;
+  const idNum = hasStableId ? stableId : fallbackIndex;
+  // Knuth multiplicative hash for pseudo-random per-cuboid color distribution
+  const hashedIndex = Math.abs((idNum * 2654435761) >>> 0) % palette.length;
+
+  const normalizedLabelHex = normalizeHex6Color(labelColorHex);
+  if (!normalizedLabelHex) {
+    const entry = palette[hashedIndex]!;
+    const chosen: [number, number, number] = [entry[0], entry[1], entry[2]];
+    if (hasStableId) {
+      setBoundedColorCache(cache, stableId, chosen);
+    }
+    return chosen;
+  }
+
+  const choices = getOrBuildLabelPaletteChoices(normalizedLabelHex, whiteBackground);
+  const picked = choices[hashedIndex]!;
+  const chosen: [number, number, number] = [picked[0], picked[1], picked[2]];
+  if (hasStableId) {
+    setBoundedColorCache(cache, stableId, chosen);
+  }
+  return chosen;
+}
+
+export function getDistinctCuboidColor(
+  clientID: number,
+  fallbackIndex: number,
+  whiteBackground: boolean,
+  labelColorHex?: string
+): [number, number, number] {
+  const rgb = getDistinctCuboidColorRef(clientID, fallbackIndex, whiteBackground, labelColorHex);
+  return [rgb[0], rgb[1], rgb[2]];
 }
 
 export function normalizedRgbToHex(r: number, g: number, b: number): string {
@@ -743,31 +806,61 @@ export function compileOrientedCuboids(
   whiteBackground = false
 ): OrientedBoxBounds[] {
   const result: OrientedBoxBounds[] = [];
+  if (!drawnObjects) {
+    return result;
+  }
+  const colorCache = whiteBackground ? cuboidPointColorCacheWhiteBg : cuboidPointColorCacheBlackBg;
   let boxIdx = 0;
 
-  for (const entry of Object.values(drawnObjects)) {
-    const data = entry?.data;
-    const state = entry?.state;
-    const hidden = Boolean(data?.hidden ?? state?.hidden);
-    const outside = Boolean(data?.outside ?? state?.outside);
-    if (hidden || outside) {
+  for (const key in drawnObjects) {
+    if (!Object.hasOwn(drawnObjects, key)) {
+      continue;
+    }
+    const entry = drawnObjects[key];
+    if (!entry) {
+      continue;
+    }
+    const data = entry.data;
+    if (data?.hidden === true || data?.outside === true) {
+      continue;
+    }
+    const rawDataHidden = data?.hidden;
+    const rawDataOutside = data?.outside;
+    const needStateFlags =
+      rawDataHidden === undefined ||
+      rawDataHidden === null ||
+      rawDataOutside === undefined ||
+      rawDataOutside === null;
+    const state = needStateFlags ? entry.state : undefined;
+    if (
+      needStateFlags &&
+      (Boolean(rawDataHidden ?? state?.hidden) || Boolean(rawDataOutside ?? state?.outside))
+    ) {
       continue;
     }
 
-    const rawPoints =
-      Array.isArray(data?.points) && data.points.length >= 9
-        ? data.points
-        : Array.isArray(state?.points) && state.points.length >= 9
-          ? state.points
-          : null;
-
-    const perspMesh = entry?.cuboid?.perspective;
-    for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
-      const meshMat = entry?.cuboid?.[viewKey]?.material;
-      if (meshMat && typeof meshMat === 'object') {
-        meshMat.depthWrite = false;
+    const dataPts = data?.points;
+    let rawPoints: readonly number[] | null = null;
+    if (Array.isArray(dataPts) && dataPts.length >= 9) {
+      rawPoints = dataPts;
+    } else {
+      const st = state ?? entry.state;
+      if (Array.isArray(st?.points) && st.points.length >= 9) {
+        rawPoints = st.points;
       }
     }
+
+    const cuboid = entry.cuboid;
+    if (cuboid) {
+      for (let v = 0; v < CUBOID_VIEW_KEYS.length; v += 1) {
+        const meshMat = cuboid[CUBOID_VIEW_KEYS[v]!]?.material;
+        if (meshMat && typeof meshMat === 'object') {
+          meshMat.depthWrite = false;
+        }
+      }
+    }
+
+    const perspMesh = cuboid?.perspective;
     let cx = 0;
     let cy = 0;
     let cz = 0;
@@ -805,7 +898,15 @@ export function compileOrientedCuboids(
     // NaN extents/rotations would make every point test pass (NaN comparisons are false).
     if (
       !(sx > 0 && sy > 0 && sz > 0) ||
-      ![cx, cy, cz, rx, ry, rz, sx, sy, sz].every(Number.isFinite)
+      !Number.isFinite(cx) ||
+      !Number.isFinite(cy) ||
+      !Number.isFinite(cz) ||
+      !Number.isFinite(rx) ||
+      !Number.isFinite(ry) ||
+      !Number.isFinite(rz) ||
+      !Number.isFinite(sx) ||
+      !Number.isFinite(sy) ||
+      !Number.isFinite(sz)
     ) {
       continue;
     }
@@ -814,41 +915,68 @@ export function compileOrientedCuboids(
     const hy = sy * 0.5;
     const hz = sz * 0.5;
 
-    // Three.js default Euler order is 'XYZ': R = Rx * Ry * Rz
-    const cxRot = Math.cos(rx);
-    const sxRot = Math.sin(rx);
-    const cyRot = Math.cos(ry);
-    const syRot = Math.sin(ry);
+    // Three.js default Euler order is 'XYZ': R = Rx * Ry * Rz.
+    // Fast-path common yaw-only 3D LiDAR cuboids (rx === 0 && ry === 0) to skip 4 trig calls.
+    let m00: number;
+    let m01: number;
+    let m02: number;
+    let m10: number;
+    let m11: number;
+    let m12: number;
+    let m20: number;
+    let m21: number;
+    let m22: number;
+
     const czRot = Math.cos(rz);
     const szRot = Math.sin(rz);
+    if (rx === 0 && ry === 0) {
+      m00 = czRot;
+      m01 = -szRot;
+      m02 = 0;
+      m10 = szRot;
+      m11 = czRot;
+      m12 = 0;
+      m20 = 0;
+      m21 = 0;
+      m22 = 1;
+    } else {
+      const cxRot = Math.cos(rx);
+      const sxRot = Math.sin(rx);
+      const cyRot = Math.cos(ry);
+      const syRot = Math.sin(ry);
 
-    const m00 = cyRot * czRot;
-    const m01 = -cyRot * szRot;
-    const m02 = syRot;
+      m00 = cyRot * czRot;
+      m01 = -cyRot * szRot;
+      m02 = syRot;
 
-    const m10 = sxRot * syRot * czRot + cxRot * szRot;
-    const m11 = -sxRot * syRot * szRot + cxRot * czRot;
-    const m12 = -sxRot * cyRot;
+      m10 = sxRot * syRot * czRot + cxRot * szRot;
+      m11 = -sxRot * syRot * szRot + cxRot * czRot;
+      m12 = -sxRot * cyRot;
 
-    const m20 = -cxRot * syRot * czRot + sxRot * szRot;
-    const m21 = cxRot * syRot * szRot + sxRot * czRot;
-    const m22 = cxRot * cyRot;
+      m20 = -cxRot * syRot * czRot + sxRot * szRot;
+      m21 = cxRot * syRot * szRot + sxRot * czRot;
+      m22 = cxRot * cyRot;
+    }
 
     // AABB conservative half-extents for fast rejection before OBB dot product
     const aabbX = Math.abs(m00) * hx + Math.abs(m01) * hy + Math.abs(m02) * hz;
     const aabbY = Math.abs(m10) * hx + Math.abs(m11) * hy + Math.abs(m12) * hz;
     const aabbZ = Math.abs(m20) * hx + Math.abs(m21) * hy + Math.abs(m22) * hz;
 
-    const clientID = Number(data?.clientID ?? state?.clientID ?? boxIdx);
+    const rawId = data?.clientID ?? (state ?? entry.state)?.clientID ?? boxIdx;
+    const clientID = Number(rawId);
+    const hasStableId = Number.isFinite(clientID) && clientID >= 0;
+    const stableId = hasStableId ? Math.floor(clientID) : -1;
+
     // NEVER touch or mutate `entry.cuboid` colors/materials here!
-    // Only READ the box's current color to compute a contrasting color for the 3D points inside it.
-    const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry);
-    const [r, g, b] = getDistinctCuboidColor(
-      clientID,
-      boxIdx,
-      whiteBackground,
-      renderedBoxColorHex
-    );
+    // Check per-clientID cache BEFORE reading/parsing label colors, and avoid tuple cloning.
+    let rgb: readonly [number, number, number] | undefined = hasStableId
+      ? colorCache.get(stableId)
+      : undefined;
+    if (!rgb) {
+      const renderedBoxColorHex = resolveRenderedCuboidColorHex(entry);
+      rgb = getDistinctCuboidColorRef(clientID, boxIdx, whiteBackground, renderedBoxColorHex);
+    }
     boxIdx += 1;
 
     // Transpose of R (R^T) maps world delta (p - c) into cuboid local frame
@@ -875,9 +1003,9 @@ export function compileOrientedCuboids(
       maxY: cy + aabbY,
       minZ: cz - aabbZ,
       maxZ: cz + aabbZ,
-      r,
-      g,
-      b,
+      r: rgb[0],
+      g: rgb[1],
+      b: rgb[2],
     });
   }
 
@@ -885,26 +1013,129 @@ export function compileOrientedCuboids(
 }
 
 /**
- * IDs plus outside/hidden flags of drawn objects. Toggling Outside/Hidden on the current frame
- * changes which cuboids color points, so it must invalidate the point colors like an ID change.
+ * O(N) single-pass, zero-array-allocation, order-independent visibility token over `drawnObjects`.
+ * Combines `totalCount`, `visibleCount`, and two avalanche-mixed 32-bit commutative accumulators
+ * into a compact fixed-size string (~32 chars) instead of sorting 100k strings into a ~1 MB buffer.
+ */
+export function computeDrawnObjectsVisibilityToken(
+  drawnObjects?: Record<number, CvatDrawnObjectEntry> | null
+): string {
+  if (!drawnObjects) {
+    return '';
+  }
+  let totalCount = 0;
+  let visibleCount = 0;
+  let sumLo = 0;
+  let xorHi = 0;
+  let sumHi = 0;
+
+  for (const id in drawnObjects) {
+    if (!Object.hasOwn(drawnObjects, id)) {
+      continue;
+    }
+    const entry = drawnObjects[id];
+    const data = entry?.data;
+    const rawHidden = data?.hidden;
+    const rawOutside = data?.outside;
+    const hidden = Boolean(
+      rawHidden !== undefined && rawHidden !== null ? rawHidden : entry?.state?.hidden
+    );
+    const outside = Boolean(
+      rawOutside !== undefined && rawOutside !== null ? rawOutside : entry?.state?.outside
+    );
+    const flags = (hidden ? 1 : 0) | (outside ? 2 : 0);
+    if (flags === 0) {
+      visibleCount += 1;
+    }
+    totalCount += 1;
+
+    let h1 = (0x811c9dc5 ^ ((flags + 1) * 0x9e3779b1)) >>> 0;
+    let h2 = (0x9e3779b9 ^ ((flags + 5) * 0x85ebca6b)) >>> 0;
+    const idLen = id.length;
+    for (let i = 0; i < idLen; i += 1) {
+      const ch = id.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ (ch + ((i + 1) << 8)), 0x85ebca6b) >>> 0;
+    }
+
+    h1 ^= h1 >>> 16;
+    h1 = Math.imul(h1, 0x85ebca6b) >>> 0;
+    h1 ^= h1 >>> 13;
+    h1 = Math.imul(h1, 0xc2b2ae35) >>> 0;
+    h1 = (h1 ^ (h1 >>> 16)) >>> 0;
+
+    h2 ^= h2 >>> 16;
+    h2 = Math.imul(h2, 0xc2b2ae35) >>> 0;
+    h2 ^= h2 >>> 13;
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+    h2 = (h2 ^ (h2 >>> 16)) >>> 0;
+
+    sumLo = (sumLo + h1) | 0;
+    xorHi = (xorHi ^ h2) >>> 0;
+    sumHi = (sumHi + h2) | 0;
+  }
+
+  if (totalCount === 0) {
+    return '';
+  }
+  const loHex = (sumLo >>> 0).toString(16).padStart(8, '0');
+  const hiHex = ((xorHi ^ (sumHi >>> 0)) >>> 0).toString(16).padStart(8, '0');
+  return `${totalCount}:${visibleCount}:${loHex}:${hiHex}`;
+}
+
+/**
+ * IDs plus outside/hidden flags of drawn objects. Retained for backwards compatibility, avoiding
+ * `Object.entries` tuple allocations and skipping `.sort()` when keys are already ordered.
  */
 export function drawnObjectsVisibilitySignature(
   drawnObjects?: Record<number, CvatDrawnObjectEntry> | null
 ): string {
   if (!drawnObjects) return '';
   const parts: string[] = [];
-  for (const [id, entry] of Object.entries(drawnObjects)) {
-    const hidden = Boolean(entry?.data?.hidden ?? entry?.state?.hidden);
-    const outside = Boolean(entry?.data?.outside ?? entry?.state?.outside);
-    parts.push(hidden || outside ? `${id}:${outside ? 'o' : ''}${hidden ? 'h' : ''}` : id);
+  let prevPart: string | null = null;
+  let needsSort = false;
+
+  for (const id in drawnObjects) {
+    if (!Object.hasOwn(drawnObjects, id)) {
+      continue;
+    }
+    const entry = drawnObjects[id];
+    const data = entry?.data;
+    const rawHidden = data?.hidden;
+    const rawOutside = data?.outside;
+    const hidden = Boolean(
+      rawHidden !== undefined && rawHidden !== null ? rawHidden : entry?.state?.hidden
+    );
+    const outside = Boolean(
+      rawOutside !== undefined && rawOutside !== null ? rawOutside : entry?.state?.outside
+    );
+    const part = hidden || outside ? `${id}:${outside ? 'o' : ''}${hidden ? 'h' : ''}` : id;
+    if (!needsSort && prevPart !== null && part < prevPart) {
+      needsSort = true;
+    }
+    prevPart = part;
+    parts.push(part);
   }
-  return parts.sort().join(',');
+  if (needsSort) {
+    parts.sort();
+  }
+  return parts.join(',');
+}
+
+export interface BoxSpatialBounds {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minY: number;
+  readonly maxY: number;
+  readonly minZ: number;
+  readonly maxZ: number;
 }
 
 /**
- * Uniform XY grid over compiled cuboids (CSR layout). With hundreds of boxes, the union AABB
- * covers most of the scan, so a linear box loop per point costs O(points × boxes) and stalls
- * every frame change. The grid limits each point to the few boxes overlapping its cell.
+ * Two-level hierarchical XY spatial index over compiled cuboids (CSR layout):
+ * - Level 1 (Fine grid up to 512x512, min cell 0.75m): indexes compact cuboids spanning <= 32 fine cells.
+ * - Level 2 (Coarse 32x32 grid): indexes medium/large rotated cuboids spanning > 32 fine cells and <= 32 coarse cells.
+ * - Overflow array: holds huge cuboids (> 32 coarse cells), grid-boundary straddlers, and distant coordinate outliers.
  */
 export interface BoxSpatialIndex {
   readonly minX: number;
@@ -913,79 +1144,639 @@ export interface BoxSpatialIndex {
   readonly maxY: number;
   readonly minZ: number;
   readonly maxZ: number;
+  readonly gridMinX: number;
+  readonly gridMaxX: number;
+  readonly gridMinY: number;
+  readonly gridMaxY: number;
   readonly invCell: number;
   readonly cols: number;
   readonly rows: number;
   readonly cellStart: Int32Array;
   readonly cellItems: Int32Array;
+  readonly cellMinZ: Float32Array;
+  readonly cellMaxZ: Float32Array;
+  readonly boxAabb6: Float64Array;
+  readonly coarseInvCellX: number;
+  readonly coarseInvCellY: number;
+  readonly coarseCellStart: Int32Array;
+  readonly coarseCellItems: Int32Array;
+  readonly coarseMinX: number;
+  readonly coarseMaxX: number;
+  readonly coarseMinY: number;
+  readonly coarseMaxY: number;
+  readonly coarseMinZ: number;
+  readonly coarseMaxZ: number;
+  readonly overflowBoxes: Int32Array;
+  readonly hugeInteriorCount: number;
+  readonly exteriorScanLimit: number;
+  readonly overflowMinX: number;
+  readonly overflowMaxX: number;
+  readonly overflowMinY: number;
+  readonly overflowMaxY: number;
+  readonly overflowMinZ: number;
+  readonly overflowMaxZ: number;
+  readonly hugeMinX: number;
+  readonly hugeMaxX: number;
+  readonly hugeMinY: number;
+  readonly hugeMaxY: number;
+  readonly hugeMinZ: number;
+  readonly hugeMaxZ: number;
 }
 
-const BOX_GRID_MAX_CELLS_PER_AXIS = 256;
-const BOX_GRID_MIN_CELL_SIZE = 1.5;
+const BOX_GRID_MAX_CELLS_PER_AXIS = 512;
+const BOX_GRID_MIN_CELL_SIZE = 0.75;
+const COARSE_GRID_SIDE = 64;
+const COARSE_GRID_CELLS = COARSE_GRID_SIDE * COARSE_GRID_SIDE;
+const MAX_GRID_CELLS_PER_BOX = 32;
+const OUTLIER_DETECTION_MIN_BOXES = 64;
+const OUTLIER_SPAN_THRESHOLD_METERS = 600;
+const CORE_SAMPLE_CAP = 512;
+const EMPTY_INT32_ARRAY = new Int32Array(0);
+const EMPTY_COARSE_START = new Int32Array(COARSE_GRID_CELLS + 1);
+
+const sharedSampleX = new Float64Array(CORE_SAMPLE_CAP);
+const sharedSampleY = new Float64Array(CORE_SAMPLE_CAP);
+let sharedBoxX0 = new Int16Array(0);
+let sharedBoxX1 = new Int16Array(0);
+let sharedBoxY0 = new Int16Array(0);
+let sharedBoxY1 = new Int16Array(0);
+let sharedGridCursor = new Int32Array(0);
+const sharedCoarseCursor = new Int32Array(COARSE_GRID_CELLS);
+
 export const POINT_OUTSIDE_BOXES = -1;
 export const POINT_IN_OVERLAP = -2;
 
-export function buildBoxSpatialIndex(boxes: readonly OrientedBoxBounds[]): BoxSpatialIndex | null {
+function selectCoreAxisWindow(
+  sorted: Float64Array,
+  rawMin: number,
+  rawMax: number
+): [number, number] {
+  if (rawMax - rawMin <= OUTLIER_SPAN_THRESHOLD_METERS) {
+    return [rawMin, rawMax];
+  }
+  const n = sorted.length;
+  const atQuantile = (q: number): number =>
+    sorted[Math.min(n - 1, Math.max(0, Math.floor((n - 1) * q)))]!;
+
+  for (const trim of [0.01, 0.02, 0.05, 0.1]) {
+    const lo = atQuantile(trim);
+    const hi = atQuantile(1 - trim);
+    if (hi - lo <= OUTLIER_SPAN_THRESHOLD_METERS) {
+      const pad = 25;
+      return [Math.max(rawMin, lo - pad), Math.min(rawMax, hi + pad)];
+    }
+  }
+
+  const lo98 = atQuantile(0.02);
+  const hi98 = atQuantile(0.98);
+  const pad = Math.max(25, (hi98 - lo98) * 0.05);
+  return [Math.max(rawMin, lo98 - pad), Math.min(rawMax, hi98 + pad)];
+}
+
+export function buildBoxSpatialIndex(
+  boxes: readonly OrientedBoxBounds[],
+  domainBounds?: BoxSpatialBounds | null
+): BoxSpatialIndex | null {
   const count = boxes.length;
   if (count === 0) return null;
+
+  const hasDomain = Boolean(
+    domainBounds &&
+    Number.isFinite(domainBounds.minX) &&
+    Number.isFinite(domainBounds.maxX) &&
+    Number.isFinite(domainBounds.minY) &&
+    Number.isFinite(domainBounds.maxY) &&
+    Number.isFinite(domainBounds.minZ) &&
+    Number.isFinite(domainBounds.maxZ) &&
+    domainBounds.minX <= domainBounds.maxX &&
+    domainBounds.minY <= domainBounds.maxY &&
+    domainBounds.minZ <= domainBounds.maxZ
+  );
+
+  const dMinX = hasDomain ? domainBounds!.minX : -Infinity;
+  const dMaxX = hasDomain ? domainBounds!.maxX : Infinity;
+  const dMinY = hasDomain ? domainBounds!.minY : -Infinity;
+  const dMaxY = hasDomain ? domainBounds!.maxY : Infinity;
+  const dMinZ = hasDomain ? domainBounds!.minZ : -Infinity;
+  const dMaxZ = hasDomain ? domainBounds!.maxZ : Infinity;
+
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
   let minZ = Infinity;
   let maxZ = -Infinity;
-  for (let b = 0; b < count; b += 1) {
-    const box = boxes[b]!;
-    if (box.minX < minX) minX = box.minX;
-    if (box.maxX > maxX) maxX = box.maxX;
-    if (box.minY < minY) minY = box.minY;
-    if (box.maxY > maxY) maxY = box.maxY;
-    if (box.minZ < minZ) minZ = box.minZ;
-    if (box.maxZ > maxZ) maxZ = box.maxZ;
-  }
-  if (![minX, maxX, minY, maxY, minZ, maxZ].every(Number.isFinite)) return null;
-  const spanX = maxX - minX;
-  const spanY = maxY - minY;
-  const cellSize = Math.max(
-    BOX_GRID_MIN_CELL_SIZE,
-    spanX / BOX_GRID_MAX_CELLS_PER_AXIS,
-    spanY / BOX_GRID_MAX_CELLS_PER_AXIS
-  );
-  const invCell = 1 / cellSize;
-  const cols = Math.min(BOX_GRID_MAX_CELLS_PER_AXIS, Math.floor(spanX * invCell) + 1);
-  const rows = Math.min(BOX_GRID_MAX_CELLS_PER_AXIS, Math.floor(spanY * invCell) + 1);
-  const cellOf = (value: number, origin: number, limit: number): number =>
-    Math.min(limit - 1, Math.max(0, Math.floor((value - origin) * invCell)));
+  let activeCount = 0;
+  let spanAccum = 0;
 
-  const cellStart = new Int32Array(cols * rows + 1);
   for (let b = 0; b < count; b += 1) {
     const box = boxes[b]!;
-    const x0 = cellOf(box.minX, minX, cols);
-    const x1 = cellOf(box.maxX, minX, cols);
-    const y0 = cellOf(box.minY, minY, rows);
-    const y1 = cellOf(box.maxY, minY, rows);
-    for (let gy = y0; gy <= y1; gy += 1) {
-      for (let gx = x0; gx <= x1; gx += 1) cellStart[gy * cols + gx + 1]! += 1;
+    if (hasDomain) {
+      if (
+        box.maxX < dMinX ||
+        box.minX > dMaxX ||
+        box.maxY < dMinY ||
+        box.minY > dMaxY ||
+        box.maxZ < dMinZ ||
+        box.minZ > dMaxZ
+      ) {
+        continue;
+      }
+      const bx0 = box.minX > dMinX ? box.minX : dMinX;
+      const bx1 = box.maxX < dMaxX ? box.maxX : dMaxX;
+      const by0 = box.minY > dMinY ? box.minY : dMinY;
+      const by1 = box.maxY < dMaxY ? box.maxY : dMaxY;
+      const bz0 = box.minZ > dMinZ ? box.minZ : dMinZ;
+      const bz1 = box.maxZ < dMaxZ ? box.maxZ : dMaxZ;
+      if (bx0 < minX) minX = bx0;
+      if (bx1 > maxX) maxX = bx1;
+      if (by0 < minY) minY = by0;
+      if (by1 > maxY) maxY = by1;
+      if (bz0 < minZ) minZ = bz0;
+      if (bz1 > maxZ) maxZ = bz1;
+      const sx = bx1 - bx0;
+      const sy = by1 - by0;
+      const maxDim = sx > sy ? sx : sy;
+      spanAccum += maxDim < 10 ? maxDim : 10;
+      activeCount += 1;
+    } else {
+      if (box.minX < minX) minX = box.minX;
+      if (box.maxX > maxX) maxX = box.maxX;
+      if (box.minY < minY) minY = box.minY;
+      if (box.maxY > maxY) maxY = box.maxY;
+      if (box.minZ < minZ) minZ = box.minZ;
+      if (box.maxZ > maxZ) maxZ = box.maxZ;
+      const sx = box.maxX - box.minX;
+      const sy = box.maxY - box.minY;
+      const maxDim = sx > sy ? sx : sy;
+      spanAccum += maxDim < 10 ? maxDim : 10;
+      activeCount += 1;
     }
   }
-  for (let c = 1; c < cellStart.length; c += 1) cellStart[c]! += cellStart[c - 1]!;
-  const cellItems = new Int32Array(cellStart[cellStart.length - 1]!);
-  const cursor = cellStart.slice(0, cols * rows);
-  for (let b = 0; b < count; b += 1) {
-    const box = boxes[b]!;
-    const x0 = cellOf(box.minX, minX, cols);
-    const x1 = cellOf(box.maxX, minX, cols);
-    const y0 = cellOf(box.minY, minY, rows);
-    const y1 = cellOf(box.maxY, minY, rows);
-    for (let gy = y0; gy <= y1; gy += 1) {
-      for (let gx = x0; gx <= x1; gx += 1) {
-        const cell = gy * cols + gx;
-        cellItems[cursor[cell]!] = b;
-        cursor[cell]! += 1;
+
+  if (
+    activeCount === 0 ||
+    !Number.isFinite(minX) ||
+    !Number.isFinite(maxX) ||
+    !Number.isFinite(minY) ||
+    !Number.isFinite(maxY) ||
+    !Number.isFinite(minZ) ||
+    !Number.isFinite(maxZ)
+  ) {
+    return null;
+  }
+
+  let gridMinX = minX;
+  let gridMaxX = maxX;
+  let gridMinY = minY;
+  let gridMaxY = maxY;
+
+  if (
+    activeCount >= OUTLIER_DETECTION_MIN_BOXES &&
+    (maxX - minX > OUTLIER_SPAN_THRESHOLD_METERS || maxY - minY > OUTLIER_SPAN_THRESHOLD_METERS)
+  ) {
+    const targetSamples = Math.min(activeCount, CORE_SAMPLE_CAP);
+    const sampleStep = activeCount / targetSamples;
+    let activeSeen = 0;
+    let nextTarget = 0;
+    let collected = 0;
+
+    for (let b = 0; b < count && collected < targetSamples; b += 1) {
+      const box = boxes[b]!;
+      if (
+        hasDomain &&
+        (box.maxX < dMinX ||
+          box.minX > dMaxX ||
+          box.maxY < dMinY ||
+          box.minY > dMaxY ||
+          box.maxZ < dMinZ ||
+          box.minZ > dMaxZ)
+      ) {
+        continue;
+      }
+      if (activeSeen >= Math.floor(nextTarget)) {
+        sharedSampleX[collected] = box.cx;
+        sharedSampleY[collected] = box.cy;
+        collected += 1;
+        nextTarget += sampleStep;
+      }
+      activeSeen += 1;
+    }
+
+    if (collected >= 16) {
+      const sortedX = sharedSampleX.subarray(0, collected);
+      const sortedY = sharedSampleY.subarray(0, collected);
+      sortedX.sort();
+      sortedY.sort();
+      const [winMinX, winMaxX] = selectCoreAxisWindow(sortedX, minX, maxX);
+      const [winMinY, winMaxY] = selectCoreAxisWindow(sortedY, minY, maxY);
+
+      let tightMinX = Infinity;
+      let tightMaxX = -Infinity;
+      let tightMinY = Infinity;
+      let tightMaxY = -Infinity;
+      for (let b = 0; b < count; b += 1) {
+        const box = boxes[b]!;
+        if (
+          hasDomain &&
+          (box.maxX < dMinX ||
+            box.minX > dMaxX ||
+            box.maxY < dMinY ||
+            box.minY > dMaxY ||
+            box.maxZ < dMinZ ||
+            box.minZ > dMaxZ)
+        ) {
+          continue;
+        }
+        const bx0 = hasDomain && box.minX < dMinX ? dMinX : box.minX;
+        const bx1 = hasDomain && box.maxX > dMaxX ? dMaxX : box.maxX;
+        const by0 = hasDomain && box.minY < dMinY ? dMinY : box.minY;
+        const by1 = hasDomain && box.maxY > dMaxY ? dMaxY : box.maxY;
+        if (bx0 >= winMinX && bx1 <= winMaxX && by0 >= winMinY && by1 <= winMaxY) {
+          if (bx0 < tightMinX) tightMinX = bx0;
+          if (bx1 > tightMaxX) tightMaxX = bx1;
+          if (by0 < tightMinY) tightMinY = by0;
+          if (by1 > tightMaxY) tightMaxY = by1;
+        }
+      }
+      if (tightMinX <= tightMaxX && tightMinY <= tightMaxY) {
+        gridMinX = tightMinX;
+        gridMaxX = tightMaxX;
+        gridMinY = tightMinY;
+        gridMaxY = tightMaxY;
+      } else {
+        gridMinX = winMinX;
+        gridMaxX = winMaxX;
+        gridMinY = winMinY;
+        gridMaxY = winMaxY;
       }
     }
   }
-  return { minX, maxX, minY, maxY, minZ, maxZ, invCell, cols, rows, cellStart, cellItems };
+
+  const gridSpanX = Math.max(0, gridMaxX - gridMinX);
+  const gridSpanY = Math.max(0, gridMaxY - gridMinY);
+  const meanBoxSpan = spanAccum / activeCount;
+  // Scale fine cell size in [0.75m, 1.4m] to typical vehicle extent so standard rotated cars
+  // fit in <= 25 fine cells (instead of spilling 78k cars into overflow), while keeping cells <= 1.4m.
+  const adaptiveMinCell = Math.min(1.4, Math.max(BOX_GRID_MIN_CELL_SIZE, meanBoxSpan * 0.31));
+  const cellSize = Math.max(
+    adaptiveMinCell,
+    gridSpanX / BOX_GRID_MAX_CELLS_PER_AXIS,
+    gridSpanY / BOX_GRID_MAX_CELLS_PER_AXIS
+  );
+  const invCell = 1 / cellSize;
+  const cols = Math.min(
+    BOX_GRID_MAX_CELLS_PER_AXIS,
+    Math.max(1, Math.floor(gridSpanX * invCell) + 1)
+  );
+  const rows = Math.min(
+    BOX_GRID_MAX_CELLS_PER_AXIS,
+    Math.max(1, Math.floor(gridSpanY * invCell) + 1)
+  );
+  const numCells = cols * rows;
+
+  const coarseInvCellX = gridSpanX > 1e-6 ? COARSE_GRID_SIDE / gridSpanX : 1;
+  const coarseInvCellY = gridSpanY > 1e-6 ? COARSE_GRID_SIDE / gridSpanY : 1;
+
+  if (sharedBoxX0.length < count) {
+    const cap = Math.max(count, sharedBoxX0.length * 2, 1024);
+    sharedBoxX0 = new Int16Array(cap);
+    sharedBoxX1 = new Int16Array(cap);
+    sharedBoxY0 = new Int16Array(cap);
+    sharedBoxY1 = new Int16Array(cap);
+  }
+  const boxX0 = sharedBoxX0;
+  const boxX1 = sharedBoxX1;
+  const boxY0 = sharedBoxY0;
+  const boxY1 = sharedBoxY1;
+
+  const boxAabb6 = new Float64Array(count * 6);
+  const cellStart = new Int32Array(numCells + 1);
+  const cellMinZ = new Float32Array(numCells);
+  const cellMaxZ = new Float32Array(numCells);
+  cellMinZ.fill(Infinity);
+  cellMaxZ.fill(-Infinity);
+
+  let coarseBoxCount = 0;
+  let coarseCellStart: Int32Array | null = null;
+
+  let hugeInteriorCount = 0;
+  let exteriorOverflowCount = 0;
+  let overflowMinX = Infinity;
+  let overflowMaxX = -Infinity;
+  let overflowMinY = Infinity;
+  let overflowMaxY = -Infinity;
+  let overflowMinZ = Infinity;
+  let overflowMaxZ = -Infinity;
+  let hugeMinX = Infinity;
+  let hugeMaxX = -Infinity;
+  let hugeMinY = Infinity;
+  let hugeMaxY = -Infinity;
+  let hugeMinZ = Infinity;
+  let hugeMaxZ = -Infinity;
+  let coarseMinX = Infinity;
+  let coarseMaxX = -Infinity;
+  let coarseMinY = Infinity;
+  let coarseMaxY = -Infinity;
+  let coarseMinZ = Infinity;
+  let coarseMaxZ = -Infinity;
+
+  // Encoding in boxX0[b]:
+  //   0..511   -> Level 1 fine grid x0 (x1 in boxX1, y0 in boxY0, y1 in boxY1)
+  //   1000+cx0 -> Level 2 coarse grid cx0 (cx1 in boxX1, cy0 in boxY0, cy1 in boxY1)
+  //   -1       -> Level 3 huge interior / boundary-straddling box
+  //   -2       -> Level 4 pure exterior outlier box
+  //   -3       -> Pruned outside domainBounds
+  for (let b = 0; b < count; b += 1) {
+    const box = boxes[b]!;
+    const aabbOff = b * 6;
+    boxAabb6[aabbOff] = box.minX;
+    boxAabb6[aabbOff + 1] = box.maxX;
+    boxAabb6[aabbOff + 2] = box.minY;
+    boxAabb6[aabbOff + 3] = box.maxY;
+    boxAabb6[aabbOff + 4] = box.minZ;
+    boxAabb6[aabbOff + 5] = box.maxZ;
+
+    if (
+      hasDomain &&
+      (box.maxX < dMinX ||
+        box.minX > dMaxX ||
+        box.maxY < dMinY ||
+        box.minY > dMaxY ||
+        box.maxZ < dMinZ ||
+        box.minZ > dMaxZ)
+    ) {
+      boxX0[b] = -3;
+      continue;
+    }
+
+    const bx0 = hasDomain && box.minX < dMinX ? dMinX : box.minX;
+    const bx1 = hasDomain && box.maxX > dMaxX ? dMaxX : box.maxX;
+    const by0 = hasDomain && box.minY < dMinY ? dMinY : box.minY;
+    const by1 = hasDomain && box.maxY > dMaxY ? dMaxY : box.maxY;
+    const bz0 = hasDomain && box.minZ < dMinZ ? dMinZ : box.minZ;
+    const bz1 = hasDomain && box.maxZ > dMaxZ ? dMaxZ : box.maxZ;
+
+    // Pure exterior outlier completely outside the fine XY grid
+    if (bx1 < gridMinX || bx0 > gridMaxX || by1 < gridMinY || by0 > gridMaxY) {
+      boxX0[b] = -2;
+      exteriorOverflowCount += 1;
+      if (bx0 < overflowMinX) overflowMinX = bx0;
+      if (bx1 > overflowMaxX) overflowMaxX = bx1;
+      if (by0 < overflowMinY) overflowMinY = by0;
+      if (by1 > overflowMaxY) overflowMaxY = by1;
+      if (bz0 < overflowMinZ) overflowMinZ = bz0;
+      if (bz1 > overflowMaxZ) overflowMaxZ = bz1;
+      continue;
+    }
+
+    const fullyInsideGrid =
+      bx0 >= gridMinX && bx1 <= gridMaxX && by0 >= gridMinY && by1 <= gridMaxY;
+    if (fullyInsideGrid) {
+      let x0 = Math.floor((bx0 - gridMinX) * invCell);
+      let x1 = Math.floor((bx1 - gridMinX) * invCell);
+      let y0 = Math.floor((by0 - gridMinY) * invCell);
+      let y1 = Math.floor((by1 - gridMinY) * invCell);
+      if (x0 < 0) x0 = 0;
+      else if (x0 >= cols) x0 = cols - 1;
+      if (x1 < 0) x1 = 0;
+      else if (x1 >= cols) x1 = cols - 1;
+      if (y0 < 0) y0 = 0;
+      else if (y0 >= rows) y0 = rows - 1;
+      if (y1 < 0) y1 = 0;
+      else if (y1 >= rows) y1 = rows - 1;
+
+      const fineSpanCells = (x1 - x0 + 1) * (y1 - y0 + 1);
+      if (fineSpanCells <= MAX_GRID_CELLS_PER_BOX) {
+        boxX0[b] = x0;
+        boxX1[b] = x1;
+        boxY0[b] = y0;
+        boxY1[b] = y1;
+        const zLoPad = bz0 - 1e-4;
+        const zHiPad = bz1 + 1e-4;
+        for (let gy = y0; gy <= y1; gy += 1) {
+          const rowOff = gy * cols;
+          for (let gx = x0; gx <= x1; gx += 1) {
+            const cell = rowOff + gx;
+            cellStart[cell + 1]! += 1;
+            if (zLoPad < cellMinZ[cell]!) cellMinZ[cell] = zLoPad;
+            if (zHiPad > cellMaxZ[cell]!) cellMaxZ[cell] = zHiPad;
+          }
+        }
+        continue;
+      }
+
+      // Level 2 coarse 64x64 grid for medium/large rotated vehicles (> 32 fine cells)
+      let cx0 = Math.floor((bx0 - gridMinX) * coarseInvCellX);
+      let cx1 = Math.floor((bx1 - gridMinX) * coarseInvCellX);
+      let cy0 = Math.floor((by0 - gridMinY) * coarseInvCellY);
+      let cy1 = Math.floor((by1 - gridMinY) * coarseInvCellY);
+      if (cx0 < 0) cx0 = 0;
+      else if (cx0 >= COARSE_GRID_SIDE) cx0 = COARSE_GRID_SIDE - 1;
+      if (cx1 < 0) cx1 = 0;
+      else if (cx1 >= COARSE_GRID_SIDE) cx1 = COARSE_GRID_SIDE - 1;
+      if (cy0 < 0) cy0 = 0;
+      else if (cy0 >= COARSE_GRID_SIDE) cy0 = COARSE_GRID_SIDE - 1;
+      if (cy1 < 0) cy1 = 0;
+      else if (cy1 >= COARSE_GRID_SIDE) cy1 = COARSE_GRID_SIDE - 1;
+
+      const coarseSpanCells = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+      if (coarseSpanCells <= MAX_GRID_CELLS_PER_BOX) {
+        if (!coarseCellStart) {
+          coarseCellStart = new Int32Array(COARSE_GRID_CELLS + 1);
+        }
+        boxX0[b] = 1000 + cx0;
+        boxX1[b] = cx1;
+        boxY0[b] = cy0;
+        boxY1[b] = cy1;
+        coarseBoxCount += 1;
+        if (bx0 < coarseMinX) coarseMinX = bx0;
+        if (bx1 > coarseMaxX) coarseMaxX = bx1;
+        if (by0 < coarseMinY) coarseMinY = by0;
+        if (by1 > coarseMaxY) coarseMaxY = by1;
+        if (bz0 < coarseMinZ) coarseMinZ = bz0;
+        if (bz1 > coarseMaxZ) coarseMaxZ = bz1;
+        if (bx0 < overflowMinX) overflowMinX = bx0;
+        if (bx1 > overflowMaxX) overflowMaxX = bx1;
+        if (by0 < overflowMinY) overflowMinY = by0;
+        if (by1 > overflowMaxY) overflowMaxY = by1;
+        if (bz0 < overflowMinZ) overflowMinZ = bz0;
+        if (bz1 > overflowMaxZ) overflowMaxZ = bz1;
+        for (let gy = cy0; gy <= cy1; gy += 1) {
+          const rowBase = gy * COARSE_GRID_SIDE + 1;
+          for (let gx = cx0; gx <= cx1; gx += 1) {
+            coarseCellStart[rowBase + gx]! += 1;
+          }
+        }
+        continue;
+      }
+    }
+
+    // Huge cuboid (> 32 coarse cells) or cuboid straddling the fine-grid boundary
+    boxX0[b] = -1;
+    hugeInteriorCount += 1;
+    if (bx0 < hugeMinX) hugeMinX = bx0;
+    if (bx1 > hugeMaxX) hugeMaxX = bx1;
+    if (by0 < hugeMinY) hugeMinY = by0;
+    if (by1 > hugeMaxY) hugeMaxY = by1;
+    if (bz0 < hugeMinZ) hugeMinZ = bz0;
+    if (bz1 > hugeMaxZ) hugeMaxZ = bz1;
+    if (bx0 < overflowMinX) overflowMinX = bx0;
+    if (bx1 > overflowMaxX) overflowMaxX = bx1;
+    if (by0 < overflowMinY) overflowMinY = by0;
+    if (by1 > overflowMaxY) overflowMaxY = by1;
+    if (bz0 < overflowMinZ) overflowMinZ = bz0;
+    if (bz1 > overflowMaxZ) overflowMaxZ = bz1;
+  }
+
+  if (sharedGridCursor.length < numCells) {
+    sharedGridCursor = new Int32Array(Math.max(numCells, BOX_GRID_MAX_CELLS_PER_AXIS * 64));
+  }
+  const cursor = sharedGridCursor;
+  cursor[0] = 0;
+  for (let c = 1; c <= numCells; c += 1) {
+    const sum = cellStart[c]! + cellStart[c - 1]!;
+    cellStart[c] = sum;
+    if (c < numCells) {
+      cursor[c] = sum;
+    }
+  }
+
+  let coarseCellItems = EMPTY_INT32_ARRAY;
+  if (coarseCellStart) {
+    sharedCoarseCursor[0] = 0;
+    for (let c = 1; c <= COARSE_GRID_CELLS; c += 1) {
+      const sum = coarseCellStart[c]! + coarseCellStart[c - 1]!;
+      coarseCellStart[c] = sum;
+      if (c < COARSE_GRID_CELLS) {
+        sharedCoarseCursor[c] = sum;
+      }
+    }
+    coarseCellItems = new Int32Array(coarseCellStart[COARSE_GRID_CELLS]!);
+  }
+
+  const cellItems = new Int32Array(cellStart[numCells]!);
+  const exteriorScanLimit = hugeInteriorCount + exteriorOverflowCount;
+  const totalOverflow = exteriorScanLimit + coarseBoxCount;
+  const overflowBoxes = totalOverflow > 0 ? new Int32Array(totalOverflow) : EMPTY_INT32_ARRAY;
+  let hugeWrite = 0;
+  let extWrite = hugeInteriorCount;
+  let coarseOverflowWrite = exteriorScanLimit;
+
+  for (let b = 0; b < count; b += 1) {
+    const tag = boxX0[b]!;
+    if (tag >= 1000) {
+      const cx0 = tag - 1000;
+      const cx1 = boxX1[b]!;
+      const cy0 = boxY0[b]!;
+      const cy1 = boxY1[b]!;
+      overflowBoxes[coarseOverflowWrite] = b;
+      coarseOverflowWrite += 1;
+      for (let gy = cy0; gy <= cy1; gy += 1) {
+        const rowOffset = gy * COARSE_GRID_SIDE;
+        for (let gx = cx0; gx <= cx1; gx += 1) {
+          const cell = rowOffset + gx;
+          coarseCellItems[sharedCoarseCursor[cell]!] = b;
+          sharedCoarseCursor[cell]! += 1;
+        }
+      }
+    } else if (tag >= 0) {
+      const x1 = boxX1[b]!;
+      const y0 = boxY0[b]!;
+      const y1 = boxY1[b]!;
+      for (let gy = y0; gy <= y1; gy += 1) {
+        const rowOffset = gy * cols;
+        for (let gx = tag; gx <= x1; gx += 1) {
+          const cell = rowOffset + gx;
+          cellItems[cursor[cell]!] = b;
+          cursor[cell]! += 1;
+        }
+      }
+    } else if (tag === -1) {
+      overflowBoxes[hugeWrite] = b;
+      hugeWrite += 1;
+    } else if (tag === -2) {
+      overflowBoxes[extWrite] = b;
+      extWrite += 1;
+    }
+  }
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    minZ,
+    maxZ,
+    gridMinX,
+    gridMaxX,
+    gridMinY,
+    gridMaxY,
+    invCell,
+    cols,
+    rows,
+    cellStart,
+    cellItems,
+    cellMinZ,
+    cellMaxZ,
+    boxAabb6,
+    coarseInvCellX,
+    coarseInvCellY,
+    coarseCellStart: coarseCellStart ?? EMPTY_COARSE_START,
+    coarseCellItems,
+    coarseMinX,
+    coarseMaxX,
+    coarseMinY,
+    coarseMaxY,
+    coarseMinZ,
+    coarseMaxZ,
+    overflowBoxes,
+    hugeInteriorCount,
+    exteriorScanLimit,
+    overflowMinX,
+    overflowMaxX,
+    overflowMinY,
+    overflowMaxY,
+    overflowMinZ,
+    overflowMaxZ,
+    hugeMinX,
+    hugeMaxX,
+    hugeMinY,
+    hugeMaxY,
+    hugeMinZ,
+    hugeMaxZ,
+  };
+}
+
+function isPointInsideOrientedBox(
+  aabb6: Float64Array,
+  boxes: readonly OrientedBoxBounds[],
+  b: number,
+  px: number,
+  py: number,
+  pz: number
+): boolean {
+  const off = b * 6;
+  if (
+    px < aabb6[off]! ||
+    px > aabb6[off + 1]! ||
+    py < aabb6[off + 2]! ||
+    py > aabb6[off + 3]! ||
+    pz < aabb6[off + 4]! ||
+    pz > aabb6[off + 5]!
+  ) {
+    return false;
+  }
+  const box = boxes[b]!;
+  const dx = px - box.cx;
+  const dy = py - box.cy;
+  const dz = pz - box.cz;
+  const lx = box.r00 * dx + box.r01 * dy + box.r02 * dz;
+  if (lx < -box.hx || lx > box.hx) return false;
+  const ly = box.r10 * dx + box.r11 * dy + box.r12 * dz;
+  if (ly < -box.hy || ly > box.hy) return false;
+  const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
+  return lz >= -box.hz && lz <= box.hz;
 }
 
 /**
@@ -999,91 +1790,424 @@ export function classifyPointInBoxes(
   py: number,
   pz: number
 ): number {
-  if (
-    px < index.minX ||
-    px > index.maxX ||
-    py < index.minY ||
-    py > index.maxY ||
-    pz < index.minZ ||
-    pz > index.maxZ
-  ) {
+  if (!(
+    px >= index.minX &&
+    px <= index.maxX &&
+    py >= index.minY &&
+    py <= index.maxY &&
+    pz >= index.minZ &&
+    pz <= index.maxZ
+  )) {
     return POINT_OUTSIDE_BOXES;
   }
-  let gx = ((px - index.minX) * index.invCell) | 0;
-  let gy = ((py - index.minY) * index.invCell) | 0;
-  if (gx >= index.cols) gx = index.cols - 1;
-  if (gy >= index.rows) gy = index.rows - 1;
-  const cell = gy * index.cols + gx;
-  const end = index.cellStart[cell + 1]!;
+
+  const aabb6 = index.boxAabb6;
   let matched = POINT_OUTSIDE_BOXES;
-  for (let k = index.cellStart[cell]!; k < end; k += 1) {
-    const b = index.cellItems[k]!;
-    const box = boxes[b]!;
-    if (
-      px < box.minX ||
-      px > box.maxX ||
-      py < box.minY ||
-      py > box.maxY ||
-      pz < box.minZ ||
-      pz > box.maxZ
-    ) {
-      continue;
+
+  if (
+    px >= index.gridMinX &&
+    px <= index.gridMaxX &&
+    py >= index.gridMinY &&
+    py <= index.gridMaxY
+  ) {
+    let gx = ((px - index.gridMinX) * index.invCell) | 0;
+    let gy = ((py - index.gridMinY) * index.invCell) | 0;
+    if (gx < 0) gx = 0;
+    else if (gx >= index.cols) gx = index.cols - 1;
+    if (gy < 0) gy = 0;
+    else if (gy >= index.rows) gy = index.rows - 1;
+
+    const cell = gy * index.cols + gx;
+    if (pz >= index.cellMinZ[cell]! && pz <= index.cellMaxZ[cell]!) {
+      const end = index.cellStart[cell + 1]!;
+      for (let k = index.cellStart[cell]!; k < end; k += 1) {
+        const b = index.cellItems[k]!;
+        if (isPointInsideOrientedBox(aabb6, boxes, b, px, py, pz)) {
+          if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
+          matched = b;
+        }
+      }
     }
-    const dx = px - box.cx;
-    const dy = py - box.cy;
-    const dz = pz - box.cz;
-    const lx = box.r00 * dx + box.r01 * dy + box.r02 * dz;
-    if (lx < -box.hx || lx > box.hx) continue;
-    const ly = box.r10 * dx + box.r11 * dy + box.r12 * dz;
-    if (ly < -box.hy || ly > box.hy) continue;
-    const lz = box.r20 * dx + box.r21 * dy + box.r22 * dz;
-    if (lz < -box.hz || lz > box.hz) continue;
-    if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
-    matched = b;
+
+    if (
+      index.coarseCellItems.length > 0 &&
+      px >= index.coarseMinX &&
+      px <= index.coarseMaxX &&
+      py >= index.coarseMinY &&
+      py <= index.coarseMaxY &&
+      pz >= index.coarseMinZ &&
+      pz <= index.coarseMaxZ
+    ) {
+      let cgx = ((px - index.gridMinX) * index.coarseInvCellX) | 0;
+      let cgy = ((py - index.gridMinY) * index.coarseInvCellY) | 0;
+      if (cgx < 0) cgx = 0;
+      else if (cgx >= COARSE_GRID_SIDE) cgx = COARSE_GRID_SIDE - 1;
+      if (cgy < 0) cgy = 0;
+      else if (cgy >= COARSE_GRID_SIDE) cgy = COARSE_GRID_SIDE - 1;
+
+      const cCell = cgy * COARSE_GRID_SIDE + cgx;
+      const cEnd = index.coarseCellStart[cCell + 1]!;
+      for (let k = index.coarseCellStart[cCell]!; k < cEnd; k += 1) {
+        const b = index.coarseCellItems[k]!;
+        if (isPointInsideOrientedBox(aabb6, boxes, b, px, py, pz)) {
+          if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
+          matched = b;
+        }
+      }
+    }
+
+    const hugeCount = index.hugeInteriorCount;
+    if (
+      hugeCount > 0 &&
+      px >= index.hugeMinX &&
+      px <= index.hugeMaxX &&
+      py >= index.hugeMinY &&
+      py <= index.hugeMaxY &&
+      pz >= index.hugeMinZ &&
+      pz <= index.hugeMaxZ
+    ) {
+      const overflow = index.overflowBoxes;
+      for (let k = 0; k < hugeCount; k += 1) {
+        const b = overflow[k]!;
+        if (isPointInsideOrientedBox(aabb6, boxes, b, px, py, pz)) {
+          if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
+          matched = b;
+        }
+      }
+    }
+    return matched;
+  }
+
+  const extLimit = index.exteriorScanLimit;
+  if (
+    extLimit > 0 &&
+    px >= index.overflowMinX &&
+    px <= index.overflowMaxX &&
+    py >= index.overflowMinY &&
+    py <= index.overflowMaxY &&
+    pz >= index.overflowMinZ &&
+    pz <= index.overflowMaxZ
+  ) {
+    const overflow = index.overflowBoxes;
+    for (let k = 0; k < extLimit; k += 1) {
+      const b = overflow[k]!;
+      if (isPointInsideOrientedBox(aabb6, boxes, b, px, py, pz)) {
+        if (matched !== POINT_OUTSIDE_BOXES) return POINT_IN_OVERLAP;
+        matched = b;
+      }
+    }
   }
   return matched;
 }
 
+interface CachedScenePointsEntry {
+  readonly childrenRef: readonly ThreeObject3DLike[];
+  readonly directIndices: number[] | null;
+  readonly subtreeParents: (object | null)[] | null;
+  readonly subtreeRootIndex: number;
+  readonly subtreeRootNode: ThreeObject3DLike | null;
+  readonly points: ThreeObject3DLike[];
+}
+
+const scenePointsCache = new WeakMap<ThreeSceneLike, CachedScenePointsEntry>();
+
+function isPointsSceneNode(node: ThreeObject3DLike): boolean {
+  return (
+    node.type === 'Points' ||
+    Boolean(node.geometry?.attributes?.position && node.material && 'size' in node.material)
+  );
+}
+
+function shouldSkipPointsTraversalSubtree(node: ThreeObject3DLike): boolean {
+  const t = node.type;
+  if (t === 'Mesh' || t === 'LineSegments' || t === 'ArrowHelper' || t === 'Line') {
+    return true;
+  }
+  return isNumericClientIdName(node.name);
+}
+
+function invalidateScenePointsCache(scene?: ThreeSceneLike | null): void {
+  if (scene && typeof scene === 'object') {
+    scenePointsCache.delete(scene);
+  }
+}
+
+function seedScenePointsCacheFromRender(
+  scene: ThreeSceneLike | undefined,
+  ptsObj: ThreeObject3DLike
+): void {
+  if (!scene || typeof scene !== 'object' || scenePointsCache.has(scene)) {
+    return;
+  }
+  const children = scene.children;
+  if (!Array.isArray(children) || children.length === 0) {
+    return;
+  }
+  const headLimit = Math.min(children.length, 8);
+  for (let i = 0; i < headLimit; i += 1) {
+    if (children[i] === ptsObj) {
+      scenePointsCache.set(scene, {
+        childrenRef: children,
+        directIndices: [i],
+        subtreeParents: null,
+        subtreeRootIndex: -1,
+        subtreeRootNode: null,
+        points: [ptsObj],
+      });
+      return;
+    }
+  }
+  const tailStart = Math.max(headLimit, children.length - 4);
+  for (let i = tailStart; i < children.length; i += 1) {
+    if (children[i] === ptsObj) {
+      scenePointsCache.set(scene, {
+        childrenRef: children,
+        directIndices: [i],
+        subtreeParents: null,
+        subtreeRootIndex: -1,
+        subtreeRootNode: null,
+        points: [ptsObj],
+      });
+      return;
+    }
+  }
+}
+
+function isCachedScenePointsValid(scene: ThreeSceneLike, cached: CachedScenePointsEntry): boolean {
+  const children = scene.children;
+  if (cached.childrenRef !== children || cached.points.length === 0) {
+    return false;
+  }
+  if (cached.directIndices !== null) {
+    const pts = cached.points;
+    const indices = cached.directIndices;
+    for (let i = 0; i < pts.length; i += 1) {
+      const pt = pts[i]!;
+      const parent = (pt as { parent?: unknown }).parent;
+      if (parent !== undefined && parent !== scene) {
+        return false;
+      }
+      const idx = indices[i]!;
+      if (children[idx] === pt) {
+        continue;
+      }
+      // Constant-time re-anchor check at head/tail in case cuboids were removed before/after Points
+      let relocated = -1;
+      const headLimit = Math.min(children.length, 6);
+      for (let j = 0; j < headLimit; j += 1) {
+        if (children[j] === pt) {
+          relocated = j;
+          break;
+        }
+      }
+      if (relocated === -1) {
+        const tailStart = Math.max(headLimit, children.length - 4);
+        for (let j = tailStart; j < children.length; j += 1) {
+          if (children[j] === pt) {
+            relocated = j;
+            break;
+          }
+        }
+      }
+      if (relocated === -1) {
+        return false;
+      }
+      indices[i] = relocated;
+    }
+    return true;
+  }
+
+  if (
+    cached.subtreeParents !== null &&
+    cached.subtreeRootNode !== null &&
+    children[cached.subtreeRootIndex] === cached.subtreeRootNode
+  ) {
+    for (let i = 0; i < cached.points.length; i += 1) {
+      const pt = cached.points[i]!;
+      const expectedParent = cached.subtreeParents[i];
+      if (!expectedParent || (pt as { parent?: unknown }).parent !== expectedParent) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
 /**
- * Finds all `THREE.Points` instances inside a view's `THREE.Scene`.
+ * Finds all `THREE.Points` instances inside a view's `THREE.Scene` in O(1) on cache hits,
+ * and skips all CVAT cuboid subtrees (`Mesh`/`LineSegments`/`ArrowHelper`/`Line` and numeric
+ * `clientID` object names) with zero `.children` reads on initial discovery.
  */
 export function findPointsObjectsInScene(scene?: ThreeSceneLike): ThreeObject3DLike[] {
   if (!scene || !Array.isArray(scene.children)) {
     return [];
   }
+  const cached = scenePointsCache.get(scene);
+  if (cached && isCachedScenePointsValid(scene, cached)) {
+    return cached.points;
+  }
+
+  const topChildren = scene.children;
+  const topLen = topChildren.length;
+  if (topLen === 0) {
+    return [];
+  }
+
   const found: ThreeObject3DLike[] = [];
-  const stack: ThreeObject3DLike[] = [...scene.children];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) continue;
-    if (
-      current.type === 'Points' ||
-      (current.geometry?.attributes?.position && current.material && 'size' in current.material)
-    ) {
-      found.push(current);
+  const directIndices: number[] = [];
+  const candidateContainers: { index: number; node: ThreeObject3DLike }[] = [];
+
+  // Pass 1: inspect direct children of scene without touching `.children` on any cuboid/mesh
+  for (let i = 0; i < topLen; i += 1) {
+    const child = topChildren[i];
+    if (!child) continue;
+    if (isPointsSceneNode(child)) {
+      found.push(child);
+      directIndices.push(i);
+      continue;
     }
-    if (Array.isArray(current.children)) {
-      for (const child of current.children) {
-        stack.push(child);
+    if (!shouldSkipPointsTraversalSubtree(child)) {
+      candidateContainers.push({ index: i, node: child });
+    }
+  }
+
+  let foundInSubtree = false;
+  let subtreeRootIndex = -1;
+  let subtreeRootNode: ThreeObject3DLike | null = null;
+  const subtreeParents: (object | null)[] = [];
+
+  if (candidateContainers.length > 0) {
+    const stack: ThreeObject3DLike[] = [];
+    for (let c = 0; c < candidateContainers.length; c += 1) {
+      const entry = candidateContainers[c]!;
+      const rootSubChildren = entry.node.children;
+      if (!Array.isArray(rootSubChildren) || rootSubChildren.length === 0) {
+        continue;
+      }
+      for (let k = rootSubChildren.length - 1; k >= 0; k -= 1) {
+        const sub = rootSubChildren[k];
+        if (sub) stack.push(sub);
+      }
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        if (isPointsSceneNode(current)) {
+          found.push(current);
+          foundInSubtree = true;
+          subtreeRootIndex = entry.index;
+          subtreeRootNode = entry.node;
+          const parentRef = (current as { parent?: unknown }).parent;
+          subtreeParents.push(
+            parentRef && typeof parentRef === 'object' ? (parentRef as object) : null
+          );
+          continue;
+        }
+        if (shouldSkipPointsTraversalSubtree(current)) {
+          continue;
+        }
+        const kids = current.children;
+        if (Array.isArray(kids)) {
+          for (let k = kids.length - 1; k >= 0; k -= 1) {
+            const kid = kids[k];
+            if (kid) stack.push(kid);
+          }
+        }
       }
     }
   }
+
+  if (found.length > 0) {
+    if (!foundInSubtree) {
+      scenePointsCache.set(scene, {
+        childrenRef: topChildren,
+        directIndices,
+        subtreeParents: null,
+        subtreeRootIndex: -1,
+        subtreeRootNode: null,
+        points: found,
+      });
+    } else if (
+      candidateContainers.length === 1 &&
+      subtreeParents.length === found.length &&
+      subtreeParents.every((p) => p !== null)
+    ) {
+      scenePointsCache.set(scene, {
+        childrenRef: topChildren,
+        directIndices: null,
+        subtreeParents,
+        subtreeRootIndex,
+        subtreeRootNode,
+        points: found,
+      });
+    }
+  }
+
   return found;
 }
 
 const ORTHO_RAYCAST_PLANE_NAMES = new Set(['topPlane', 'sidePlane', 'frontPlane']);
 
+type RaycastPlaneGeometryLike = NonNullable<ThreeObject3DLike['geometry']> & {
+  parameters?: {
+    width?: number;
+    height?: number;
+    widthSegments?: number;
+    heightSegments?: number;
+  };
+  index?: {
+    array: Uint16Array | Uint32Array | Float32Array | number[];
+    count?: number;
+    needsUpdate?: boolean;
+  } | null;
+  boundingBox?: unknown;
+  boundingSphere?: unknown;
+  dispose?: () => void;
+};
+
+const sceneRaycastPlaneCache = new WeakMap<object, ThreeObject3DLike>();
+
+function isPlaneGeometryAlreadySimplified(geom: RaycastPlaneGeometryLike | undefined): boolean {
+  if (!geom) {
+    return false;
+  }
+  const widthSegments = Number(geom.parameters?.widthSegments ?? 1);
+  const heightSegments = Number(geom.parameters?.heightSegments ?? 1);
+  const indexCount = Number(geom.index?.count ?? geom.index?.array?.length ?? 0);
+  const posCount = Number(
+    geom.attributes?.position?.count ??
+      (geom.attributes?.position?.array ? geom.attributes.position.array.length / 3 : 0)
+  );
+  return widthSegments <= 1 && heightSegments <= 1 && indexCount <= 6 && posCount <= 4;
+}
+
+function isCachedPlaneAttachedToScene(scene: ThreeSceneLike, plane: ThreeObject3DLike): boolean {
+  const parent = (plane as { parent?: unknown }).parent;
+  if (parent !== undefined) {
+    return parent === scene;
+  }
+  const children = scene.children;
+  const headLimit = Math.min(children.length, 6);
+  for (let i = 0; i < headLimit; i += 1) {
+    if (children[i] === plane) {
+      return true;
+    }
+  }
+  const tailStart = Math.max(headLimit, children.length - 4);
+  for (let i = tailStart; i < children.length; i += 1) {
+    if (children[i] === plane) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * CVAT's `onSceneImageLoaded` creates invisible raycast planes (`topPlane`, `sidePlane`, `frontPlane`)
  * using `new THREE.PlaneGeometry(offsetHeight, offsetWidth, offsetHeight, offsetWidth)`.
- * When an orthographic view (e.g. `Side` view at 866x712) is expanded and the user steps to the next frame,
- * CVAT passes `712` and `866` as `widthSegments` and `heightSegments`, generating 1,233,184 triangles!
- * While rotating a box (`renderRotateAction`) never raycasts against this plane, resizing (`renderResizeAction`)
- * and translating (`renderTranslateAction`) raycast against `${view}Plane` on every mousemove frame,
- * causing severe CPU lag (testing 1.23M triangles per frame).
- *
  * Replacing the subdivided geometry with a 1x1 segment plane (2 triangles) preserves the exact same
- * mathematical plane and `worldToLocal` transform while making resize/translate raycasts ~600,000x faster.
+ * mathematical plane and `worldToLocal` transform while making resize/translate raycasts ~600,000x faster,
+ * and caches the discovered plane per scene in a `WeakMap` so subsequent checks exit in O(1).
  */
 export function optimizeOrthographicRaycastPlanes(
   scene?: ThreeSceneLike | null,
@@ -1092,50 +2216,39 @@ export function optimizeOrthographicRaycastPlanes(
   if (!scene || !Array.isArray(scene.children)) {
     return 0;
   }
+
+  const cachedPlane = sceneRaycastPlaneCache.get(scene);
+  if (
+    cachedPlane &&
+    isCachedPlaneAttachedToScene(scene, cachedPlane) &&
+    (!optimizedPlanes || optimizedPlanes.has(cachedPlane)) &&
+    isPlaneGeometryAlreadySimplified(cachedPlane.geometry as RaycastPlaneGeometryLike | undefined)
+  ) {
+    return 0;
+  }
+
   let optimizedCount = 0;
-  for (const child of scene.children) {
+  const children = scene.children;
+  for (let i = 0; i < children.length; i += 1) {
+    const child = children[i];
     if (!child || typeof child !== 'object' || !child.name) {
       continue;
     }
     if (!ORTHO_RAYCAST_PLANE_NAMES.has(child.name)) {
       continue;
     }
+    sceneRaycastPlaneCache.set(scene, child);
     if (optimizedPlanes?.has(child)) {
       continue;
     }
     optimizedPlanes?.add(child);
 
-    const geom = child.geometry as
-      | (NonNullable<ThreeObject3DLike['geometry']> & {
-          parameters?: {
-            width?: number;
-            height?: number;
-            widthSegments?: number;
-            heightSegments?: number;
-          };
-          index?: {
-            array: Uint16Array | Uint32Array | Float32Array | number[];
-            count?: number;
-            needsUpdate?: boolean;
-          } | null;
-          boundingBox?: unknown;
-          boundingSphere?: unknown;
-          dispose?: () => void;
-        })
-      | undefined;
+    const geom = child.geometry as RaycastPlaneGeometryLike | undefined;
     if (!geom) {
       continue;
     }
 
-    const widthSegments = Number(geom.parameters?.widthSegments ?? 1);
-    const heightSegments = Number(geom.parameters?.heightSegments ?? 1);
-    const indexCount = Number(geom.index?.count ?? geom.index?.array?.length ?? 0);
-    const posCount = Number(
-      geom.attributes?.position?.count ??
-        (geom.attributes?.position?.array ? geom.attributes.position.array.length / 3 : 0)
-    );
-
-    if (widthSegments <= 1 && heightSegments <= 1 && indexCount <= 6 && posCount <= 4) {
+    if (isPlaneGeometryAlreadySimplified(geom)) {
       continue;
     }
 
@@ -1202,6 +2315,62 @@ export function optimizeOrthographicRaycastPlanes(
 }
 
 const originalGeometryPositionsMap = new WeakMap<object, Float32Array>();
+const pointCloudBoundsCache = new WeakMap<
+  object,
+  { readonly len: number; readonly bounds: BoxSpatialBounds | null }
+>();
+const groundElevationGridCache = new WeakMap<
+  object,
+  { readonly len: number; readonly egoGroundZ: number; readonly cellMinZ: Float32Array }
+>();
+
+function getOrComputePointCloudBounds(
+  srcPositions: Float32Array | number[],
+  len: number
+): BoxSpatialBounds | null {
+  if (len < 3) {
+    return null;
+  }
+  const cached = pointCloudBoundsCache.get(srcPositions);
+  if (cached && cached.len === len) {
+    return cached.bounds;
+  }
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+
+  for (let i = 0; i < len; i += 3) {
+    const px = srcPositions[i]!;
+    const py = srcPositions[i + 1]!;
+    const pz = srcPositions[i + 2]!;
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (py < minY) minY = py;
+    if (py > maxY) maxY = py;
+    if (pz < minZ) minZ = pz;
+    if (pz > maxZ) maxZ = pz;
+  }
+
+  const bounds: BoxSpatialBounds | null =
+    minX <= maxX &&
+    minY <= maxY &&
+    minZ <= maxZ &&
+    Number.isFinite(minX) &&
+    Number.isFinite(maxX) &&
+    Number.isFinite(minY) &&
+    Number.isFinite(maxY) &&
+    Number.isFinite(minZ) &&
+    Number.isFinite(maxZ)
+      ? { minX, maxX, minY, maxY, minZ, maxZ }
+      : null;
+
+  pointCloudBoundsCache.set(srcPositions, { len, bounds });
+  return bounds;
+}
 
 /**
  * Returns the original un-compacted point cloud position buffer (`Float32Array | number[]`)
@@ -1233,15 +2402,18 @@ const sharedGroundCellMinZ = new Float32Array(GROUND_GRID_SIDE * GROUND_GRID_SID
 const sharedEgoHistogram = new Int32Array(40);
 
 /**
- * Ultra-fast 2-pass local ground elevation estimator (`< 1.2ms` for 120,000 points).
- * Computes nominal `egoGroundZ` via a 40-bin histogram near the ego vehicle, then populates
- * `sharedGroundCellMinZ` (64x64 grid of 3m×3m cells over [-96m..+96m]) with slope-clamped
- * cell minimum Z values so sloped/uneven ground is stripped cleanly without cutting elevated objects.
+ * Ultra-fast 2-pass local ground elevation estimator (`< 1.2ms` for 120,000 points), memoized per
+ * `srcPositions` buffer so repeated box filter changes on the same frame never recompute ground elevation.
  */
 function populateGroundElevationGrid(
   srcPositions: Float32Array | number[],
   len: number
 ): { egoGroundZ: number; cellMinZ: Float32Array } {
+  const cached = groundElevationGridCache.get(srcPositions);
+  if (cached && cached.len === len) {
+    return cached;
+  }
+
   sharedEgoHistogram.fill(0);
   const histMinZ = -3.2;
   const histMaxZ = 0.8;
@@ -1328,7 +2500,13 @@ function populateGroundElevationGrid(
     }
   }
 
-  return { egoGroundZ, cellMinZ: sharedGroundCellMinZ };
+  const stored = {
+    len,
+    egoGroundZ,
+    cellMinZ: new Float32Array(sharedGroundCellMinZ),
+  };
+  groundElevationGridCache.set(srcPositions, stored);
+  return stored;
 }
 
 /**
@@ -1336,6 +2514,12 @@ function populateGroundElevationGrid(
  * Guarantees that point cloud buffer coloring, background changes, and scattering material
  * updates execute AT MOST ONCE per frame/state change rather than every 60fps render tick.
  */
+const CUBOID_INITIALIZED_SYM = Symbol.for('meowCuboidInitialized');
+
+interface InitializableCuboid {
+  [CUBOID_INITIALIZED_SYM]?: boolean;
+}
+
 export class Cvat3dPreRenderEnhancer {
   private options: Cvat3dWorkspaceRenderOptions;
   private readonly baseColorsCache = new WeakMap<object, Float32Array>();
@@ -1351,7 +2535,7 @@ export class Cvat3dPreRenderEnhancer {
   >();
   private readonly sceneViewRoles = new WeakMap<object, boolean>();
   private readonly topCameras = new WeakSet<object>();
-  private readonly hiddenOrientationArrows = new WeakSet<object>();
+  private readonly canvasTopRoleCache = new WeakMap<HTMLCanvasElement, boolean>();
   private readonly hookedViews = new WeakSet<object>();
   private readonly hookedPrototypes = new WeakSet<object>();
   private readonly hookedPointObjects = new WeakSet<object>();
@@ -1359,12 +2543,16 @@ export class Cvat3dPreRenderEnhancer {
   private readonly initializedMaterials = new WeakSet<object>();
   private readonly optimizedPlaneMeshes = new WeakSet<object>();
   private readonly scenePlaneCheckCount = new WeakMap<object, number>();
-  private readonly geometrySignatureMap = new WeakMap<object, string>();
+  private readonly geometryEpochMap = new WeakMap<object, number>();
   private readonly appliedSceneColors = new WeakMap<ThreeColorLike, boolean>();
   private readonly appliedViewBackground = new WeakMap<object, boolean>();
   private readonly sceneRenderContext = new Map<
     ThreeSceneLike,
-    { renderer: NonNullable<CvatRenderViewLike['renderer']>; camera: unknown }
+    {
+      renderer: NonNullable<CvatRenderViewLike['renderer']>;
+      camera: unknown;
+      wasConnected: boolean;
+    }
   >();
   private primaryPerspectiveScene: ThreeSceneLike | null = null;
   private primaryPerspectiveCanvas: HTMLCanvasElement | null = null;
@@ -1373,9 +2561,13 @@ export class Cvat3dPreRenderEnhancer {
   private lastCompiledBoxes: OrientedBoxBounds[] = [];
   private lastExecutionSignature = '';
   private lastGeometryColorSignature = '';
+  private geometryColorEpoch = 0;
   private lastViewCount = 0;
   private dirty = true;
   private pendingFrameObjectsLoad = true;
+  private needsIncrementalCuboidSync = false;
+  private pendingVisibilityToken: string | null = null;
+  private pendingVisibilityObjectsRef: object | null = null;
   private isRedrawingViews = false;
   private isApplying = false;
   private nativeNotifyDepth = 0;
@@ -1398,8 +2590,16 @@ export class Cvat3dPreRenderEnhancer {
     if (!canvas) {
       return null;
     }
-    for (const ctx of this.sceneRenderContext.values()) {
-      if (ctx.renderer?.domElement === canvas) {
+    for (const [scene, ctx] of this.sceneRenderContext.entries()) {
+      const domEl = ctx.renderer?.domElement;
+      if (domEl?.isConnected === true && !ctx.wasConnected) {
+        ctx.wasConnected = true;
+      }
+      if (ctx.wasConnected && domEl && domEl.isConnected === false && domEl !== canvas) {
+        this.sceneRenderContext.delete(scene);
+        continue;
+      }
+      if (domEl === canvas) {
         return ctx.camera ?? null;
       }
     }
@@ -1422,6 +2622,10 @@ export class Cvat3dPreRenderEnhancer {
 
   public getOptions(): Cvat3dWorkspaceRenderOptions {
     return { ...this.options };
+  }
+
+  public getOptionsReadonly(): Readonly<Cvat3dWorkspaceRenderOptions> {
+    return this.options;
   }
 
   public setOptions(
@@ -1451,6 +2655,8 @@ export class Cvat3dPreRenderEnhancer {
     if (changed) {
       this.dirty = true;
       this.pendingFrameObjectsLoad = true;
+      this.pendingVisibilityToken = null;
+      this.pendingVisibilityObjectsRef = null;
       const targetView = canvas3d?.view ?? this.activeView;
       const targetModel = canvas3d?.model ?? this.activeModel ?? undefined;
       if (targetView) {
@@ -1475,6 +2681,14 @@ export class Cvat3dPreRenderEnhancer {
           ? new Set(Object.values(this.activeView.views ?? {}).map((view) => view?.scene))
           : null;
       for (const [scene, ctx] of this.sceneRenderContext.entries()) {
+        const domEl = ctx.renderer?.domElement;
+        if (domEl?.isConnected === true && !ctx.wasConnected) {
+          ctx.wasConnected = true;
+        }
+        if (ctx.wasConnected && domEl && domEl.isConnected === false) {
+          this.sceneRenderContext.delete(scene);
+          continue;
+        }
         if (nativeScenes?.has(scene)) continue;
         if (typeof ctx.renderer?.render === 'function' && ctx.camera) {
           ctx.renderer.render(scene, ctx.camera);
@@ -1521,18 +2735,20 @@ export class Cvat3dPreRenderEnhancer {
   }
 
   public applySceneBackgrounds(view: CvatInternalViewLike): void {
-    if (!view.views) {
+    const views = view.views;
+    if (!views) {
       return;
     }
     if (!this.dirty && this.appliedViewBackground.get(view) === this.options.whiteBackground) {
       return;
     }
-    const entries = Object.entries(view.views);
 
     const targetBgHex = this.options.whiteBackground ? 0xffffff : 0x000000;
     const targetBgCss = this.options.whiteBackground ? '#ffffff' : '#000000';
 
-    for (const [, rv] of entries) {
+    for (const key in views) {
+      if (!Object.hasOwn(views, key)) continue;
+      const rv = views[key];
       if (!rv) continue;
       if (rv.scene) {
         this.ensureThreePrototypesHooked(rv.scene);
@@ -1553,7 +2769,7 @@ export class Cvat3dPreRenderEnhancer {
    * Hooks `THREE.Scene.prototype.onBeforeRender` and `THREE.Points.prototype.onBeforeRender`
    * (plus per-instance `onBeforeRender` fallback) so that ANY newly opened canvas/modal/zoom view
    * (e.g. when pressing the zoom key on Top, Side, or Front view) automatically receives:
-   * - Fixed 2.5px point size (`size = 2.5, sizeAttenuation = false`)
+   * - Fixed 3.5px point size (`size = 3.5, sizeAttenuation = false`)
    * - White/black scene & renderer background
    * - Per-cuboid point cloud colors
    * even if the zoom canvas creates its own `WebGLRenderer`, `Scene`, `Points`, or `PointsMaterial`.
@@ -1587,11 +2803,14 @@ export class Cvat3dPreRenderEnhancer {
           if (
             sceneObj &&
             sceneObj !== this.primaryPerspectiveScene &&
-            Array.isArray(sceneObj.children) &&
-            this.scenePlaneCheckCount.get(sceneObj) !== sceneObj.children.length
+            Array.isArray(sceneObj.children)
           ) {
-            this.scenePlaneCheckCount.set(sceneObj, sceneObj.children.length);
-            optimizeOrthographicRaycastPlanes(sceneObj, this.optimizedPlaneMeshes);
+            if (sceneRaycastPlaneCache.has(sceneObj)) {
+              optimizeOrthographicRaycastPlanes(sceneObj, this.optimizedPlaneMeshes);
+            } else if (this.scenePlaneCheckCount.get(sceneObj) !== sceneObj.children.length) {
+              this.scenePlaneCheckCount.set(sceneObj, sceneObj.children.length);
+              optimizeOrthographicRaycastPlanes(sceneObj, this.optimizedPlaneMeshes);
+            }
           }
           const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
           if (renObj?.domElement && camera) {
@@ -1600,8 +2819,15 @@ export class Cvat3dPreRenderEnhancer {
           if (sceneObj && renObj && typeof renObj.render === 'function' && camera) {
             // Remember (renderer, camera) per scene so option toggles can force an immediate redraw
             const previous = this.sceneRenderContext.get(sceneObj);
+            const currentlyConnected = renObj.domElement?.isConnected === true;
             if (previous?.renderer !== renObj || previous.camera !== camera) {
-              this.sceneRenderContext.set(sceneObj, { renderer: renObj, camera });
+              this.sceneRenderContext.set(sceneObj, {
+                renderer: renObj,
+                camera,
+                wasConnected: currentlyConnected,
+              });
+            } else if (currentlyConnected && !previous.wasConnected) {
+              previous.wasConnected = true;
             }
             if (this.sceneRenderContext.size > 16) {
               const oldestKey = this.sceneRenderContext.keys().next().value;
@@ -1700,17 +2926,35 @@ export class Cvat3dPreRenderEnhancer {
     renderer?: CvatRenderViewLike['renderer'],
     camera?: unknown
   ): boolean {
+    if (scene && typeof scene === 'object') {
+      const role = this.sceneViewRoles.get(scene);
+      if (role !== undefined) {
+        return role;
+      }
+    }
+    if (camera && typeof camera === 'object' && this.topCameras.has(camera)) {
+      return true;
+    }
     const canvas = renderer?.domElement;
-    if (canvas?.closest?.('.cvat-canvas3d-topview')) return true;
-    if (
-      canvas?.closest?.(
-        '.cvat-canvas3d-perspective, .cvat-canvas3d-sideview, .cvat-canvas3d-frontview'
-      )
-    )
-      return false;
-    if (scene && typeof scene === 'object' && this.sceneViewRoles.has(scene))
-      return this.sceneViewRoles.get(scene)!;
-    return Boolean(camera && typeof camera === 'object' && this.topCameras.has(camera));
+    if (canvas) {
+      const cachedRole = this.canvasTopRoleCache.get(canvas);
+      if (cachedRole !== undefined) {
+        return cachedRole;
+      }
+      if (canvas.closest?.('.cvat-canvas3d-topview')) {
+        this.canvasTopRoleCache.set(canvas, true);
+        return true;
+      }
+      if (
+        canvas.closest?.(
+          '.cvat-canvas3d-perspective, .cvat-canvas3d-sideview, .cvat-canvas3d-frontview'
+        )
+      ) {
+        this.canvasTopRoleCache.set(canvas, false);
+        return false;
+      }
+    }
+    return false;
   }
 
   /** Give Top a private geometry so compaction cannot change any other viewport. */
@@ -1753,6 +2997,21 @@ export class Cvat3dPreRenderEnhancer {
       const copyColor = copy.attributes?.color;
       const baseColor = originalColor ? this.baseColorsCache.get(originalColor) : undefined;
       if (copyColor && baseColor) this.baseColorsCache.set(copyColor, baseColor);
+
+      // Share the immutable source position Float32Array as the un-compacted baseline so
+      // Perspective and Top share `pcBounds`, `BoxSpatialIndex`, `pointHits`, and `groundGrid`!
+      const sourcePosAttr = source.attributes?.position;
+      const copyPosAttr = copy.attributes?.position;
+      const sourceOrigPos = sourcePosAttr
+        ? (originalGeometryPositionsMap.get(sourcePosAttr) ??
+          (!this.compactedGeometries.has(source) && sourcePosAttr.array instanceof Float32Array
+            ? sourcePosAttr.array
+            : undefined))
+        : undefined;
+      if (copyPosAttr && sourceOrigPos) {
+        originalGeometryPositionsMap.set(copyPosAttr, sourceOrigPos);
+        originalGeometryPositionsMap.set(copy, sourceOrigPos);
+      }
     }
     points.geometry = copy;
   }
@@ -1764,6 +3023,8 @@ export class Cvat3dPreRenderEnhancer {
     camera?: unknown,
     materialArg?: unknown
   ): void {
+    seedScenePointsCacheFromRender(scene as ThreeSceneLike | undefined, ptsObj);
+
     const camObj = camera as
       { isOrthographicCamera?: boolean; isPerspectiveCamera?: boolean; type?: string } | undefined;
     const renObj = renderer as CvatRenderViewLike['renderer'] | undefined;
@@ -1800,32 +3061,72 @@ export class Cvat3dPreRenderEnhancer {
       );
     }
 
-    const signature = `${this.lastGeometryColorSignature}:ground:${isTop && this.options.hideGroundPoints ? 1 : 0}`;
-    if (
-      ptsObj.geometry &&
-      this.lastGeometryColorSignature &&
-      this.geometrySignatureMap.get(ptsObj.geometry) !== signature
-    ) {
-      this.geometrySignatureMap.set(ptsObj.geometry, signature);
-      this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes, isTop);
+    if (ptsObj.geometry && this.geometryColorEpoch > 0) {
+      const targetStamp =
+        this.geometryColorEpoch * 2 + (isTop && this.options.hideGroundPoints ? 1 : 0);
+      if (this.geometryEpochMap.get(ptsObj.geometry) !== targetStamp) {
+        this.geometryEpochMap.set(ptsObj.geometry, targetStamp);
+        this.applyPointCloudBoxColors(ptsObj, this.lastCompiledBoxes, isTop);
+      }
     }
   }
 
   /**
-   * Hooks a `Canvas3d` instance's internal `view` (`Canvas3dViewImpl`) so that:
-   * - `onSceneImageLoaded`: marks dirty + `pendingFrameObjectsLoad = true` when a new frame's PCD finishes loading.
-   * - `notify`: only recomputes on `image_changed` or the initial `objects_updated` of a newly loaded frame;
-   *   ignores subsequent `objects_updated` while dragging/editing a box on the current frame so point colors
-   *   only update after switching frames (Next Frame -> Prev Frame) or toggling an option.
-   * - `render`: executes `applyOnceIfNeeded()` BEFORE `renderer.render(scene, camera)` ONLY when dirty.
+   * Incrementally configures newly seen cuboids in O(N) with zero `Object.values` and zero
+   * `WeakSet` ephemeron allocations:
+   * - Sets `material.depthWrite = false` across all 4 viewport meshes.
+   * - Hooks `deferHiddenCuboidMeshUpdates` on all 4 viewport meshes.
+   * - Hooks `deferHiddenOrientationArrowUpdates` on all orientation arrows using a single shared wrapper.
    */
-  private optimizeOrientationArrows(view: CvatInternalViewLike): void {
-    for (const entry of Object.values(view.drawnObjects ?? {})) {
-      for (const arrows of Object.values(entry.cuboid?.orientationArrows ?? {})) {
-        for (const arrow of Object.values(arrows ?? {})) {
-          deferHiddenOrientationArrowUpdates(arrow, this.hiddenOrientationArrows);
+  private syncDrawnCuboidsIncremental(
+    drawnObjects?: Record<number, CvatDrawnObjectEntry> | null
+  ): void {
+    if (!drawnObjects) {
+      return;
+    }
+
+    const isPlainObj = Object.getPrototypeOf(drawnObjects) === Object.prototype;
+
+    for (const key in drawnObjects) {
+      if (!isPlainObj && !Object.hasOwn(drawnObjects, key)) {
+        continue;
+      }
+      const cuboid = drawnObjects[key]?.cuboid as
+        (CvatDrawnObjectEntry['cuboid'] & InitializableCuboid) | undefined;
+      if (!cuboid || typeof cuboid !== 'object' || cuboid[CUBOID_INITIALIZED_SYM] === true) {
+        continue;
+      }
+      for (let v = 0; v < CUBOID_VIEW_KEYS.length; v += 1) {
+        const viewMesh = cuboid[CUBOID_VIEW_KEYS[v]!];
+        if (viewMesh && typeof viewMesh === 'object') {
+          const meshMat = viewMesh.material;
+          if (meshMat && typeof meshMat === 'object') {
+            meshMat.depthWrite = false;
+          }
+          deferHiddenCuboidMeshUpdates(viewMesh);
         }
       }
+      const arrowsByView = cuboid.orientationArrows;
+      if (arrowsByView && typeof arrowsByView === 'object') {
+        for (let v = 0; v < CUBOID_VIEW_KEYS.length; v += 1) {
+          const arrows = arrowsByView[CUBOID_VIEW_KEYS[v]!];
+          if (!arrows || typeof arrows !== 'object') {
+            continue;
+          }
+          if ('x' in arrows || 'y' in arrows || 'z' in arrows) {
+            if (arrows.x) deferHiddenOrientationArrowUpdates(arrows.x);
+            if (arrows.y) deferHiddenOrientationArrowUpdates(arrows.y);
+            if (arrows.z) deferHiddenOrientationArrowUpdates(arrows.z);
+          } else {
+            for (const arrowKey in arrows) {
+              if (Object.hasOwn(arrows, arrowKey)) {
+                deferHiddenOrientationArrowUpdates(arrows[arrowKey]);
+              }
+            }
+          }
+        }
+      }
+      cuboid[CUBOID_INITIALIZED_SYM] = true;
     }
   }
 
@@ -1839,7 +3140,12 @@ export class Cvat3dPreRenderEnhancer {
     this.applySceneBackgrounds(view);
 
     if (this.hookedViews.has(view)) {
-      const currentViewCount = view.views ? Object.keys(view.views).length : 0;
+      let currentViewCount = 0;
+      if (view.views) {
+        for (const k in view.views) {
+          if (Object.hasOwn(view.views, k)) currentViewCount += 1;
+        }
+      }
       if (this.dirty || currentViewCount !== this.lastViewCount) {
         this.dirty = true;
         this.applyOnceIfNeeded(view, canvas3d?.model);
@@ -1854,8 +3160,19 @@ export class Cvat3dPreRenderEnhancer {
       const origOnSceneLoaded = view.onSceneImageLoaded.bind(view);
       view.onSceneImageLoaded = (points: ThreeObject3DLike): void => {
         origOnSceneLoaded(points);
+        if (view.views) {
+          for (const k in view.views) {
+            if (Object.hasOwn(view.views, k)) {
+              const scn = view.views[k]?.scene;
+              invalidateScenePointsCache(scn);
+              seedScenePointsCacheFromRender(scn, points);
+            }
+          }
+        }
         this.dirty = true;
         this.pendingFrameObjectsLoad = true;
+        this.pendingVisibilityToken = null;
+        this.pendingVisibilityObjectsRef = null;
         // Native code updates frame objects immediately after this callback.
         // Let objects_updated / the next render process the completed frame once.
       };
@@ -1866,7 +3183,11 @@ export class Cvat3dPreRenderEnhancer {
       view.notify = (model: unknown, reason: string): void => {
         // Let CVAT finish replacing the image and annotations before processing points.
         // Native notify can render synchronously or emit nested objects_updated events.
-        if (reason === 'image_changed') this.pendingFrameObjectsLoad = true;
+        if (reason === 'image_changed') {
+          this.pendingFrameObjectsLoad = true;
+          this.pendingVisibilityToken = null;
+          this.pendingVisibilityObjectsRef = null;
+        }
         this.nativeNotifyDepth += 1;
         try {
           origNotify(model, reason);
@@ -1874,11 +3195,32 @@ export class Cvat3dPreRenderEnhancer {
           this.nativeNotifyDepth -= 1;
         }
         if (reason === 'objects_updated') {
-          const objectIds = drawnObjectsVisibilitySignature(view.drawnObjects);
-          if (this.pendingFrameObjectsLoad || objectIds !== this.lastObjectIds) this.markDirty();
+          if (!this.options.colorPointsByCuboid && !this.options.hideGroundPoints) {
+            // O(1) fast-path when point coloring & ground hiding are off: box visibility cannot affect points
+            if (this.pendingFrameObjectsLoad) {
+              this.dirty = true;
+            } else {
+              this.needsIncrementalCuboidSync = true;
+            }
+          } else {
+            const objectIds = computeDrawnObjectsVisibilityToken(view.drawnObjects);
+            this.pendingVisibilityToken = objectIds;
+            this.pendingVisibilityObjectsRef = view.drawnObjects ?? null;
+            if (this.pendingFrameObjectsLoad || objectIds !== this.lastObjectIds) {
+              this.markDirty();
+            } else {
+              this.needsIncrementalCuboidSync = true;
+            }
+          }
         }
-        if (this.nativeNotifyDepth === 0 && this.dirty) {
-          this.applyOnceIfNeeded(view, canvas3d?.model);
+        if (this.nativeNotifyDepth === 0) {
+          if (this.dirty) {
+            this.needsIncrementalCuboidSync = false;
+            this.applyOnceIfNeeded(view, canvas3d?.model);
+          } else if (this.needsIncrementalCuboidSync) {
+            this.needsIncrementalCuboidSync = false;
+            this.syncDrawnCuboidsIncremental(view.drawnObjects);
+          }
         }
       };
     }
@@ -1922,8 +3264,8 @@ export class Cvat3dPreRenderEnhancer {
         this.ensureThreePrototypesHooked(perspectiveScene);
       }
 
-      // Each view's scene can contain thousands of cuboid descendants. Reuse the
-      // point-object discovery for this pass instead of traversing it repeatedly.
+      // Each view's scene can contain 100k+ cuboid descendants. Reuse the O(1)-cached
+      // point-object discovery for this pass without traversing cuboid subtrees.
       const pointLists = new Map<ThreeSceneLike, ThreeObject3DLike[]>();
       const pointsForScene = (scene?: ThreeSceneLike): ThreeObject3DLike[] => {
         if (!scene) return [];
@@ -1942,14 +3284,29 @@ export class Cvat3dPreRenderEnhancer {
 
       this.ensureThreePrototypesHooked(perspectiveScene, perspectivePoints[0]);
 
-      this.optimizeOrientationArrows(view);
       const drawnObjects = view.drawnObjects ?? {};
-      const objectIds = drawnObjectsVisibilitySignature(drawnObjects);
+      this.syncDrawnCuboidsIncremental(drawnObjects);
+
+      const hideGround = Boolean(this.options.hideGroundPoints);
+      let objectIds: string;
+      if (!this.options.colorPointsByCuboid && !hideGround) {
+        objectIds = 'off';
+      } else if (
+        this.pendingVisibilityToken !== null &&
+        this.pendingVisibilityObjectsRef === (view.drawnObjects ?? null)
+      ) {
+        objectIds = this.pendingVisibilityToken;
+      } else {
+        objectIds = computeDrawnObjectsVisibilityToken(drawnObjects);
+      }
+      this.pendingVisibilityToken = null;
+      this.pendingVisibilityObjectsRef = null;
 
       const viewEntries = Object.entries(view.views);
       this.lastViewCount = viewEntries.length;
       let totalPointsObjects = 0;
-      for (const [, rv] of viewEntries) {
+      for (let v = 0; v < viewEntries.length; v += 1) {
+        const rv = viewEntries[v]![1];
         if (rv?.scene) {
           totalPointsObjects += pointsForScene(rv.scene).length;
         }
@@ -1959,7 +3316,6 @@ export class Cvat3dPreRenderEnhancer {
         view.views.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ?? null;
       const frameId = model?.data?.imageID ?? domFrameAttr ?? 'unknown';
       const orthoFixed = this.options.fixedOrthoPointSize ?? true;
-      const hideGround = Boolean(this.options.hideGroundPoints);
       const geometryColorSignature = `${String(frameId)}::${this.options.whiteBackground ? 1 : 0}:${this.options.enableScattering ? 1 : 0}:${this.options.colorPointsByCuboid ? 1 : 0}:${hideGround ? 1 : 0}::objects:${objectIds}`;
       const currentSignature = `${geometryColorSignature}:${orthoFixed ? 1 : 0}::v${viewEntries.length}:p${totalPointsObjects}`;
 
@@ -1969,22 +3325,29 @@ export class Cvat3dPreRenderEnhancer {
 
       const shouldRecompileBoxSnapshots =
         this.pendingFrameObjectsLoad || geometryColorSignature !== this.lastGeometryColorSignature;
+      if (shouldRecompileBoxSnapshots || this.geometryColorEpoch === 0) {
+        this.geometryColorEpoch += 1;
+      }
 
       this.lastExecutionSignature = currentSignature;
       this.lastGeometryColorSignature = geometryColorSignature;
       this.dirty = false;
       this.pendingFrameObjectsLoad = false;
-      this.lastObjectIds = objectIds;
+      if (this.options.colorPointsByCuboid || hideGround) {
+        this.lastObjectIds = objectIds;
+      }
 
-      const cuboidViewKeys = ['perspective', 'top', 'side', 'front'] as const;
-
-      for (const [key, rv] of viewEntries) {
+      for (let v = 0; v < viewEntries.length; v += 1) {
+        const [key, rv] = viewEntries[v]!;
         if (!rv) continue;
 
         if (rv.scene) {
           optimizeOrthographicRaycastPlanes(rv.scene, this.optimizedPlaneMeshes);
         }
-        if (rv.scene && ['perspective', 'top', 'side', 'front'].includes(key)) {
+        if (
+          rv.scene &&
+          (key === 'perspective' || key === 'top' || key === 'side' || key === 'front')
+        ) {
           this.sceneViewRoles.set(rv.scene, key === 'top');
         }
         const isTop = key === 'top' || this.isTopView(rv.scene, rv.renderer);
@@ -1992,20 +3355,11 @@ export class Cvat3dPreRenderEnhancer {
         if (isTop && viewCamera && typeof viewCamera === 'object') this.topCameras.add(viewCamera);
         const isPerspective = key === 'perspective';
         const pointsList = pointsForScene(rv.scene);
-        for (const ptsObj of pointsList) {
+        for (let p = 0; p < pointsList.length; p += 1) {
+          const ptsObj = pointsList[p]!;
           this.preparePointGeometry(ptsObj, isTop);
           this.bindInstanceBeforeRenderHook(ptsObj);
           this.applyScatteringToMaterial(ptsObj, isPerspective);
-        }
-      }
-
-      // Ensure translucent cuboid meshes never write to depth buffer and depth-cull internal points
-      for (const entry of Object.values(drawnObjects)) {
-        for (const viewKey of cuboidViewKeys) {
-          const meshMat = entry?.cuboid?.[viewKey]?.material;
-          if (meshMat && typeof meshMat === 'object') {
-            meshMat.depthWrite = false;
-          }
         }
       }
 
@@ -2021,18 +3375,20 @@ export class Cvat3dPreRenderEnhancer {
       const compiledBoxes = this.lastCompiledBoxes;
       const processedGeometries = new WeakSet<object>();
 
-      for (const [key, rv] of viewEntries) {
+      for (let v = 0; v < viewEntries.length; v += 1) {
+        const [key, rv] = viewEntries[v]!;
         const isTop = key === 'top' || this.isTopView(rv?.scene, rv?.renderer);
-        const signature = `${geometryColorSignature}:ground:${isTop && this.options.hideGroundPoints ? 1 : 0}`;
+        const targetStamp = this.geometryColorEpoch * 2 + (isTop && hideGround ? 1 : 0);
         const pointsList = pointsForScene(rv?.scene);
-        for (const ptsObj of pointsList) {
+        for (let p = 0; p < pointsList.length; p += 1) {
+          const ptsObj = pointsList[p]!;
           if (ptsObj.geometry && !processedGeometries.has(ptsObj.geometry)) {
             processedGeometries.add(ptsObj.geometry);
             if (
               shouldRecompileBoxSnapshots ||
-              this.geometrySignatureMap.get(ptsObj.geometry) !== signature
+              this.geometryEpochMap.get(ptsObj.geometry) !== targetStamp
             ) {
-              this.geometrySignatureMap.set(ptsObj.geometry, signature);
+              this.geometryEpochMap.set(ptsObj.geometry, targetStamp);
               this.applyPointCloudBoxColors(ptsObj, compiledBoxes, isTop);
             }
           }
@@ -2090,13 +3446,35 @@ export class Cvat3dPreRenderEnhancer {
   }
 
   private boxIndexSource: readonly OrientedBoxBounds[] | null = null;
+  private boxIndexDomain: BoxSpatialBounds | null = null;
   private boxIndexCache: BoxSpatialIndex | null = null;
+  private sharedPointHitsBuffer = new Int32Array(0);
+  private lastPointHitsPositions: Float32Array | number[] | null = null;
+  private lastPointHitsBoxIndex: BoxSpatialIndex | null = null;
+  private lastPointHitsCount = 0;
 
-  /** Build the grid once per compiled box snapshot; all views/geometries reuse it. */
-  private getBoxSpatialIndex(boxes: readonly OrientedBoxBounds[]): BoxSpatialIndex | null {
-    if (this.boxIndexSource !== boxes) {
+  /** Build the grid once per compiled box snapshot + LiDAR domain bounds; all views reuse it. */
+  private getBoxSpatialIndex(
+    boxes: readonly OrientedBoxBounds[],
+    domainBounds?: BoxSpatialBounds | null
+  ): BoxSpatialIndex | null {
+    const normalizedDomain = domainBounds ?? null;
+    const sameDomain =
+      this.boxIndexDomain === normalizedDomain ||
+      Boolean(
+        this.boxIndexDomain &&
+        normalizedDomain &&
+        this.boxIndexDomain.minX === normalizedDomain.minX &&
+        this.boxIndexDomain.maxX === normalizedDomain.maxX &&
+        this.boxIndexDomain.minY === normalizedDomain.minY &&
+        this.boxIndexDomain.maxY === normalizedDomain.maxY &&
+        this.boxIndexDomain.minZ === normalizedDomain.minZ &&
+        this.boxIndexDomain.maxZ === normalizedDomain.maxZ
+      );
+    if (this.boxIndexSource !== boxes || !sameDomain) {
       this.boxIndexSource = boxes;
-      this.boxIndexCache = buildBoxSpatialIndex(boxes);
+      this.boxIndexDomain = normalizedDomain;
+      this.boxIndexCache = buildBoxSpatialIndex(boxes, normalizedDomain);
     }
     return this.boxIndexCache;
   }
@@ -2184,6 +3562,7 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     const srcPositions = originalPositions ?? posArray;
+    const numPoints = Math.floor(len / 3);
 
     // WebGL Float32BufferAttribute (Float32Array) always expects normalized 0.0..1.0 floats;
     // only Uint8Array/Uint8ClampedArray attributes use 0..255.
@@ -2194,9 +3573,29 @@ export class Cvat3dPreRenderEnhancer {
     const boxCount = boxes.length;
     const solidBase = this.options.whiteBackground ? 0 : colorScale;
 
-    // Spatial grid: each point only tests cuboids overlapping its XY cell (see buildBoxSpatialIndex).
-    const boxIndex = boxCount > 0 ? this.getBoxSpatialIndex(boxes) : null;
-    const checkBoxes = (colorBoxes || hideGround) && boxIndex !== null;
+    // Prune distant outlier boxes outside the actual LiDAR cloud AABB and build fine spatial grid once
+    const needBoxTest = (colorBoxes || hideGround) && boxCount > 0;
+    const pcBounds = needBoxTest ? getOrComputePointCloudBounds(srcPositions, numPoints * 3) : null;
+    const boxIndex = needBoxTest ? this.getBoxSpatialIndex(boxes, pcBounds) : null;
+    const checkBoxes = boxIndex !== null;
+
+    let hitsBuffer: Int32Array | null = null;
+    let reuseCachedHits = false;
+    if (checkBoxes && numPoints > 0) {
+      if (
+        this.lastPointHitsPositions === srcPositions &&
+        this.lastPointHitsBoxIndex === boxIndex &&
+        this.lastPointHitsCount === numPoints
+      ) {
+        hitsBuffer = this.sharedPointHitsBuffer;
+        reuseCachedHits = true;
+      } else {
+        if (this.sharedPointHitsBuffer.length < numPoints) {
+          this.sharedPointHitsBuffer = new Int32Array(numPoints);
+        }
+        hitsBuffer = this.sharedPointHitsBuffer;
+      }
+    }
 
     if (!hideGround) {
       // Fast non-compacting path: bulk-initialize unboxed colors with native TypedArray `.fill()` / `.set()`
@@ -2223,20 +3622,51 @@ export class Cvat3dPreRenderEnhancer {
         }
       }
 
-      if (colorBoxes && boxIndex) {
-        for (let i = 0; i < len; i += 3) {
-          const hit = classifyPointInBoxes(
-            boxIndex,
-            boxes,
-            srcPositions[i] ?? 0,
-            srcPositions[i + 1] ?? 0,
-            srcPositions[i + 2] ?? 0
-          );
-          if (hit === POINT_OUTSIDE_BOXES) continue;
-          const rgb = hit === POINT_IN_OVERLAP ? null : boxes[hit]!;
-          colorArray[i] = (rgb ? rgb.r : overlapRgb[0]) * colorScale;
-          colorArray[i + 1] = (rgb ? rgb.g : overlapRgb[1]) * colorScale;
-          colorArray[i + 2] = (rgb ? rgb.b : overlapRgb[2]) * colorScale;
+      if (colorBoxes && boxIndex && hitsBuffer) {
+        const overlapR = overlapRgb[0] * colorScale;
+        const overlapG = overlapRgb[1] * colorScale;
+        const overlapB = overlapRgb[2] * colorScale;
+
+        if (reuseCachedHits) {
+          for (let ptIdx = 0, i = 0; ptIdx < numPoints; ptIdx += 1, i += 3) {
+            const hit = hitsBuffer[ptIdx]!;
+            if (hit === POINT_OUTSIDE_BOXES) continue;
+            if (hit === POINT_IN_OVERLAP) {
+              colorArray[i] = overlapR;
+              colorArray[i + 1] = overlapG;
+              colorArray[i + 2] = overlapB;
+            } else {
+              const box = boxes[hit]!;
+              colorArray[i] = box.r * colorScale;
+              colorArray[i + 1] = box.g * colorScale;
+              colorArray[i + 2] = box.b * colorScale;
+            }
+          }
+        } else {
+          for (let ptIdx = 0, i = 0; ptIdx < numPoints; ptIdx += 1, i += 3) {
+            const hit = classifyPointInBoxes(
+              boxIndex,
+              boxes,
+              srcPositions[i] ?? 0,
+              srcPositions[i + 1] ?? 0,
+              srcPositions[i + 2] ?? 0
+            );
+            hitsBuffer[ptIdx] = hit;
+            if (hit === POINT_OUTSIDE_BOXES) continue;
+            if (hit === POINT_IN_OVERLAP) {
+              colorArray[i] = overlapR;
+              colorArray[i + 1] = overlapG;
+              colorArray[i + 2] = overlapB;
+            } else {
+              const box = boxes[hit]!;
+              colorArray[i] = box.r * colorScale;
+              colorArray[i + 1] = box.g * colorScale;
+              colorArray[i + 2] = box.b * colorScale;
+            }
+          }
+          this.lastPointHitsPositions = srcPositions;
+          this.lastPointHitsBoxIndex = boxIndex;
+          this.lastPointHitsCount = numPoints;
         }
       }
 
@@ -2245,18 +3675,28 @@ export class Cvat3dPreRenderEnhancer {
     }
 
     // Ground-hiding compaction path (`hideGroundPoints === true`)
-    const { egoGroundZ, cellMinZ } = populateGroundElevationGrid(srcPositions, len);
+    const { egoGroundZ, cellMinZ } = populateGroundElevationGrid(srcPositions, numPoints * 3);
     const groundThicknessTol = 0.22;
+    const overlapR = overlapRgb[0] * colorScale;
+    const overlapG = overlapRgb[1] * colorScale;
+    const overlapB = overlapRgb[2] * colorScale;
     let writeOffset = 0;
 
-    for (let i = 0; i < len; i += 3) {
+    for (let ptIdx = 0, i = 0; ptIdx < numPoints; ptIdx += 1, i += 3) {
       const px = srcPositions[i] ?? 0;
       const py = srcPositions[i + 1] ?? 0;
       const pz = srcPositions[i + 2] ?? 0;
 
-      const hit = checkBoxes
-        ? classifyPointInBoxes(boxIndex!, boxes, px, py, pz)
-        : POINT_OUTSIDE_BOXES;
+      let hit = POINT_OUTSIDE_BOXES;
+      if (checkBoxes && hitsBuffer) {
+        if (reuseCachedHits) {
+          hit = hitsBuffer[ptIdx]!;
+        } else {
+          hit = classifyPointInBoxes(boxIndex!, boxes, px, py, pz);
+          hitsBuffer[ptIdx] = hit;
+        }
+      }
+
       const isOverlapping = hit === POINT_IN_OVERLAP;
       const matchedBox: OrientedBoxBounds | null =
         hit === POINT_OUTSIDE_BOXES ? null : isOverlapping ? boxes[0]! : boxes[hit]!;
@@ -2282,9 +3722,9 @@ export class Cvat3dPreRenderEnhancer {
       posArray[writeOffset + 2] = pz;
 
       if (colorBoxes && isOverlapping) {
-        colorArray[writeOffset] = overlapRgb[0] * colorScale;
-        colorArray[writeOffset + 1] = overlapRgb[1] * colorScale;
-        colorArray[writeOffset + 2] = overlapRgb[2] * colorScale;
+        colorArray[writeOffset] = overlapR;
+        colorArray[writeOffset + 1] = overlapG;
+        colorArray[writeOffset + 2] = overlapB;
       } else if (colorBoxes && matchedBox) {
         colorArray[writeOffset] = matchedBox.r * colorScale;
         colorArray[writeOffset + 1] = matchedBox.g * colorScale;
@@ -2300,6 +3740,12 @@ export class Cvat3dPreRenderEnhancer {
       }
 
       writeOffset += 3;
+    }
+
+    if (checkBoxes && hitsBuffer && !reuseCachedHits) {
+      this.lastPointHitsPositions = srcPositions;
+      this.lastPointHitsBoxIndex = boxIndex;
+      this.lastPointHitsCount = numPoints;
     }
 
     const keptVertexCount = Math.floor(writeOffset / 3);

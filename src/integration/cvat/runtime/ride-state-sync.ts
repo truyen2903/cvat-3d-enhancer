@@ -9,10 +9,25 @@ export interface RideStateSyncResult {
   readonly outsideKeyframes?: number;
 }
 
-export function getRideStateAttribute(state: CvatObjectStateLike | null | undefined) {
-  return state?.label?.attributes?.find(
+type RideStateAttribute = NonNullable<
+  NonNullable<CvatObjectStateLike['label']>['attributes']
+>[number];
+
+const labelRideStateCache = new WeakMap<object, RideStateAttribute | undefined>();
+
+export function getRideStateAttribute(
+  state: CvatObjectStateLike | null | undefined
+): RideStateAttribute | undefined {
+  const label = state?.label;
+  if (!label || typeof label !== 'object') return undefined;
+  if (labelRideStateCache.has(label)) {
+    return labelRideStateCache.get(label);
+  }
+  const found = label.attributes?.find(
     (attribute) => attribute.name === 'ride_state' && attribute.mutable
   );
+  labelRideStateCache.set(label, found);
+  return found;
 }
 
 /** Update mutable attributes at existing keyframes; CVAT carries them through interpolated frames. */
@@ -40,15 +55,22 @@ export async function syncTrackRideState(
 
   const shapes = exportTrack().shapes;
   if (!shapes?.length) throw new Error('Track keyframes are unavailable');
-  const frames = [...new Set(shapes.map((shape) => shape.frame))].sort((a, b) => a - b);
-  if (frames.some((frame) => !Number.isSafeInteger(frame) || frame < 0)) {
-    throw new Error('Invalid track keyframe');
+  const uniqueFrames = new Set<number>();
+  for (const shape of shapes) {
+    const frame = shape.frame;
+    if (!Number.isSafeInteger(frame) || frame < 0) {
+      throw new Error('Invalid track keyframe');
+    }
+    uniqueFrames.add(frame);
   }
+  const frames = [...uniqueFrames].sort((a, b) => a - b);
 
   // Read every native snapshot before making changes. Reset flags makes this a read
   // through CVAT's existing adapter, as used by dimension sync, without saving geometry.
   current.updateFlags.reset();
-  const snapshots = frames.map((frame) => {
+  const snapshots: CvatObjectStateLike[] = [];
+  let outsideKeyframes = 0;
+  for (const frame of frames) {
     const state = readState(frame, current);
     if (
       state.clientID !== clientID ||
@@ -60,11 +82,11 @@ export async function syncTrackRideState(
     ) {
       throw new Error('CVAT cannot safely update this track');
     }
-    return state;
-  });
+    if (state.outside) outsideKeyframes += 1;
+    snapshots.push(state);
+  }
 
   let updatedKeyframes = 0;
-  const outsideKeyframes = snapshots.filter((state) => state.outside).length;
   // Outside keyframes are updated too: when the object reappears, CVAT carries the value
   // from the last keyframe, so a stale outside keyframe would revert ride_state.
   for (const state of snapshots) {

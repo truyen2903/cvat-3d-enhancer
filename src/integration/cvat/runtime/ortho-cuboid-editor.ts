@@ -176,6 +176,7 @@ const VIEW_WRAPPERS: Readonly<Record<OrthoViewName, string>> = {
   side: CVAT_DOM_SELECTORS.SIDE_VIEW_WRAPPER,
   front: CVAT_DOM_SELECTORS.FRONT_VIEW_WRAPPER,
 };
+const ALL_VIEW_WRAPPERS_SELECTOR = `${VIEW_WRAPPERS.top}, ${VIEW_WRAPPERS.side}, ${VIEW_WRAPPERS.front}`;
 
 export const NUDGE_KEY_CODES = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'] as const;
 const NUDGE_KEYS = new Set<string>(NUDGE_KEY_CODES);
@@ -576,6 +577,7 @@ export function cursorForEdge(hit: EdgeHit): string {
 interface DragState {
   readonly view: OrthoViewName;
   readonly canvas: HTMLCanvasElement;
+  readonly rect: DOMRect;
   readonly clientID: number;
   readonly startPoints: number[];
   readonly frame: CameraFrame;
@@ -617,25 +619,37 @@ export class OrthoCuboidEditor {
     );
 
     const opts = { capture: true } as const;
+    let lastHoverTarget: EventTarget | null = null;
     const keyHandler = Object.assign((e: KeyboardEvent): void => this.onKey(e), {
       __cvat3dEnhancerInternalKeyListener: true,
     });
     const pointerOver = (e: MouseEvent): void => {
       if (this.shortcutsSuspended) return;
       this.hoverObserved = true;
+      if (
+        e.target !== null &&
+        e.target === lastHoverTarget &&
+        (this.hoveredPanel === null || this.hoveredPanel.isConnected)
+      ) {
+        return;
+      }
+      lastHoverTarget = e.target;
       this.hoveredPanel = this.resolveViewPanel(e.target);
     };
     const pointerOut = (e: MouseEvent): void => {
       this.hoverObserved = true;
+      lastHoverTarget = e.relatedTarget;
       this.hoveredPanel = this.resolveViewPanel(e.relatedTarget);
     };
     const clearHover = (): void => {
+      lastHoverTarget = null;
       this.hoveredPanel = null;
       this.hoverObserved = true;
       this.shortcutsSuspended = true;
       this.flushPendingCommit();
     };
     const restoreFocus = (): void => {
+      lastHoverTarget = null;
       this.shortcutsSuspended = false;
       this.hoverObserved = false;
     };
@@ -827,7 +841,7 @@ export class OrthoCuboidEditor {
   private resolveViewPanel(target: EventTarget | null): HTMLElement | null {
     const el = target as Element | null;
     if (!el || typeof el.closest !== 'function') return null;
-    return el.closest<HTMLElement>(Object.values(VIEW_WRAPPERS).join(', '));
+    return el.closest<HTMLElement>(ALL_VIEW_WRAPPERS_SELECTOR);
   }
 
   private resolveViewCanvas(target: EventTarget | null): {
@@ -859,6 +873,7 @@ export class OrthoCuboidEditor {
     hit: EdgeHit;
     frame: CameraFrame;
     local: [number, number];
+    rect: DOMRect;
     clientID: number;
     points: number[];
   } | null {
@@ -883,7 +898,7 @@ export class OrthoCuboidEditor {
       rect.height
     );
     const hit = hitTestCuboidEdge(points, frame, local, worldUnitsPerPixel(frame, rect.width));
-    return hit ? { hit, frame, local, clientID: active.clientID, points } : null;
+    return hit ? { hit, frame, local, rect, clientID: active.clientID, points } : null;
   }
 
   private onPointerDown(event: PointerEvent): void {
@@ -904,6 +919,7 @@ export class OrthoCuboidEditor {
     this.drag = {
       view: target.view,
       canvas: target.canvas,
+      rect: found.rect,
       clientID: found.clientID,
       startPoints: [...found.points],
       frame: found.frame,
@@ -919,7 +935,7 @@ export class OrthoCuboidEditor {
     if (drag) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      const rect = drag.canvas.getBoundingClientRect();
+      const rect = drag.rect;
       const local = pixelToLocal2d(
         drag.frame,
         event.clientX - rect.left,

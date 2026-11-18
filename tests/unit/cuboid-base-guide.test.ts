@@ -183,4 +183,61 @@ describe('cuboid lowest slice guide', () => {
     expect(svg.isConnected).toBe(false);
     guide.clear();
   });
+
+  it('caches canvas DOMRect across 60 steady frames and skips layout reads when null or disabled', () => {
+    document.body.innerHTML = '<div><canvas width="217" height="233"></canvas></div>';
+    const canvas = document.querySelector('canvas')!;
+    const rectSpy = vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      x: 20,
+      y: 30,
+      left: 20,
+      top: 30,
+      right: 237,
+      bottom: 263,
+      width: 217,
+      height: 233,
+      toJSON() {},
+    });
+
+    let enabled = false;
+    const guide = new CuboidBaseGuide(document, () => enabled);
+    const camera = {
+      ...cameraFor(DEFAULT_ORTHO_CAMERA_FRAMES.side),
+      updateMatrixWorld: vi.fn(),
+    };
+
+    try {
+      // Disabled or null points -> 0 getBoundingClientRect() and 0 updateMatrixWorld()
+      for (let i = 0; i < 10; i += 1) {
+        guide.update(canvas, camera, points);
+      }
+      enabled = true;
+      for (let i = 0; i < 10; i += 1) {
+        guide.update(canvas, camera, null);
+      }
+      expect(rectSpy).toHaveBeenCalledTimes(0);
+      expect(camera.updateMatrixWorld).toHaveBeenCalledTimes(0);
+
+      // Enabled with valid points -> 1 getBoundingClientRect() across 60 steady frames
+      for (let frameIdx = 0; frameIdx < 60; frameIdx += 1) {
+        guide.update(canvas, camera, points);
+      }
+      expect(rectSpy).toHaveBeenCalledTimes(1);
+
+      // Scroll / resize invalidates the cached rect and re-measures once
+      window.dispatchEvent(new Event('resize'));
+      expect(rectSpy).toHaveBeenCalledTimes(2);
+      for (let frameIdx = 0; frameIdx < 30; frameIdx += 1) {
+        guide.update(canvas, camera, points);
+      }
+      expect(rectSpy).toHaveBeenCalledTimes(2);
+
+      // Detached canvas exits immediately without measuring DOM layout
+      canvas.remove();
+      guide.update(canvas, camera, points);
+      expect(rectSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      guide.clear();
+    }
+  });
 });

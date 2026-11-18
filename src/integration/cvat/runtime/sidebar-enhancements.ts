@@ -1,6 +1,8 @@
 import { injectCvatObjectDimensionSyncControls } from './object-dimension-controls';
 import { getRideStateAttribute, syncTrackRideState } from './ride-state-sync';
 import {
+  CLIENT_SETTINGS_STORAGE_KEY,
+  ENHANCER_STANDALONE_STORAGE_KEY,
   syncTrackCuboidDimension,
   readRenderOptionsFromClientSettings,
   writeRenderOptionsToClientSettings,
@@ -12,40 +14,117 @@ import type {
   DimensionSyncResult,
 } from './pre-render-enhancer';
 
+const CARD_ID_PREFIX = 'cvat-objects-sidebar-state-item-';
 const CARD_SELECTOR = '.cvat-objects-sidebar-state-item, [id^="cvat-objects-sidebar-state-item-"]';
+const INTERACTIVE_TARGET_SELECTOR =
+  'input,textarea,select,button,a,[role="button"],.ant-select,.anticon,[contenteditable="true"]';
+const IGNORED_MUTATION_SELECTOR =
+  '.cvat-3d-enhancer-dim-sync-row, #cvat-3d-enhancer-workspace-settings-section, [data-enhancer-workspace-settings="true"], #meow-toast-stack, .ant-select-dropdown';
+
 interface FiberLike {
   memoizedProps?: Record<string, unknown>;
   return?: FiberLike | null;
 }
+
 export interface SidebarObjectContext {
   state: CvatObjectStateLike;
   refresh: (() => unknown) | null;
 }
 
+let cachedFiberKey: string | null = null;
+
+function getReactFiber(el: Element): FiberLike | undefined {
+  const record = el as unknown as Record<string, unknown>;
+  if (cachedFiberKey !== null && cachedFiberKey in record) {
+    return record[cachedFiberKey] as FiberLike | undefined;
+  }
+  for (const name of Object.keys(el)) {
+    if (name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$')) {
+      cachedFiberKey = name;
+      return record[name] as FiberLike | undefined;
+    }
+  }
+  return undefined;
+}
+
+function isAsciiDigits(value: string): boolean {
+  if (value.length === 0) return false;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+function extractCardClientId(card: Element): number | null {
+  const raw = card.getAttribute('data-client-id');
+  if (raw !== null && isAsciiDigits(raw)) {
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  }
+  const idAttr = card.id;
+  if (idAttr.startsWith(CARD_ID_PREFIX)) {
+    const suffix = idAttr.slice(CARD_ID_PREFIX.length);
+    if (isAsciiDigits(suffix)) {
+      const parsed = Number(suffix);
+      return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+    }
+  }
+  return null;
+}
+
+function resolveTargetCard(
+  doc: Document,
+  clientID: number,
+  cardHint?: Element | null
+): Element | null {
+  if (cardHint && cardHint.ownerDocument === doc) {
+    const hintedId = extractCardClientId(cardHint);
+    if (hintedId === null || hintedId === clientID) {
+      return cardHint;
+    }
+  }
+  return (
+    doc.getElementById(`cvat-objects-sidebar-state-item-${clientID}`) ??
+    doc.querySelector<HTMLElement>(
+      `.cvat-objects-sidebar-state-item[data-client-id="${clientID}"], [data-client-id="${clientID}"]`
+    )
+  );
+}
+
+function resolveSidebarCardStateOnly(
+  card: Element,
+  expectedId: number
+): CvatObjectStateLike | null {
+  let fiber = getReactFiber(card);
+  for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber?.return ?? undefined) {
+    const candidate = fiber.memoizedProps?.objectState;
+    if (!candidate || typeof candidate !== 'object') continue;
+    const state = candidate as CvatObjectStateLike;
+    if (state.clientID !== expectedId) continue;
+    if (state.shapeType !== 'cuboid') return null;
+    return state;
+  }
+  return null;
+}
+
 /** Read only the requested annotation's sidebar props; never inspect canvas/point-cloud data. */
 export function resolveSidebarObjectContext(
   doc: Document,
-  clientID: number
+  clientID: number,
+  cardHint?: Element | null
 ): SidebarObjectContext | null {
   if (!Number.isSafeInteger(clientID) || clientID < 0) return null;
-  const card =
-    doc.getElementById(`cvat-objects-sidebar-state-item-${clientID}`) ??
-    [...doc.querySelectorAll<HTMLElement>(CARD_SELECTOR)].find(
-      (item) => item.dataset.clientId === String(clientID)
-    );
+  const card = resolveTargetCard(doc, clientID, cardHint);
   if (!card) return null;
-  const key = Object.keys(card).find(
-    (name) => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$')
-  );
-  let fiber = key
-    ? ((card as unknown as Record<string, unknown>)[key] as FiberLike | undefined)
-    : undefined;
+  let fiber = getReactFiber(card);
   for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber?.return ?? undefined) {
     const props = fiber.memoizedProps;
     const candidate = props?.objectState;
     if (!candidate || typeof candidate !== 'object') continue;
     const state = candidate as CvatObjectStateLike;
-    if (state.clientID !== clientID || state.shapeType !== 'cuboid') continue;
+    if (state.clientID !== clientID) continue;
+    if (state.shapeType !== 'cuboid') return null;
     const refresh = props?.refreshAnnotations;
     const updateState = props?.updateState;
     return {
@@ -79,8 +158,15 @@ export async function syncSidebarObjectDimension(
   return result;
 }
 
-export function sidebarHasRideState(doc: Document, clientID: number): boolean {
-  return Boolean(getRideStateAttribute(resolveSidebarObjectContext(doc, clientID)?.state));
+export function sidebarHasRideState(
+  doc: Document,
+  clientID: number,
+  cardHint?: Element | null
+): boolean {
+  if (!Number.isSafeInteger(clientID) || clientID < 0) return false;
+  const card = resolveTargetCard(doc, clientID, cardHint);
+  if (!card) return false;
+  return Boolean(getRideStateAttribute(resolveSidebarCardStateOnly(card, clientID)));
 }
 
 export async function syncSidebarRideState(doc: Document, clientID: number) {
@@ -93,12 +179,7 @@ export async function syncSidebarRideState(doc: Document, clientID: number) {
 
 /** Resolve CVAT's own focus action without using its combined focus/Quick-filter handler. */
 function resolveSidebarFocus(card: Element): (() => void) | null {
-  const key = Object.keys(card).find(
-    (name) => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$')
-  );
-  let fiber = key
-    ? ((card as unknown as Record<string, unknown>)[key] as FiberLike | undefined)
-    : undefined;
+  let fiber = getReactFiber(card);
   for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber?.return ?? undefined) {
     const focus = fiber.memoizedProps?.focus ?? fiber.memoizedProps?.focusAndExpand;
     const activateSingle = fiber.memoizedProps?.activateSingle;
@@ -119,18 +200,12 @@ export function installSidebarQuickFilterGuard(
   onFocus: () => void = () => undefined
 ): () => void {
   const guard = (event: MouseEvent): void => {
-    if (!isEnabled()) return;
-    const target = event.target as Element | null;
-    if (target?.ownerDocument !== doc || event.button !== 0) return;
-    const card = target.closest?.(CARD_SELECTOR);
-    if (
-      !card ||
-      target.closest(
-        'input,textarea,select,button,a,[role="button"],.ant-select,.anticon,[contenteditable="true"]'
-      )
-    )
+    if (event.button !== 0 || (event.type !== 'dblclick' && event.detail < 2) || !isEnabled())
       return;
-    if (event.type !== 'dblclick' && event.detail < 2) return;
+    const target = event.target as Element | null;
+    if (!target || target.ownerDocument !== doc) return;
+    const card = target.closest?.(CARD_SELECTOR);
+    if (!card || target.closest(INTERACTIVE_TARGET_SELECTOR)) return;
     const focus = resolveSidebarFocus(card);
     // Unknown CVAT builds retain their original behavior rather than losing focus.
     if (!focus) return;
@@ -148,6 +223,26 @@ export function installSidebarQuickFilterGuard(
   };
 }
 
+function isEnhancerInternalNode(node: Node): boolean {
+  if (node.nodeType !== 1) return false;
+  const el = node as Element;
+  return (
+    el.classList.contains('cvat-3d-enhancer-dim-sync-row') ||
+    el.id === 'cvat-3d-enhancer-workspace-settings-section' ||
+    el.id === 'meow-toast-stack' ||
+    el.id === 'meow-toast-style' ||
+    el.getAttribute('data-enhancer-workspace-settings') === 'true'
+  );
+}
+
+function isOnlyEnhancerAddedMutation(record: MutationRecord): boolean {
+  if (record.removedNodes.length > 0 || record.addedNodes.length === 0) return false;
+  for (let i = 0; i < record.addedNodes.length; i++) {
+    if (!isEnhancerInternalNode(record.addedNodes[i]!)) return false;
+  }
+  return true;
+}
+
 /** Standalone sidebar integration, also usable when the 3D renderer adapter is unavailable. */
 export function installSidebarEnhancements(doc: Document, win: Window): () => void {
   let options = readRenderOptionsFromClientSettings(win.localStorage);
@@ -156,53 +251,216 @@ export function installSidebarEnhancements(doc: Document, win: Window): () => vo
     win,
     () => options.disableSidebarQuickFilter ?? true
   );
-  const mount = () => {
-    options = readRenderOptionsFromClientSettings(win.localStorage);
+
+  const rideStateBridge = {
+    isAvailable: (id: number, card?: HTMLElement) => sidebarHasRideState(doc, id, card),
+    sync: (id: number) => syncSidebarRideState(doc, id),
+  };
+  const handleSync = (id: number, dim: CuboidDimensionKey) =>
+    syncSidebarObjectDimension(doc, id, dim);
+
+  let observer: MutationObserver | null = null;
+  const reconcile = (
+    targetCards: Iterable<HTMLElement> | null,
+    includeWorkspaceSettings: boolean
+  ): void => {
     injectCvatObjectDimensionSyncControls(
       doc,
-      (id, dim) => syncSidebarObjectDimension(doc, id, dim),
-      options,
-      {
-        isAvailable: (id) => sidebarHasRideState(doc, id),
-        sync: (id) => syncSidebarRideState(doc, id),
-      }
+      handleSync,
+      targetCards
+        ? {
+            enableDimensionSync: options.enableDimensionSync,
+            enableHeadingFlip: options.enableHeadingFlip,
+            targetCards,
+          }
+        : options,
+      rideStateBridge
     );
-    injectCvatWorkspaceSettingsControls(
-      doc,
-      () => options,
-      (next) => {
-        options = writeRenderOptionsToClientSettings(next, win.localStorage);
-        mount();
-      }
-    );
+    if (includeWorkspaceSettings) {
+      injectCvatWorkspaceSettingsControls(
+        doc,
+        () => options,
+        (next) => {
+          options = writeRenderOptionsToClientSettings(next, win.localStorage);
+          reconcile(null, true);
+        }
+      );
+    }
+    observer?.takeRecords();
   };
-  mount();
-  let pending = false;
+
+  reconcile(null, true);
+
   let disposed = false;
-  const observer = new MutationObserver((records) => {
-    if (
-      !records.some(
-        (record) =>
-          record.type === 'childList' || (record.target as Element).closest?.(CARD_SELECTOR)
-      )
-    )
+  let rafId: number | null = null;
+  let microtaskPending = false;
+  let fullSidebarScan = false;
+  let dirtySettings = false;
+  const dirtyCards = new Set<HTMLElement>();
+
+  const flush = (): void => {
+    if (disposed) return;
+    const scanAll = fullSidebarScan;
+    const syncSettings = dirtySettings;
+    fullSidebarScan = false;
+    dirtySettings = false;
+
+    if (scanAll) {
+      dirtyCards.clear();
+      reconcile(null, syncSettings);
       return;
-    if (pending) return;
-    pending = true;
-    queueMicrotask(() => {
-      pending = false;
-      if (!disposed) mount();
-    });
+    }
+
+    if (dirtyCards.size > 0) {
+      const connected: HTMLElement[] = [];
+      for (const card of dirtyCards) {
+        if (card.isConnected) connected.push(card);
+      }
+      dirtyCards.clear();
+      if (connected.length > 0) {
+        reconcile(connected, syncSettings);
+        return;
+      }
+    }
+
+    if (syncSettings) {
+      reconcile([], true);
+    }
+  };
+
+  const scheduleFlush = (): void => {
+    if (disposed || rafId !== null || microtaskPending) return;
+    if (typeof win.requestAnimationFrame === 'function') {
+      rafId = win.requestAnimationFrame(() => {
+        rafId = null;
+        flush();
+      });
+    } else {
+      microtaskPending = true;
+      queueMicrotask(() => {
+        microtaskPending = false;
+        flush();
+      });
+    }
+  };
+
+  const onStorage = (event: StorageEvent): void => {
+    if (
+      event.key === null ||
+      event.key === CLIENT_SETTINGS_STORAGE_KEY ||
+      event.key === ENHANCER_STANDALONE_STORAGE_KEY
+    ) {
+      options = readRenderOptionsFromClientSettings(win.localStorage);
+      fullSidebarScan = true;
+      dirtySettings = true;
+      scheduleFlush();
+    }
+  };
+  win.addEventListener('storage', onStorage);
+
+  const MAX_DIRTY_CARDS = 128;
+
+  const addDirtyCard = (card: HTMLElement): void => {
+    if (fullSidebarScan) return;
+    if (dirtyCards.size >= MAX_DIRTY_CARDS) {
+      fullSidebarScan = true;
+      dirtyCards.clear();
+      return;
+    }
+    dirtyCards.add(card);
+  };
+
+  const collectAddedElement = (el: Element): void => {
+    if (el.matches(CARD_SELECTOR)) {
+      addDirtyCard(el as HTMLElement);
+      return;
+    }
+    if (
+      el.classList.contains('cvat-workspace-settings') ||
+      el.querySelector('.cvat-workspace-settings') !== null
+    ) {
+      dirtySettings = true;
+    }
+    if (el.classList.contains('cvat-objects-sidebar')) {
+      fullSidebarScan = true;
+      dirtyCards.clear();
+      return;
+    }
+    if (!fullSidebarScan) {
+      if (el.childElementCount <= 4) {
+        const innerCards = el.querySelectorAll<HTMLElement>(CARD_SELECTOR);
+        if (innerCards.length > 0) {
+          for (let i = 0; i < innerCards.length; i++) {
+            addDirtyCard(innerCards[i]!);
+          }
+          return;
+        }
+      } else if (el.querySelector(CARD_SELECTOR) !== null) {
+        fullSidebarScan = true;
+        dirtyCards.clear();
+      }
+    }
+  };
+
+  observer = new MutationObserver((records) => {
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i]!;
+      const targetEl =
+        record.target.nodeType === 1 ? (record.target as Element) : record.target.parentElement;
+      if (!targetEl) continue;
+      if (targetEl.closest(IGNORED_MUTATION_SELECTOR)) continue;
+      if (record.type === 'childList' && isOnlyEnhancerAddedMutation(record)) continue;
+
+      const card = targetEl.closest<HTMLElement>(CARD_SELECTOR);
+      if (card) {
+        addDirtyCard(card);
+        continue;
+      }
+
+      if (targetEl.closest('.cvat-workspace-settings')) {
+        dirtySettings = true;
+        continue;
+      }
+
+      if (record.type === 'childList') {
+        const inSidebar = Boolean(targetEl.closest('.cvat-objects-sidebar'));
+        if (inSidebar && record.addedNodes.length > MAX_DIRTY_CARDS) {
+          fullSidebarScan = true;
+          dirtyCards.clear();
+          continue;
+        }
+        for (let j = 0; j < record.addedNodes.length; j++) {
+          const added = record.addedNodes[j]!;
+          if (added.nodeType !== 1) continue;
+          collectAddedElement(added as Element);
+        }
+        if (inSidebar && record.addedNodes.length === 0 && record.removedNodes.length > 0) {
+          // Cards removed during filter/frame update; IntersectionObserver handles remaining cards.
+          continue;
+        }
+      }
+    }
+
+    if (fullSidebarScan || dirtySettings || dirtyCards.size > 0) {
+      scheduleFlush();
+    }
   });
+
   observer.observe(doc.documentElement, {
     subtree: true,
     childList: true,
     attributes: true,
     attributeFilter: ['class', 'id', 'aria-label', 'data-client-id'],
   });
+
   return () => {
     disposed = true;
-    observer.disconnect();
+    if (rafId !== null && typeof win.cancelAnimationFrame === 'function') {
+      win.cancelAnimationFrame(rafId);
+    }
+    rafId = null;
+    observer?.disconnect();
+    win.removeEventListener('storage', onStorage);
     removeGuard();
   };
 }

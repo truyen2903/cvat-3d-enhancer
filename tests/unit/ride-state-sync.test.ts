@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CvatObjectStateLike } from '../../src/integration/cvat/runtime/pre-render-enhancer';
-import { syncTrackRideState } from '../../src/integration/cvat/runtime/ride-state-sync';
+import {
+  getRideStateAttribute,
+  syncTrackRideState,
+} from '../../src/integration/cvat/runtime/ride-state-sync';
 
 function track(target = 'true') {
   const snapshots = [0, 5, 10].map((frame) => {
@@ -98,4 +101,44 @@ describe('ride_state across a track', () => {
       }
     }
   );
+
+  it('reads label.attributes getter only once across 5,000 states sharing the same label object', () => {
+    let mutableReads = 0;
+    const sharedMutableLabel: NonNullable<CvatObjectStateLike['label']> = {};
+    Object.defineProperty(sharedMutableLabel, 'attributes', {
+      get() {
+        mutableReads += 1;
+        return [{ id: 6260, name: 'ride_state', mutable: true }];
+      },
+    });
+
+    let nonMatchingReads = 0;
+    const sharedStaticLabel: NonNullable<CvatObjectStateLike['label']> = {};
+    Object.defineProperty(sharedStaticLabel, 'attributes', {
+      get() {
+        nonMatchingReads += 1;
+        return [{ id: 6260, name: 'ride_state', mutable: false }];
+      },
+    });
+
+    for (let i = 0; i < 5000; i++) {
+      const stateWithRide: CvatObjectStateLike = {
+        clientID: i + 1,
+        shapeType: 'cuboid',
+        objectType: 'track',
+        label: sharedMutableLabel,
+      };
+      const stateWithoutRide: CvatObjectStateLike = {
+        clientID: i + 5001,
+        shapeType: 'cuboid',
+        objectType: 'track',
+        label: sharedStaticLabel,
+      };
+      expect(getRideStateAttribute(stateWithRide)?.id).toBe(6260);
+      expect(getRideStateAttribute(stateWithoutRide)).toBeUndefined();
+    }
+
+    expect(mutableReads).toBe(1);
+    expect(nonMatchingReads).toBe(1);
+  });
 });

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { injectCvatObjectDimensionSyncControls } from '../../src/integration/cvat/runtime/object-dimension-controls';
+import {
+  VIEWPORT_DEFER_THRESHOLD,
+  injectCvatObjectDimensionSyncControls,
+} from '../../src/integration/cvat/runtime/object-dimension-controls';
 
 const rowSelector = '.cvat-3d-enhancer-dim-sync-row';
 const sync = () =>
@@ -171,5 +174,138 @@ describe('dimension controls on customized CVAT sidebars', () => {
     await Promise.resolve();
     observer.disconnect();
     expect(mutations).not.toHaveBeenCalled();
+  });
+
+  it('defers off-viewport cards via IntersectionObserver when > 64 cards exist and lazily mounts on scroll', async () => {
+    expect(VIEWPORT_DEFER_THRESHOLD).toBe(64);
+    const totalCards = 120;
+    const sidebar = document.createElement('div');
+    sidebar.className = 'cvat-objects-sidebar';
+    const scrollList = document.createElement('div');
+    scrollList.className = 'cvat-objects-sidebar-states-list';
+    Object.defineProperty(scrollList, 'clientHeight', { value: 400, configurable: true });
+    Object.defineProperty(scrollList, 'scrollHeight', { value: 6000, configurable: true });
+    Object.defineProperty(scrollList, 'scrollTop', {
+      value: 0,
+      writable: true,
+      configurable: true,
+    });
+
+    const cards: HTMLElement[] = [];
+    for (let i = 1; i <= totalCards; i++) {
+      const card = document.createElement('div');
+      card.id = `cvat-objects-sidebar-state-item-${i}`;
+      card.className = 'cvat-objects-sidebar-state-item';
+      card.innerHTML =
+        '<span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>';
+      scrollList.appendChild(card);
+      cards.push(card);
+    }
+    sidebar.appendChild(scrollList);
+    document.body.appendChild(sidebar);
+
+    let ioCallback: IntersectionObserverCallback | null = null;
+    const observed = new Set<Element>();
+    const unobserved = new Set<Element>();
+    class MockIntersectionObserver {
+      readonly root: Element | Document | null;
+      readonly rootMargin: string;
+      readonly thresholds: readonly number[] = [0];
+      constructor(callback: IntersectionObserverCallback, init?: IntersectionObserverInit) {
+        ioCallback = callback;
+        this.root = init?.root ?? null;
+        this.rootMargin = init?.rootMargin ?? '0px';
+      }
+      observe(target: Element): void {
+        observed.add(target);
+      }
+      unobserve(target: Element): void {
+        observed.delete(target);
+        unobserved.add(target);
+      }
+      disconnect(): void {
+        observed.clear();
+      }
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    }
+
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver);
+    try {
+      const onSync = sync();
+      const rideState = {
+        isAvailable: vi.fn((_id: number, card?: HTMLElement) => Boolean(card)),
+        sync: vi.fn(async (id: number) => ({
+          clientID: id,
+          targetValue: 'true',
+          updatedKeyframes: 1,
+          totalKeyframes: 1,
+        })),
+      };
+
+      const mountedInitially = injectCvatObjectDimensionSyncControls(
+        document,
+        onSync,
+        {},
+        rideState
+      );
+      expect(mountedInitially).toBeGreaterThan(0);
+      expect(mountedInitially).toBeLessThanOrEqual(32);
+      expect(rideState.isAvailable).toHaveBeenCalledTimes(mountedInitially);
+
+      const farCard = cards[94]!; // clientID = 95
+      expect(farCard.querySelector(rowSelector)).toBeNull();
+      expect(observed.has(farCard)).toBe(true);
+
+      // Simulate scrolling farCard into viewport
+      expect(ioCallback).not.toBeNull();
+      ioCallback!(
+        [
+          {
+            target: farCard,
+            isIntersecting: true,
+          } as unknown as IntersectionObserverEntry,
+        ],
+        {} as IntersectionObserver
+      );
+
+      expect(unobserved.has(farCard)).toBe(true);
+      const farRow = farCard.querySelector(rowSelector);
+      expect(farRow).not.toBeNull();
+      expect(farCard.querySelectorAll('button')).toHaveLength(5);
+      farCard.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="H"]')!.click();
+      await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(95, 'H'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reconciles only targetCards when provided and passes card element to rideState.isAvailable', () => {
+    document.body.innerHTML = `
+      <div class="cvat-objects-sidebar">
+        <div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item">
+          <span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>
+        </div>
+        <div id="cvat-objects-sidebar-state-item-2" class="cvat-objects-sidebar-state-item">
+          <span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>
+        </div>
+      </div>`;
+    const card1 = document.getElementById('cvat-objects-sidebar-state-item-1')!;
+    const card2 = document.getElementById('cvat-objects-sidebar-state-item-2')!;
+    const rideState = {
+      isAvailable: vi.fn(() => true),
+      sync: vi.fn(),
+    };
+    const mounted = injectCvatObjectDimensionSyncControls(
+      document,
+      sync(),
+      { targetCards: [card2] },
+      rideState
+    );
+    expect(mounted).toBe(1);
+    expect(card1.querySelector(rowSelector)).toBeNull();
+    expect(card2.querySelector(rowSelector)).not.toBeNull();
+    expect(rideState.isAvailable).toHaveBeenCalledExactlyOnceWith(2, card2);
   });
 });

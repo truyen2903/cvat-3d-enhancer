@@ -13,6 +13,7 @@ import { CapabilityRegistry, CvatV2RuntimeAdapter } from '../../src/integration/
 describe('CVAT 3D Runtime & PageBridge Integration', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    delete (window as { cvatUI?: unknown }).cvatUI;
     document.body.innerHTML = `
       <div id="root">
         <div class="cvat-canvas3d-perspective">
@@ -442,5 +443,171 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
 
     stopBridge();
     stopHost();
+  });
+
+  it('commits same-frame cuboid edits without marking full point-cloud box compilation dirty', async () => {
+    const host = new PageBridgeRuntimeHost(
+      'commit_no_dirty_session_token_999999',
+      window as never,
+      document
+    );
+    const perspCanvas = document.querySelector<
+      HTMLCanvasElement & { updatePosition?: (state: CvatObjectStateLike, pts: number[]) => void }
+    >('.cvat-canvas3d-perspective canvas')!;
+    const updatePositionSpy = vi.fn();
+    perspCanvas.updatePosition = updatePositionSpy;
+
+    const stateObj: CvatObjectStateLike = {
+      clientID: 7,
+      frame: 3,
+      shapeType: 'cuboid',
+      points: [1, 2, 0, 0, 0, 0, 4.2, 1.8, 1.5],
+      updateFlags: {},
+      save: vi.fn(async () => stateObj),
+    };
+
+    const internal = host as unknown as {
+      preRenderEnhancer: Cvat3dPreRenderEnhancer;
+      resolveActiveCuboid: (allowReduxFallback?: boolean) => {
+        clientID: number;
+        entry: null;
+        state: CvatObjectStateLike;
+      } | null;
+      syncActiveObjectQaOverlay: (force?: boolean) => void;
+      commitCuboidPoints: (clientID: number, points: number[]) => Promise<void>;
+    };
+
+    vi.spyOn(internal, 'resolveActiveCuboid').mockReturnValue({
+      clientID: 7,
+      entry: null,
+      state: stateObj,
+    });
+    const markDirtySpy = vi.spyOn(internal.preRenderEnhancer, 'markDirty');
+    const redrawSpy = vi
+      .spyOn(internal.preRenderEnhancer, 'requestViewsRedraw')
+      .mockImplementation(() => {});
+    const qaSpy = vi.spyOn(internal, 'syncActiveObjectQaOverlay').mockImplementation(() => {});
+
+    const nextPts = [1.5, 2.2, 0, 0, 0, 0.1, 4.2, 1.8, 1.5];
+    await internal.commitCuboidPoints(7, nextPts);
+
+    expect(updatePositionSpy).toHaveBeenCalledWith(stateObj, nextPts);
+    expect(markDirtySpy).not.toHaveBeenCalled();
+    expect(redrawSpy).toHaveBeenCalledOnce();
+    expect(qaSpy).toHaveBeenCalledWith(true);
+  });
+
+  it('short-circuits redundant Redux globalStateDidUpdate notifications and skips matching shape dispatches', () => {
+    const dispatchSpy = vi.fn();
+    const configureSpy = vi.fn();
+    let currentFrame = 10;
+    let currentStates: CvatObjectStateLike[] = [
+      { clientID: 1, points: [0, 0, 0, 0, 0, 0, 4, 2, 1] },
+    ];
+    const canvasInstance = {
+      configure: configureSpy,
+      model: {
+        data: {
+          imageID: 10,
+          configuration: {
+            shapeOpacity: 25,
+            selectedShapeOpacity: 75,
+            outlinedBorders: '#22d3ee',
+            colorBy: 'Instance',
+          },
+        },
+      },
+    };
+
+    interface RegisteredPlugin {
+      name: string;
+      destructor: () => void;
+      globalStateDidUpdate?: (state: Record<string, unknown>) => void;
+    }
+    let registeredPlugin = null as RegisteredPlugin | null;
+
+    const mockStore = {
+      getState: () => ({
+        annotation: {
+          player: { frame: { number: currentFrame } },
+          annotations: {
+            activatedStateID: 1,
+            states: currentStates,
+          },
+          canvas: { instance: canvasInstance },
+        },
+        settings: {
+          shapes: {
+            opacity: 25,
+            selectedOpacity: 75,
+            outlined: true,
+            outlinedBorders: '#22d3ee',
+            colorBy: 'Instance',
+          },
+        },
+      }),
+      dispatch: dispatchSpy,
+    };
+
+    Object.defineProperty(window, 'cvatUI', {
+      configurable: true,
+      writable: true,
+      value: {
+        registerComponent: (cb: (args: { store: typeof mockStore }) => RegisteredPlugin) => {
+          registeredPlugin = cb({ store: mockStore });
+        },
+      },
+    });
+
+    const host = new PageBridgeRuntimeHost(
+      'redux_short_circuit_token_999999',
+      window as never,
+      document
+    );
+    const internal = host as unknown as {
+      handleGlobalStateUpdate: () => void;
+      syncActiveObjectQaOverlay: (force?: boolean) => void;
+      applyCanvasVisualConfig: (cfg: Record<string, unknown>) => void;
+    };
+    const qaSpy = vi.spyOn(internal, 'syncActiveObjectQaOverlay').mockImplementation(() => {});
+
+    internal.handleGlobalStateUpdate();
+    expect(qaSpy).toHaveBeenCalledTimes(1);
+
+    // Unrelated Redux dispatches keeping (frame, activatedStateID, statesRef, canvasInstance) identical
+    for (let i = 0; i < 10; i += 1) {
+      internal.handleGlobalStateUpdate();
+    }
+    expect(qaSpy).toHaveBeenCalledTimes(1);
+
+    // Changing frame or states reference runs the sync again
+    currentFrame = 11;
+    currentStates = [...currentStates];
+    internal.handleGlobalStateUpdate();
+    expect(qaSpy).toHaveBeenCalledTimes(2);
+
+    // Matching settings.shapes & model.data.configuration skip redundant dispatch/configure
+    internal.applyCanvasVisualConfig({
+      shapeOpacity: 25,
+      selectedShapeOpacity: 75,
+      outlinedBorders: true,
+      outlineColor: '#22d3ee',
+      colorBy: 'Instance',
+    });
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(configureSpy).not.toHaveBeenCalled();
+
+    // Changed value dispatches only the changed field
+    internal.applyCanvasVisualConfig({
+      shapeOpacity: 55,
+      selectedShapeOpacity: 75,
+    });
+    expect(dispatchSpy).toHaveBeenCalledExactlyOnceWith({
+      type: 'CHANGE_SHAPES_OPACITY',
+      payload: { opacity: 55 },
+    });
+    expect(configureSpy).toHaveBeenCalledExactlyOnceWith({ shapeOpacity: 55 });
+
+    registeredPlugin?.destructor();
   });
 });

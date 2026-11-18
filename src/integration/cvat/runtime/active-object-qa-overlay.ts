@@ -29,6 +29,10 @@ import {
   getOriginalGeometryPositions,
   haveIdenticalAttributes,
 } from './pre-render-enhancer';
+import { type Spatial2DDrawnEntryLike, getOrBuildSpatial2DBoxLookup } from './state-lookup';
+
+export const QA_OVERLAY_ELEMENT_ID = 'cvat-3d-enhancer-active-qa-overlay';
+const QA_OVERLAY_STYLE_ID = 'cvat-3d-enhancer-active-qa-style';
 
 export type QaWarningCode = 'S' | 'K' | 'Z' | 'H' | 'J' | 'T' | 'D' | 'F' | 'M' | 'P';
 
@@ -100,13 +104,18 @@ const KNOWN_LABEL_ID_TO_NAME: Readonly<Record<number, string>> = Object.freeze({
   36194: 'Obstacle',
 });
 
+export interface ExtractSidebarDomOptions {
+  readonly skipHudPos?: boolean;
+}
+
 /**
  * Fallback helper that inspects CVAT's Objects Sidebar DOM (`#cvat-objects-sidebar-state-item-${clientID}`)
  * to read the object's selected Label name and any visible attribute controls in real time.
  */
 export function extractSidebarDomLabelAndAttributes(
   doc: Document,
-  clientID: number
+  clientID: number,
+  options?: ExtractSidebarDomOptions
 ): {
   readonly labelName?: string;
   readonly domAttributes: Record<string, string>;
@@ -114,25 +123,28 @@ export function extractSidebarDomLabelAndAttributes(
   readonly domPos?: { readonly x: number; readonly y: number; readonly z: number } | null;
 } {
   let domPos: { readonly x: number; readonly y: number; readonly z: number } | null = null;
-  const hudCandidates = doc.querySelectorAll<HTMLElement>(
-    '.cvat-canvas3d-perspective [class*="hud"], .cvat-canvas3d-perspective [class*="info"], .cvat-canvas3d-perspective div'
-  );
-  for (const el of hudCandidates) {
-    if (el.id === 'cvat-3d-enhancer-active-qa-overlay' || el.children.length > 8) {
-      continue;
-    }
-    const txt = el.textContent ?? '';
-    if (!/pos/i.test(txt)) continue;
-    const m = /pos(?:ition)?\s*[:=]?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?)(?:\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?))?\s*\)?/i.exec(
-      txt
+  if (options?.skipHudPos !== true) {
+    const hudCandidates = doc.querySelectorAll<HTMLElement>(
+      '.cvat-canvas3d-perspective [class*="hud"], .cvat-canvas3d-perspective [class*="info"], .cvat-canvas3d-perspective div'
     );
-    if (m) {
-      const x = Number(m[1]);
-      const y = Number(m[2]);
-      const z = m[3] !== undefined && Number.isFinite(Number(m[3])) ? Number(m[3]) : 0;
-      if (Number.isFinite(x) && Number.isFinite(y)) {
-        domPos = { x, y, z };
-        break;
+    for (const el of hudCandidates) {
+      if (el.id === QA_OVERLAY_ELEMENT_ID || el.children.length > 8 || el.tagName === 'CANVAS') {
+        continue;
+      }
+      const txt = el.textContent ?? '';
+      if (!/pos/i.test(txt)) continue;
+      const m =
+        /pos(?:ition)?\s*[:=]?\s*\(?\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?)(?:\s*(?:,\s*|\s+)(-?\d+(?:\.\d+)?))?\s*\)?/i.exec(
+          txt
+        );
+      if (m) {
+        const x = Number(m[1]);
+        const y = Number(m[2]);
+        const z = m[3] !== undefined && Number.isFinite(Number(m[3])) ? Number(m[3]) : 0;
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          domPos = { x, y, z };
+          break;
+        }
       }
     }
   }
@@ -497,24 +509,45 @@ export function extractTrackKeyframes(
     }
   }
 
-  let rawShapes: CvatSerializedTrackShape[] = Array.isArray(track?.shapes)
-    ? [...track.shapes].sort((a, b) => Number(a.frame) - Number(b.frame))
-    : [];
-
-  if (rawShapes.length === 0) {
+  let rawShapes: readonly CvatSerializedTrackShape[] | null = null;
+  if (Array.isArray(track?.shapes) && track.shapes.length > 0) {
+    const shapes = track.shapes;
+    let isSorted = true;
+    for (let i = 1; i < shapes.length; i += 1) {
+      if (Number(shapes[i]!.frame) < Number(shapes[i - 1]!.frame)) {
+        isSorted = false;
+        break;
+      }
+    }
+    rawShapes = isSorted
+      ? shapes
+      : shapes.slice().sort((a, b) => Number(a.frame) - Number(b.frame));
+  } else {
     const fallbackKeyframes = (state as { keyframes?: Record<string, CvatSerializedTrackShape> })
       .keyframes;
     if (fallbackKeyframes && typeof fallbackKeyframes === 'object') {
-      rawShapes = Object.entries(fallbackKeyframes)
-        .map(([frameKey, val]) => ({
-          ...val,
-          frame: Number(val?.frame ?? frameKey),
-        }))
-        .sort((a, b) => Number(a.frame) - Number(b.frame));
+      const keys = Object.keys(fallbackKeyframes);
+      if (keys.length > 0) {
+        const collected: CvatSerializedTrackShape[] = [];
+        for (let i = 0; i < keys.length; i += 1) {
+          const frameKey = keys[i]!;
+          const val = fallbackKeyframes[frameKey];
+          if (val) {
+            collected.push({
+              ...val,
+              frame: Number(val.frame ?? frameKey),
+            });
+          }
+        }
+        if (collected.length > 1) {
+          collected.sort((a, b) => Number(a.frame) - Number(b.frame));
+        }
+        rawShapes = collected;
+      }
     }
   }
 
-  if (rawShapes.length === 0) {
+  if (!rawShapes || rawShapes.length === 0) {
     return [];
   }
 
@@ -696,8 +729,7 @@ export function evaluateTrackHistoryWarnings(
 
   // In VinFast dataset, frames are spaced far apart in time (ego + target relative shift is commonly 6m–25m/frame).
   // Only flag [J] when displacement between adjacent frames is an extreme outlier indicating a swapped/jumped ID.
-  const maxSpeedPerFrame =
-    category === 'pedestrian' ? 16 : category === 'two-wheels' ? 28 : 36;
+  const maxSpeedPerFrame = category === 'pedestrian' ? 16 : category === 'two-wheels' ? 28 : 36;
   const neighborForJump = prevKf ?? nextKf;
   if (neighborForJump) {
     const dt = Math.max(1, Math.abs(currentFrame - neighborForJump.frame));
@@ -764,9 +796,12 @@ export function computeDistanceFromPos(cx: number, cy: number, cz?: number): num
 export function extractPosCoordinates(
   source?: unknown,
   drawnEntry?: CvatDrawnObjectEntry | null,
-  fallbackPos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null
+  fallbackPos?:
+    readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null
 ): { readonly x: number; readonly y: number; readonly z: number } | null {
-  const tryVec = (val: unknown): { readonly x: number; readonly y: number; readonly z: number } | null => {
+  const tryVec = (
+    val: unknown
+  ): { readonly x: number; readonly y: number; readonly z: number } | null => {
     if (!val) return null;
     if (Array.isArray(val) && val.length >= 2) {
       const x = Number(val[0]);
@@ -811,6 +846,93 @@ export function extractPosCoordinates(
   return tryVec(fallbackPos);
 }
 
+function isDrawnEntryHiddenOrOutside(entry: Spatial2DDrawnEntryLike | undefined): boolean {
+  if (!entry) {
+    return false;
+  }
+  const data = entry.data;
+  if (data?.hidden === true || data?.outside === true) {
+    return true;
+  }
+  const state = entry.state;
+  return Boolean(data?.hidden ?? state?.hidden) || Boolean(data?.outside ?? state?.outside);
+}
+
+function getDrawnEntryLivePoints(
+  entry: Spatial2DDrawnEntryLike | undefined
+): readonly number[] | null {
+  if (!entry) {
+    return null;
+  }
+  const dataPts = entry.data?.points;
+  if (Array.isArray(dataPts) && dataPts.length >= 9) {
+    return dataPts;
+  }
+  const statePts = entry.state?.points;
+  if (Array.isArray(statePts) && statePts.length >= 9) {
+    return statePts;
+  }
+  return null;
+}
+
+const sharedNeighborBottomZBuffer = new Float64Array(256);
+
+/**
+ * In-place O(K) Floyd-Hoare quickselect returning `sorted[Math.floor(count * 0.5)]`
+ * with zero heap allocations and zero JS comparator callbacks (replaces O(K log K) Array.sort).
+ */
+function selectUpperMedianFloat64(buf: Float64Array, count: number): number {
+  const k = count >>> 1;
+  let left = 0;
+  let right = count - 1;
+  while (left < right) {
+    const mid = (left + right) >>> 1;
+    const a = buf[left]!;
+    const b = buf[mid]!;
+    const c = buf[right]!;
+    // Median-of-three pivot selection to defeat sorted / plateau inputs
+    let pivotIdx = mid;
+    if (a < b) {
+      if (b > c) pivotIdx = a < c ? right : left;
+    } else if (a > c) {
+      pivotIdx = b < c ? right : mid;
+    } else {
+      pivotIdx = left;
+    }
+    const pivot = buf[pivotIdx]!;
+    buf[pivotIdx] = buf[right]!;
+    buf[right] = pivot;
+
+    let store = left;
+    let eqEnd = left;
+    for (let i = left; i < right; i += 1) {
+      const val = buf[i]!;
+      if (val < pivot) {
+        buf[i] = buf[eqEnd]!;
+        buf[eqEnd] = buf[store]!;
+        buf[store] = val;
+        store += 1;
+        eqEnd += 1;
+      } else if (val === pivot) {
+        buf[i] = buf[eqEnd]!;
+        buf[eqEnd] = val;
+        eqEnd += 1;
+      }
+    }
+    buf[right] = buf[eqEnd]!;
+    buf[eqEnd] = pivot;
+
+    if (k < store) {
+      right = store - 1;
+    } else if (k > eqEnd) {
+      left = eqEnd + 1;
+    } else {
+      return pivot;
+    }
+  }
+  return buf[left]!;
+}
+
 /**
  * Evaluates spatial & LiDAR point cloud geometry warnings on the current frame:
  * - `Z`: Độ cao ngoài ngưỡng / box bị bay, bị âm đường
@@ -822,7 +944,8 @@ export function extractPosCoordinates(
 export function evaluateSpatialAndPointCloudWarnings(params: {
   readonly clientID: number;
   readonly currentPoints: readonly number[];
-  readonly pos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null;
+  readonly pos?:
+    readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null;
   readonly occluded?: boolean;
   readonly outside?: boolean;
   readonly drawnObjects?: Record<number | string, CvatDrawnObjectEntry | undefined>;
@@ -842,7 +965,10 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
       ? {
           x: Number(currentPoints[0]),
           y: Number(currentPoints[1]),
-          z: currentPoints.length >= 3 && Number.isFinite(Number(currentPoints[2])) ? Number(currentPoints[2]) : 0,
+          z:
+            currentPoints.length >= 3 && Number.isFinite(Number(currentPoints[2]))
+              ? Number(currentPoints[2])
+              : 0,
         }
       : extractPosCoordinates({ pos }, drawnObjects?.[clientID] ?? null, pos);
 
@@ -880,28 +1006,35 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   const hy = W * 0.5;
   const hz = H * 0.5;
   const bottomZ = cz - hz;
+  const spatialLookup = drawnObjects ? getOrBuildSpatial2DBoxLookup(drawnObjects) : null;
 
-  // 2. [F] Check overlapping / duplicate box on the same frame
-  if (drawnObjects) {
-    for (const [otherKey, otherEntry] of Object.entries(drawnObjects)) {
-      const otherId = Number(otherEntry?.data?.clientID ?? otherEntry?.state?.clientID ?? otherKey);
-      if (otherId === clientID || otherEntry?.data?.hidden || otherEntry?.data?.outside) {
-        continue;
+  // 2. [F] Check overlapping / duplicate box on the same frame via O(1) 2D spatial lookup
+  if (drawnObjects && spatialLookup && spatialLookup.count > 0) {
+    const selfSpanXY = Math.hypot(L, W);
+    const searchRadiusXY = selfSpanXY * 0.45 + 1e-3;
+    spatialLookup.forEachNeighbor(cx, cy, searchRadiusXY, (idx, cachedDistXY) => {
+      const otherId = spatialLookup.ids[idx]!;
+      if (otherId === clientID) {
+        return;
       }
-      const otherPts = otherEntry?.state?.points ?? otherEntry?.data?.points;
-      if (!Array.isArray(otherPts) || otherPts.length < 9) {
-        continue;
+      const liveEntry = spatialLookup.entries[idx] ?? drawnObjects[otherId];
+      if (isDrawnEntryHiddenOrOutside(liveEntry)) {
+        return;
       }
-      const ox = Number(otherPts[0]);
-      const oy = Number(otherPts[1]);
-      const oz = Number(otherPts[2]);
-      const oL = Number(otherPts[6]);
-      const oW = Number(otherPts[7]);
-      const oH = Number(otherPts[8]);
+      const livePts = getDrawnEntryLivePoints(liveEntry);
+      const cachedOx = spatialLookup.xs[idx]!;
+      const cachedOy = spatialLookup.ys[idx]!;
+      const ox = livePts ? Number(livePts[0]) : cachedOx;
+      const oy = livePts ? Number(livePts[1]) : cachedOy;
+      const oz = livePts ? Number(livePts[2]) : spatialLookup.zs[idx]!;
+      const oL = livePts ? Number(livePts[6]) : spatialLookup.ls[idx]!;
+      const oW = livePts ? Number(livePts[7]) : spatialLookup.ws[idx]!;
+      const oH = livePts ? Number(livePts[8]) : spatialLookup.hs[idx]!;
 
-      const centerDistXY = Math.hypot(cx - ox, cy - oy);
+      const sameXY = !livePts || (Math.fround(ox) === cachedOx && Math.fround(oy) === cachedOy);
+      const centerDistXY = sameXY ? cachedDistXY : Math.hypot(cx - ox, cy - oy);
       const centerDistZ = Math.abs(cz - oz);
-      const minSpanXY = Math.min(Math.hypot(L, W), Math.hypot(oL, oW));
+      const minSpanXY = Math.min(selfSpanXY, Math.hypot(oL, oW));
       if (centerDistXY < minSpanXY * 0.45 && centerDistZ < (H + oH) * 0.4) {
         warnings.push({
           code: 'F',
@@ -909,9 +1042,10 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
           title: 'Thừa box / Trùng lặp vị trí (đang tắt Outside)',
           detail: `Chồng lấn với Box ID #${otherId} (tâm cách ${centerDistXY.toFixed(2)}m)`,
         });
-        break;
+        return false;
       }
-    }
+      return;
+    });
   }
 
   if (!positionArray || positionArray.length < 3) {
@@ -979,11 +1113,7 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
     const dy = py - cy;
     const dz = pz - cz;
 
-    if (
-      Math.abs(dx) > maxHalfSpan ||
-      Math.abs(dy) > maxHalfSpan ||
-      Math.abs(dz) > maxHalfSpan
-    ) {
+    if (Math.abs(dx) > maxHalfSpan || Math.abs(dy) > maxHalfSpan || Math.abs(dz) > maxHalfSpan) {
       continue;
     }
 
@@ -1053,7 +1183,7 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   const minInnerHRel =
     innerHRelSamples.length >= 4
       ? innerHRelSamples[Math.floor(innerHRelSamples.length * 0.05)]!
-      : innerHRelSamples[0] ?? null;
+      : (innerHRelSamples[0] ?? null);
 
   let zWarned = false;
 
@@ -1127,35 +1257,55 @@ export function evaluateSpatialAndPointCloudWarnings(params: {
   }
 
   // Fallback when NO ground points exist around/under box (`ko có đất`):
-  // Compare bottomZ against nearby boxes on the same frame (`drawnObjects`) or global road envelope
+  // Compare bottomZ against nearby boxes on the same frame (`drawnObjects`) or global road envelope.
+  // Uses O(1) bounded two-ring search: sample immediate 8m neighborhood first (more accurate local
+  // road slope and touches <= 9 grid cells); only widen to 22m if < 6 close neighbors exist.
   if (!zWarned && ringGroundHRelSamples.length < 6 && underBoxHRelSamples.length < 4) {
-    const neighborBottomZs: number[] = [];
-    if (drawnObjects) {
-      for (const [otherKey, otherEntry] of Object.entries(drawnObjects)) {
-        const otherId = Number(
-          otherEntry?.data?.clientID ?? otherEntry?.state?.clientID ?? otherKey
-        );
-        if (otherId === clientID || otherEntry?.data?.hidden || otherEntry?.data?.outside) {
-          continue;
-        }
-        const otherPts = otherEntry?.state?.points ?? otherEntry?.data?.points;
-        if (!Array.isArray(otherPts) || otherPts.length < 9) {
-          continue;
-        }
-        const ox = Number(otherPts[0]);
-        const oy = Number(otherPts[1]);
-        const oz = Number(otherPts[2]);
-        const oH = Number(otherPts[8]);
-        const distXY = Math.hypot(cx - ox, cy - oy);
-        if (distXY <= 22 && Number.isFinite(oz) && Number.isFinite(oH)) {
-          neighborBottomZs.push(oz - oH * 0.5);
-        }
+    const MAX_Z_NEIGHBOR_SAMPLES = 128;
+    let neighborCount = 0;
+    if (drawnObjects && spatialLookup && spatialLookup.count > 0) {
+      const collectWithinRadius = (maxRadius: number): void => {
+        const maxRadiusSq = maxRadius * maxRadius;
+        spatialLookup.forEachNeighbor(cx, cy, maxRadius + 1e-3, (idx, cachedDistXY) => {
+          const otherId = spatialLookup.ids[idx]!;
+          if (otherId === clientID) {
+            return;
+          }
+          const liveEntry = spatialLookup.entries[idx] ?? drawnObjects[otherId];
+          if (isDrawnEntryHiddenOrOutside(liveEntry)) {
+            return;
+          }
+          const livePts = getDrawnEntryLivePoints(liveEntry);
+          const cachedOx = spatialLookup.xs[idx]!;
+          const cachedOy = spatialLookup.ys[idx]!;
+          const ox = livePts ? Number(livePts[0]) : cachedOx;
+          const oy = livePts ? Number(livePts[1]) : cachedOy;
+          const oz = livePts ? Number(livePts[2]) : spatialLookup.zs[idx]!;
+          const oH = livePts ? Number(livePts[8]) : spatialLookup.hs[idx]!;
+          const sameXY = !livePts || (Math.fround(ox) === cachedOx && Math.fround(oy) === cachedOy);
+          const withinRadius = sameXY
+            ? cachedDistXY <= maxRadius
+            : (cx - ox) * (cx - ox) + (cy - oy) * (cy - oy) <= maxRadiusSq;
+          if (withinRadius && Number.isFinite(oz) && Number.isFinite(oH)) {
+            sharedNeighborBottomZBuffer[neighborCount] = oz - oH * 0.5;
+            neighborCount += 1;
+            if (neighborCount >= MAX_Z_NEIGHBOR_SAMPLES) {
+              return false;
+            }
+          }
+          return;
+        });
+      };
+
+      collectWithinRadius(8);
+      if (neighborCount < 6) {
+        neighborCount = 0;
+        collectWithinRadius(22);
       }
     }
 
-    if (neighborBottomZs.length >= 1) {
-      neighborBottomZs.sort((a, b) => a - b);
-      const refBottomZ = neighborBottomZs[Math.floor(neighborBottomZs.length * 0.5)]!;
+    if (neighborCount >= 1) {
+      const refBottomZ = selectUpperMedianFloat64(sharedNeighborBottomZBuffer, neighborCount);
       const diffNeighborZ = bottomZ - refBottomZ;
       if (diffNeighborZ > 0.42) {
         zWarned = true;
@@ -1234,21 +1384,22 @@ export function evaluateActiveObjectQaReport(params: {
   readonly clientID: number;
   readonly frame: number;
   readonly drawnEntry?: CvatDrawnObjectEntry | null;
-  readonly stateOnCurrentFrame?: (CvatObjectStateLike & {
-    label?: CvatLabelLike;
-    label_id?: number;
-    pos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
-    position?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
-  }) | null;
+  readonly stateOnCurrentFrame?:
+    | (CvatObjectStateLike & {
+        label?: CvatLabelLike;
+        label_id?: number;
+        pos?: readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
+        position?:
+          readonly number[] | { readonly x: number; readonly y: number; readonly z?: number };
+      })
+    | null;
   readonly drawnObjects?: Record<number | string, CvatDrawnObjectEntry | undefined>;
   readonly positionArray?: Float32Array | number[] | null;
   readonly fallbackLabelName?: string;
   readonly domAttributes?: Record<string, string>;
   readonly isOutsideOnCurrentFrame?: boolean;
   readonly fallbackPos?:
-    | readonly number[]
-    | { readonly x: number; readonly y: number; readonly z?: number }
-    | null;
+    readonly number[] | { readonly x: number; readonly y: number; readonly z?: number } | null;
 }): ActiveObjectQaReport | null {
   const {
     clientID,
@@ -1406,8 +1557,7 @@ export function evaluateActiveObjectQaReport(params: {
   };
 }
 
-export const QA_OVERLAY_ELEMENT_ID = 'cvat-3d-enhancer-active-qa-overlay';
-const QA_OVERLAY_STYLE_ID = 'cvat-3d-enhancer-active-qa-style';
+const positionedContainers = new WeakSet<HTMLElement>();
 
 function ensureQaOverlayElement(doc: Document): HTMLDivElement | null {
   const perspectiveContainer =
@@ -1425,9 +1575,12 @@ function ensureQaOverlayElement(doc: Document): HTMLDivElement | null {
     doc.head.appendChild(styleEl);
   }
 
-  const computedPos = doc.defaultView?.getComputedStyle(perspectiveContainer)?.position;
-  if (!computedPos || computedPos === 'static') {
-    perspectiveContainer.style.position = 'relative';
+  if (!positionedContainers.has(perspectiveContainer)) {
+    const computedPos = doc.defaultView?.getComputedStyle(perspectiveContainer)?.position;
+    if (!computedPos || computedPos === 'static') {
+      perspectiveContainer.style.position = 'relative';
+    }
+    positionedContainers.add(perspectiveContainer);
   }
 
   const existing = doc.getElementById(QA_OVERLAY_ELEMENT_ID) as HTMLDivElement | null;
@@ -1549,8 +1702,7 @@ export function renderActiveObjectQaOverlayDom(
   overlay.style.borderLeft = hasWarnings ? '3px solid #ef4444' : '3px solid #10b981';
   overlay.style.display = 'block';
 
-  const ptsBadge =
-    report.lidarPointCount !== null ? ` • ${report.lidarPointCount} pts` : '';
+  const ptsBadge = report.lidarPointCount !== null ? ` • ${report.lidarPointCount} pts` : '';
 
   overlay.replaceChildren();
 
@@ -1634,6 +1786,32 @@ export function getPerspectivePointCloudPositions(
   view?: CvatInternalViewLike | null
 ): Float32Array | number[] | null {
   const perspectiveScene = view?.views?.perspective?.scene;
+  const children = perspectiveScene?.children;
+  if (Array.isArray(children) && children.length > 0) {
+    const len = children.length;
+    const headLimit = Math.min(len, 16);
+    for (let i = 0; i < headLimit; i += 1) {
+      const child = children[i];
+      if (child?.type === 'Points') {
+        const geom = child.geometry;
+        const pos = getOriginalGeometryPositions(geom) ?? geom?.attributes?.position?.array ?? null;
+        if (pos) {
+          return pos;
+        }
+      }
+    }
+    const tailFloor = Math.max(headLimit, len - 16);
+    for (let i = len - 1; i >= tailFloor; i -= 1) {
+      const child = children[i];
+      if (child?.type === 'Points') {
+        const geom = child.geometry;
+        const pos = getOriginalGeometryPositions(geom) ?? geom?.attributes?.position?.array ?? null;
+        if (pos) {
+          return pos;
+        }
+      }
+    }
+  }
   const pointsList = findPointsObjectsInScene(perspectiveScene);
   const geom = pointsList[0]?.geometry;
   return getOriginalGeometryPositions(geom) ?? geom?.attributes?.position?.array ?? null;

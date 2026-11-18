@@ -1,15 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   checkDimensionThresholdViolation,
   evaluateActiveObjectQaReport,
   evaluateSpatialAndPointCloudWarnings,
   evaluateTrackHistoryWarnings,
   extractSidebarDomLabelAndAttributes,
+  extractTrackKeyframes,
+  getPerspectivePointCloudPositions,
   QA_OVERLAY_ELEMENT_ID,
   renderActiveObjectQaOverlayDom,
   renderActiveObjectQaOverlayLoadingDom,
   resolveDimensionThresholdRule,
 } from '../../src/integration/cvat/runtime/active-object-qa-overlay';
+import type {
+  CvatDrawnObjectEntry,
+  CvatInternalViewLike,
+} from '../../src/integration/cvat/runtime/pre-render-enhancer';
 
 describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimension Thresholds)', () => {
   it('resolves attribute-first dimension threshold rules for vehicles, two-wheels, and pedestrian (including labels_job_1867.json attribute IDs)', () => {
@@ -69,9 +75,7 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     expect(checkDimensionThresholdViolation(1.75, 0.75, 1.3, riderResolved.rule)?.code).toBe('K');
     expect(checkDimensionThresholdViolation(1.75, 0.75, 1.3, noRiderResolved.rule)).toBeNull();
     // H=1.1m (< 1.2m) is INVALID even when ride_state=false (minH = 1.2m)
-    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.1, noRiderResolved.rule)?.code).toBe(
-      'K'
-    );
+    expect(checkDimensionThresholdViolation(1.75, 0.75, 1.1, noRiderResolved.rule)?.code).toBe('K');
 
     // 4. pedestrian + pose=standing / bending / sitting (id 6259 from labels_job_1867.json)
     const standingResolved = resolveDimensionThresholdRule({
@@ -338,11 +342,7 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
     }
     // Object points inside box starting tightly at Z=0.05..1.5
     for (let i = 0; i < 12; i += 1) {
-      tightGroundCoords.push(
-        9.0 + (i % 4) * 0.6,
-        -0.6 + (i % 3) * 0.6,
-        0.05 + (i % 4) * 0.35
-      );
+      tightGroundCoords.push(9.0 + (i % 4) * 0.6, -0.6 + (i % 3) * 0.6, 0.05 + (i % 4) * 0.35);
     }
     const tightPosArray = new Float32Array(tightGroundCoords);
     const tightBoxResult = evaluateSpatialAndPointCloudWarnings({
@@ -515,5 +515,307 @@ describe('Active Object QA Warning Overlay (10 QA Codes + Attribute-First Dimens
         isOutsideOnCurrentFrame: domExtracted.isOutsideInDom,
       })
     ).toBeNull();
+  });
+
+  it('evaluates [F] and [Z] in O(1) (< 5ms cached) across 100,000 cuboids with zero state.points reads and live outside mutation safety', () => {
+    let otherStatePointsReads = 0;
+    const sharedTrapStateProto = {
+      hidden: false,
+      outside: false,
+      get points(): number[] {
+        otherStatePointsReads += 1;
+        return [0, 0, 0, 0, 0, 0, 4, 2, 1.6];
+      },
+    };
+
+    const drawnObjects: Record<number, CvatDrawnObjectEntry> = {};
+    const activePoints = [10, 0, 1.35, 0, 0, 0, 4.0, 1.8, 1.6];
+
+    drawnObjects[1] = {
+      cuboid: {},
+      data: {
+        clientID: 1,
+        points: activePoints,
+        hidden: false,
+        outside: false,
+      },
+    };
+    // Overlapping neighbor #2 -> triggers [F]
+    drawnObjects[2] = {
+      cuboid: {},
+      data: {
+        clientID: 2,
+        points: [10.2, 0, 1.35, 0, 0, 0, 4.0, 1.8, 1.6],
+        hidden: false,
+        outside: false,
+      },
+      state: Object.create(sharedTrapStateProto) as CvatDrawnObjectEntry['state'],
+    };
+    // Nearby ground-reference neighbors #3 and #4 within 22m with bottomZ = 0.0m -> triggers [Z] 22m fallback (active bottomZ = +0.55m)
+    drawnObjects[3] = {
+      cuboid: {},
+      data: {
+        clientID: 3,
+        points: [10, 8.0, 0.8, 0, 0, 0, 4.0, 1.8, 1.6],
+        hidden: false,
+        outside: false,
+      },
+      state: Object.create(sharedTrapStateProto) as CvatDrawnObjectEntry['state'],
+    };
+    drawnObjects[4] = {
+      cuboid: {},
+      data: {
+        clientID: 4,
+        points: [10, -8.0, 0.8, 0, 0, 0, 4.0, 1.8, 1.6],
+        hidden: false,
+        outside: false,
+      },
+      state: Object.create(sharedTrapStateProto) as CvatDrawnObjectEntry['state'],
+    };
+
+    for (let id = 5; id <= 100_000; id += 1) {
+      const col = id % 400;
+      const row = Math.floor(id / 400);
+      const x = 60 + col * 6;
+      const y = 60 + row * 6;
+      drawnObjects[id] = {
+        cuboid: {},
+        data: {
+          clientID: id,
+          points: [x, y, 0.8, 0, 0, 0, 4.2, 1.8, 1.6],
+          hidden: false,
+          outside: false,
+        },
+        state: Object.create(sharedTrapStateProto) as CvatDrawnObjectEntry['state'],
+      };
+    }
+
+    // 6 object points fitting tightly near bottomZ = 0.55m (z = 0.65..1.85), zero ground ring / under-box points
+    // -> exercises the exact 22m neighbor bottomZ fallback in O(1)
+    const noGroundTightObj = new Float32Array([
+      10, 0, 0.65, 10.2, 0.1, 0.9, 9.8, -0.1, 1.15, 10.1, 0.2, 1.4, 9.9, -0.2, 1.65, 10, 0, 1.85,
+    ]);
+
+    // First call builds WeakMap-cached Spatial2DBoxLookup
+    const first = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: activePoints,
+      drawnObjects,
+      positionArray: noGroundTightObj,
+    });
+    expect(otherStatePointsReads).toBe(0);
+    expect(first.warnings.map((w) => w.code)).toContain('F');
+    expect(first.warnings.map((w) => w.code)).toContain('Z');
+    expect(first.warnings.find((w) => w.code === 'Z')?.detail).toContain('box lân cận');
+
+    // Subsequent call on the same 100k `drawnObjects` reference runs in O(1) (< 5ms)
+    const t0 = performance.now();
+    const cached = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: activePoints,
+      drawnObjects,
+      positionArray: noGroundTightObj,
+    });
+    const elapsedMs = performance.now() - t0;
+
+    expect(elapsedMs).toBeLessThan(5);
+    expect(otherStatePointsReads).toBe(0);
+    expect(cached.warnings.map((w) => w.code)).toContain('F');
+    expect(cached.warnings.map((w) => w.code)).toContain('Z');
+
+    // Live in-place mutation on `drawnObjects`: toggling `outside = true` on #2 immediately clears [F]
+    drawnObjects[2]!.data.outside = true;
+    const afterOutside2 = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: activePoints,
+      drawnObjects,
+      positionArray: noGroundTightObj,
+    });
+    expect(afterOutside2.warnings.map((w) => w.code)).not.toContain('F');
+    expect(afterOutside2.warnings.map((w) => w.code)).toContain('Z');
+
+    // Toggling `outside = true` in-place on #3 and #4 immediately excludes them from [Z] neighbor bottomZ reference
+    drawnObjects[3]!.data.outside = true;
+    drawnObjects[4]!.data.outside = true;
+    const afterOutsideNeighbors = evaluateSpatialAndPointCloudWarnings({
+      clientID: 1,
+      currentPoints: activePoints,
+      drawnObjects,
+      positionArray: noGroundTightObj,
+    });
+    expect(afterOutsideNeighbors.warnings.map((w) => w.code)).not.toContain('Z');
+    expect(otherStatePointsReads).toBe(0);
+  });
+
+  it('skips scanning .cvat-canvas3d-perspective HUD elements when skipHudPos is true while preserving default HUD extraction', () => {
+    document.body.innerHTML = `
+      <div class="cvat-canvas3d-perspective">
+        <canvas></canvas>
+        <div class="cvat-canvas3d-hud-info">Pos: (12.5, -4.2, 0.8)</div>
+      </div>
+      <div id="cvat-objects-sidebar-state-item-42">
+        <div class="cvat-objects-sidebar-state-item-label-selector">
+          <span class="ant-select-selection-item">vehicles</span>
+        </div>
+        <div class="cvat-object-item-attribute-wrapper">
+          <label>type:</label>
+          <span class="ant-select-selection-item">car</span>
+        </div>
+      </div>
+    `;
+
+    const qsaSpy = vi.spyOn(document, 'querySelectorAll');
+    try {
+      const fastExtracted = extractSidebarDomLabelAndAttributes(document, 42, {
+        skipHudPos: true,
+      });
+      expect(fastExtracted.domPos).toBeNull();
+      expect(fastExtracted.labelName).toBe('vehicles');
+      expect(fastExtracted.domAttributes.type).toBe('car');
+      expect(
+        qsaSpy.mock.calls.some(([selector]) =>
+          String(selector).includes('cvat-canvas3d-perspective')
+        )
+      ).toBe(false);
+
+      const defaultExtracted = extractSidebarDomLabelAndAttributes(document, 42);
+      expect(defaultExtracted.domPos).toEqual({ x: 12.5, y: -4.2, z: 0.8 });
+      expect(defaultExtracted.labelName).toBe('vehicles');
+    } finally {
+      qsaSpy.mockRestore();
+    }
+  });
+
+  it('checks container computed position only once via WeakSet and resolves top-level Points in O(1)', () => {
+    document.body.innerHTML = `
+      <div class="cvat-canvas3d-perspective" style="width: 600px; height: 400px;">
+        <canvas width="600" height="400"></canvas>
+      </div>
+    `;
+
+    const getComputedStyleSpy = vi.spyOn(window, 'getComputedStyle');
+    try {
+      renderActiveObjectQaOverlayLoadingDom(document, { clientID: 5, labelName: 'vehicles' }, true);
+      const dummyReport = evaluateActiveObjectQaReport({
+        clientID: 5,
+        frame: 0,
+        stateOnCurrentFrame: {
+          clientID: 5,
+          frame: 0,
+          label: { name: 'vehicles' },
+          attributes: { 6257: 'car' },
+          points: [10, 0, 0.8, 0, 0, 0, 4.2, 1.8, 1.6],
+        },
+      });
+      renderActiveObjectQaOverlayDom(document, dummyReport, true);
+      renderActiveObjectQaOverlayLoadingDom(document, { clientID: 5, labelName: 'vehicles' }, true);
+      renderActiveObjectQaOverlayDom(document, dummyReport, true);
+
+      expect(getComputedStyleSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      getComputedStyleSpy.mockRestore();
+    }
+
+    const expectedBuffer = new Float32Array([1, 2, 3, 4, 5, 6]);
+    let cuboidChildrenTraversed = 0;
+    const trapCuboid = {
+      type: 'Mesh',
+      get children() {
+        cuboidChildrenTraversed += 1;
+        return [];
+      },
+    };
+    const mockView: CvatInternalViewLike = {
+      views: {
+        perspective: {
+          scene: {
+            background: null,
+            children: [
+              {
+                type: 'Points',
+                geometry: {
+                  attributes: {
+                    position: { array: expectedBuffer },
+                  },
+                },
+              },
+              ...Array.from({ length: 64 }, () => trapCuboid),
+            ],
+          },
+        },
+      },
+    };
+
+    expect(getPerspectivePointCloudPositions(mockView)).toBe(expectedBuffer);
+    expect(cuboidChildrenTraversed).toBe(0);
+
+    // Tail fast-path: Points at the end of scene.children after cuboids also resolves in O(1)
+    const tailView: CvatInternalViewLike = {
+      views: {
+        perspective: {
+          scene: {
+            background: null,
+            children: [
+              ...Array.from({ length: 64 }, () => trapCuboid),
+              {
+                type: 'Points',
+                geometry: {
+                  attributes: {
+                    position: { array: expectedBuffer },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+    expect(getPerspectivePointCloudPositions(tailView)).toBe(expectedBuffer);
+    expect(cuboidChildrenTraversed).toBe(0);
+
+    // Nested fallback: Points inside a child Group still resolves via findPointsObjectsInScene
+    const nestedView: CvatInternalViewLike = {
+      views: {
+        perspective: {
+          scene: {
+            background: null,
+            children: [
+              {
+                type: 'Group',
+                children: [
+                  {
+                    type: 'Points',
+                    geometry: {
+                      attributes: {
+                        position: { array: expectedBuffer },
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    };
+    expect(getPerspectivePointCloudPositions(nestedView)).toBe(expectedBuffer);
+
+    // extractTrackKeyframes reflects live keyframe dimension syncs on the same state instance
+    let exportedH = 1.6;
+    const mutableState = {
+      clientID: 15,
+      __internal: {
+        export: () => ({
+          shapes: [
+            { frame: 0, points: [0, 0, 0, 0, 0, 0, 4.2, 1.8, 1.6], outside: false },
+            { frame: 5, points: [5, 0, 0, 0, 0, 0, 4.2, 1.8, exportedH], outside: false },
+          ],
+        }),
+      },
+    };
+    expect(extractTrackKeyframes(mutableState)[1]?.points[8]).toBe(1.6);
+    exportedH = 1.75;
+    expect(extractTrackKeyframes(mutableState)[1]?.points[8]).toBe(1.75);
+    expect(extractTrackKeyframes({ clientID: 16 })).toEqual([]);
   });
 });

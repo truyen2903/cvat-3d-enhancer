@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  installSidebarEnhancements,
   installSidebarQuickFilterGuard,
   resolveSidebarObjectContext,
+  sidebarHasRideState,
   syncSidebarObjectDimension,
 } from '../../src/integration/cvat/runtime/sidebar-enhancements';
 import type { CvatObjectStateLike } from '../../src/integration/cvat/runtime/pre-render-enhancer';
@@ -159,6 +161,107 @@ describe('custom CVAT sidebar integration', () => {
       expect(focus).not.toHaveBeenCalled();
     } finally {
       remove();
+    }
+  });
+
+  it('resolves cardHint in O(1) with zero DOM queries and never calls querySelectorAll without cardHint', () => {
+    const { card, state } = cardWithState();
+    state.label = { attributes: [{ id: 6260, name: 'ride_state', mutable: true }] };
+
+    const dataCard = document.createElement('div');
+    dataCard.className = 'cvat-objects-sidebar-state-item';
+    dataCard.dataset.clientId = '77';
+    const dataState: CvatObjectStateLike = {
+      clientID: 77,
+      shapeType: 'cuboid',
+      objectType: 'track',
+    };
+    Object.assign(dataCard, {
+      __reactFiber$company: { memoizedProps: { objectState: dataState } },
+    });
+    document.body.appendChild(dataCard);
+
+    const getByIdSpy = vi.spyOn(document, 'getElementById');
+    const querySpy = vi.spyOn(document, 'querySelector');
+    const queryAllSpy = vi.spyOn(document, 'querySelectorAll');
+
+    try {
+      expect(resolveSidebarObjectContext(document, 1, card)?.state).toBe(state);
+      expect(sidebarHasRideState(document, 1, card)).toBe(true);
+      expect(getByIdSpy).not.toHaveBeenCalled();
+      expect(querySpy).not.toHaveBeenCalled();
+      expect(queryAllSpy).not.toHaveBeenCalled();
+
+      expect(resolveSidebarObjectContext(document, 1)?.state).toBe(state);
+      expect(resolveSidebarObjectContext(document, 77)?.state).toBe(dataState);
+      expect(resolveSidebarObjectContext(document, 9999)).toBeNull();
+      expect(queryAllSpy).not.toHaveBeenCalled();
+    } finally {
+      getByIdSpy.mockRestore();
+      querySpy.mockRestore();
+      queryAllSpy.mockRestore();
+    }
+  });
+
+  it('does not call target.closest on single clicks or primary-unrelated mouse buttons', () => {
+    const { card } = cardWithState();
+    const label = card.querySelector('.label')!;
+    const closestSpy = vi.spyOn(label, 'closest');
+    const remove = installSidebarQuickFilterGuard(document, window);
+    try {
+      label.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, detail: 1, button: 0 }));
+      label.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, button: 0 }));
+      label.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2, button: 2 }));
+      expect(closestSpy).not.toHaveBeenCalled();
+    } finally {
+      remove();
+      closestSpy.mockRestore();
+    }
+  });
+
+  it('caches localStorage options and batches targeted sidebar mutations via requestAnimationFrame', async () => {
+    const frames: FrameRequestCallback[] = [];
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem');
+    document.body.innerHTML = `
+      <div class="cvat-objects-sidebar">
+        <div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item">
+          <span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>
+        </div>
+      </div>
+      <div id="meow-toast-stack"></div>`;
+
+    const dispose = installSidebarEnhancements(document, window);
+    try {
+      const initialReads = getItemSpy.mock.calls.length;
+      expect(initialReads).toBeGreaterThan(0);
+
+      // Unrelated toast mutation should not schedule a frame or re-parse storage
+      document.getElementById('meow-toast-stack')!.appendChild(document.createElement('div'));
+      await Promise.resolve();
+      expect(frames).toHaveLength(0);
+      expect(getItemSpy.mock.calls.length).toBe(initialReads);
+
+      // Adding a new card in sidebar schedules one rAF and mounts without re-reading localStorage
+      const newCard = document.createElement('div');
+      newCard.id = 'cvat-objects-sidebar-state-item-2';
+      newCard.className = 'cvat-objects-sidebar-state-item';
+      newCard.innerHTML =
+        '<span class="cvat-objects-sidebar-state-item-object-type-text">CUBOID TRACK</span>';
+      document.querySelector('.cvat-objects-sidebar')!.appendChild(newCard);
+
+      await Promise.resolve();
+      expect(frames).toHaveLength(1);
+      for (const cb of frames.splice(0)) cb(16);
+      expect(newCard.querySelector('.cvat-3d-enhancer-dim-sync-row')).not.toBeNull();
+      expect(getItemSpy.mock.calls.length).toBe(initialReads);
+    } finally {
+      dispose();
+      rafSpy.mockRestore();
+      getItemSpy.mockRestore();
     }
   });
 });

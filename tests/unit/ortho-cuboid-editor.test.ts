@@ -384,4 +384,78 @@ describe('OrthoCuboidEditor keyboard', () => {
 
     uninstall();
   });
+
+  it('short-circuits repeated hover events on the same element and caches canvas rect during edge drag', () => {
+    document.body.innerHTML = `
+      <div class="cvat-canvas3d-topview">
+        <canvas width="1000" height="1000"></canvas>
+      </div>
+    `;
+    const canvas = document.querySelector<HTMLCanvasElement>('.cvat-canvas3d-topview canvas')!;
+    const rectSpy = vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 1000,
+      bottom: 1000,
+      width: 1000,
+      height: 1000,
+      toJSON: () => ({}),
+    });
+
+    let points = [...box];
+    const editor = new OrthoCuboidEditor(
+      {
+        getMaximizedView: () => null,
+        getActivePoints: () => ({ clientID: 7, points }),
+        getViewCamera: () => topCamera,
+        previewPoints: (_id, p) => {
+          points = p;
+        },
+        commitPoints: (_id, p) => {
+          points = p;
+        },
+      },
+      document,
+      window
+    );
+    const uninstall = editor.install();
+
+    try {
+      const closestSpy = vi.spyOn(canvas, 'closest');
+      for (let i = 0; i < 60; i += 1) {
+        canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      }
+      // Only the very first hover over `canvas` resolves `.closest()`; the next 59 exit in O(1)
+      expect(closestSpy).toHaveBeenCalledTimes(1);
+      closestSpy.mockRestore();
+
+      rectSpy.mockClear();
+      canvas.dispatchEvent(
+        new MouseEvent('pointerdown', { clientX: 700, clientY: 500, button: 0, bubbles: true })
+      );
+      expect(rectSpy).toHaveBeenCalledTimes(1);
+
+      for (let step = 1; step <= 60; step += 1) {
+        window.dispatchEvent(
+          new MouseEvent('pointermove', {
+            clientX: 700 + step,
+            clientY: 500,
+            buttons: 1,
+            bubbles: true,
+          })
+        );
+      }
+      // Zero getBoundingClientRect() calls across all 60 drag pointermove ticks
+      expect(rectSpy).toHaveBeenCalledTimes(1);
+
+      window.dispatchEvent(
+        new MouseEvent('pointerup', { clientX: 760, clientY: 500, button: 0, bubbles: true })
+      );
+    } finally {
+      uninstall();
+      document.body.innerHTML = '';
+    }
+  });
 });

@@ -27,6 +27,8 @@ export class ShortcutsFeature implements FeatureModule {
 
   private readonly commandRegistry: CommandRegistry;
   private readonly targetWindow: Window;
+  private readonly shortcutToCommand = new Map<string, string>();
+  private allRequireModifier = true;
   private lifecycle: LifecycleManager | null = null;
   private currentConfig: EnhancerConfig | null = null;
 
@@ -35,12 +37,46 @@ export class ShortcutsFeature implements FeatureModule {
     this.targetWindow = targetWindow;
   }
 
+  private rebuildShortcutIndex(config: EnhancerConfig | null): void {
+    this.shortcutToCommand.clear();
+    this.allRequireModifier = true;
+    if (!config?.productivity.shortcutsEnabled) {
+      return;
+    }
+
+    const prod = config.productivity;
+    const bindings: readonly [string, string][] = [
+      [prod.togglePanelShortcut, 'ui.togglePanel'],
+      [prod.quickResetCameraShortcut, 'runtime.resetDefaults'],
+      [prod.cycleColorByShortcut, 'annotation.cycleColorBy'],
+    ];
+
+    for (const [rawShortcut, commandId] of bindings) {
+      const normalized = rawShortcut.trim().toLowerCase();
+      if (!normalized) {
+        continue;
+      }
+      if (!this.shortcutToCommand.has(normalized)) {
+        this.shortcutToCommand.set(normalized, commandId);
+      }
+      const hasPrimaryModifier =
+        normalized.includes('alt+') || normalized.includes('ctrl+') || normalized.includes('meta+');
+      if (!hasPrimaryModifier) {
+        this.allRequireModifier = false;
+      }
+    }
+  }
+
   public mount(context: FeatureContext): void {
     this.currentConfig = context.getConfig();
+    this.rebuildShortcutIndex(this.currentConfig);
     this.lifecycle = new LifecycleManager();
 
     this.lifecycle.addEventListener(this.targetWindow, 'keydown', (event: KeyboardEvent) => {
-      if (!this.currentConfig?.productivity.shortcutsEnabled) {
+      if (this.allRequireModifier && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        return;
+      }
+      if (!this.currentConfig?.productivity.shortcutsEnabled || this.shortcutToCommand.size === 0) {
         return;
       }
 
@@ -55,27 +91,21 @@ export class ShortcutsFeature implements FeatureModule {
         return;
       }
 
-      const combo = formatKeyboardEventCombo(event);
-      const prod = this.currentConfig.productivity;
-
-      if (combo.toLowerCase() === prod.togglePanelShortcut.toLowerCase()) {
+      const commandId = this.shortcutToCommand.get(formatKeyboardEventCombo(event).toLowerCase());
+      if (commandId) {
         event.preventDefault();
-        void this.commandRegistry.execute('ui.togglePanel');
-      } else if (combo.toLowerCase() === prod.quickResetCameraShortcut.toLowerCase()) {
-        event.preventDefault();
-        void this.commandRegistry.execute('runtime.resetDefaults');
-      } else if (combo.toLowerCase() === prod.cycleColorByShortcut.toLowerCase()) {
-        event.preventDefault();
-        void this.commandRegistry.execute('annotation.cycleColorBy');
+        void this.commandRegistry.execute(commandId);
       }
     });
   }
 
   public onConfigChange(config: EnhancerConfig): void {
     this.currentConfig = config;
+    this.rebuildShortcutIndex(config);
   }
 
   public async unmount(): Promise<void> {
+    this.shortcutToCommand.clear();
     if (this.lifecycle) {
       await this.lifecycle.dispose();
       this.lifecycle = null;
