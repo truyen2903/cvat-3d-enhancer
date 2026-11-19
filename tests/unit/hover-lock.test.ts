@@ -2,8 +2,10 @@ import { BoxGeometry, Mesh, MeshBasicMaterial, Raycaster, Vector3 } from 'three'
 import { describe, expect, it } from 'vitest';
 import {
   filterHoverIntersections,
+  invalidateHoverSpatialIndex,
   installPointerButtonEventTracking,
   lockRaycasterHoverToActiveObject,
+  unlockRaycasterHover,
 } from '../../src/integration/cvat/runtime/hover-lock';
 
 const hit = (name: string) => ({ object: { name } });
@@ -172,4 +174,91 @@ describe('hover raycast prefilter', () => {
     geometry.dispose();
     material.dispose();
   });
+});
+
+describe('button-event broad phase', () => {
+  it('shortlists clicks while preserving native hit order, helpers, ties and hidden meshes', () => {
+    installPointerButtonEventTracking(window);
+    const geometry = new BoxGeometry(2, 2, 2);
+    const material = new MeshBasicMaterial();
+    const objects: Mesh[] = [];
+    let seed = 91;
+    const random = () => (seed = (1664525 * seed + 1013904223) >>> 0) / 2 ** 32;
+    for (let id = 0; id < 1000; id++) {
+      const mesh = new Mesh(geometry, material);
+      mesh.name = String(id);
+      mesh.position.set((random() - 0.5) * 500, (random() - 0.5) * 500, random() * 10);
+      mesh.rotation.set(random(), random(), random());
+      mesh.scale.set(0.1 + random() * 10, 1 + random(), 1 + random());
+      mesh.updateMatrixWorld();
+      objects.push(mesh);
+    }
+    const native = new Raycaster();
+    const patched = new Raycaster();
+    const nativeIntersect = patched.intersectObjects.bind(patched);
+    let candidateCount = 0;
+    patched.intersectObjects = (candidates, recursive, target) => {
+      candidateCount = candidates.length;
+      return nativeIntersect(candidates, recursive, target);
+    };
+    let versioned = false;
+    let activeId = '999';
+    lockRaycasterHoverToActiveObject(patched, () => activeId, undefined, {
+      useCachedClickBounds: () => versioned,
+    });
+    const canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+    let actual: unknown[] = [];
+    canvas.addEventListener('click', () => {
+      actual = patched.intersectObjects(objects, false);
+    });
+    try {
+      // Equal-distance native ties retain input order; unnamed helpers are always included.
+      const helper = objects[0]!.clone();
+      helper.name = 'helper';
+      const tie = objects[0]!.clone();
+      tie.name = '1001';
+      objects.splice(1, 0, helper, tie);
+      for (let step = 0; step < 60; step++) {
+        versioned = step >= 30;
+        if (versioned) invalidateHoverSpatialIndex();
+        const target = objects[step % 3 === 0 ? 0 : step * 7]!;
+        target.visible = step % 2 === 0;
+        target.position.x += 1; // No prior hover or epoch update: a real click must use fresh bounds.
+        target.updateMatrixWorld();
+        const origin = target.position.clone().add(new Vector3(0, 0, 50));
+        const direction = new Vector3(0, 0, -1);
+        native.set(origin, direction);
+        patched.set(origin, direction);
+        const expected = native.intersectObjects(objects, false);
+        canvas.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(actual).toEqual(expected);
+        expect(candidateCount).toBeLessThan(objects.length / 10);
+        // A second click reuses versioned bounds, including native hidden-mesh semantics.
+        canvas.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(actual).toEqual(expected);
+        if (versioned) {
+          activeId = target.name;
+          target.position.x += 2; // In-progress active preview before model notify.
+          target.updateMatrixWorld();
+          const previewExpected = native.intersectObjects(objects, false);
+          canvas.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          expect(actual).toEqual(previewExpected);
+        }
+      }
+    } finally {
+      canvas.remove();
+      geometry.dispose();
+      material.dispose();
+    }
+  });
+});
+
+it('restores the native raycaster method on teardown', () => {
+  const raycaster = { intersectObjects: () => [hit('2'), hit('1')] };
+  const native = raycaster.intersectObjects;
+  lockRaycasterHoverToActiveObject(raycaster, () => '1');
+  unlockRaycasterHover(raycaster);
+  expect(raycaster.intersectObjects).toBe(native);
+  expect(raycaster.intersectObjects()).toEqual([hit('2'), hit('1')]);
 });

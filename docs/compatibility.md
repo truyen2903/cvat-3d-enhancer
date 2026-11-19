@@ -248,3 +248,60 @@ The remaining notes from the earlier verification of `canvas3dView.ts` / `canvas
 Limits: only frame f is written; neighbor pinning assumes linear interpolation; locked and outside objects are skipped (pairs refuse); selection is lost on frame change; no selection in Top/Side/Front/zoomed views (by design).
 
 Existing sidebar buttons (H/W/L, 180°, L↔W, Yaw, Attr, RS) keep their native `ObjectState`/`__internal.save` writes (the same cvat-core call as `ObjectState.save()`), and now also run the same Redux refresh after writing so CVAT's Undo/Redo state is current. The single-frame 180° and H/W/L paths still emit a `canvas.edited` event (cvat-ui's own `updateAnnotationsAsync`), which records one extra equal-valued history entry; replacing that event with the Redux refresh was left out to keep behavior and tests unchanged until verified on a live job.
+
+## Large-scene native hot paths
+
+The local `cvat-ai/cvat` develop source copies (`canvas3dView.ts`, `canvas3dModel.ts`,
+`canvas3d.ts`) were inspected for these instance patches. This is source/fixture verification;
+these changes have not been exercised on the affected live CVAT build or dataset.
+
+- `view.getAllVisibleCuboids()` caches the perspective array produced by the native method.
+  It requires `drawnObjects`, the method and `notify`. Rebuilds check that the native result
+  matches the inspected `Object.values` / perspective mapping / truthy-visibility filter
+  algorithm, including order. Configurable,
+  writable mesh `visible` data fields get instance accessors that invalidate the cache on
+  assignment. A changed `drawnObjects` reference also invalidates it. Every `notify` reason
+  invalidates before and after native execution, covering `objects_updated`, `image_changed`,
+  `shape_activated`, `config_updated`, group/merge/split/cancel/draw and version-specific reasons.
+  Reentrant reads during notify use native code. Other view arguments, unsupported visibility
+  descriptors and differing native result shapes stay native. Steady reads return the same
+  array in O(1); CVAT's inspected consumers only pass it to raycasting and do not mutate it.
+  Same-dictionary membership/mesh replacements must pass through native notify, as in the
+  inspected source. Arbitrary external writes bypassing CVAT notifications are not tracked.
+- `view.setupObjectsIncremental(states)` requires all five native mutation methods:
+  `deactivateObject`, `createObjects`, `updateObjects`, `deleteObjects`, `activateObject`.
+  It retains the original created/updated filters (`data.updated !== state.updated`), builds
+  a Set of state clientIDs for deleted detection, then calls those methods in precisely that
+  order. Duplicate states, inherited drawn keys, undefined update stamps and strict-equality
+  handling of NaN retain native behavior. Missing methods or partition failures use native.
+  Native mutation exceptions are not retried after side effects.
+- Perspective `rayCaster.intersectObjects` button events bypass active-object hover filtering
+  and use a world-sphere broad phase for ordinary Three.js meshes when the cast has more
+  than 256 candidates. Exact native intersection, candidate order, equal-distance tie order,
+  recursive flag and optional output array remain native. Helpers and unsupported geometry,
+  custom/subclass raycasts, skinned/morphing meshes stay in the candidate list. Recursive,
+  missing/invalid-ray and non-unit-direction casts pass through. Button bounds use the current
+  `matrixWorld`, including for invisible meshes (which Three.js can still raycast), and never
+  depend on stale hover bounds. Once the visible-list hook confirms the native shape, click
+  bounds use a separate notification/visibility-versioned, double-precision spatial snapshot;
+  the active cuboid's current world bound is refreshed on every button event for native drag,
+  resize and rotation previews before model notify. During notify, after teardown, or without
+  the visible-list hook, each click builds fresh bounds instead. Reuse assumes non-active
+  geometry edits pass through CVAT notify, as in the inspected source. Geometry/bounds inspection
+  failures fall back to native picking.
+  Hover candidate indices also check the invalidation epoch, so interior list changes cannot
+  reuse an old membership index after native notifications or visibility changes.
+
+These patches use instance markers, never replace CVAT/Three.js prototypes, and are restored
+or disabled on page-bridge teardown. Existing renderer/hidden-mesh optimizations remain separate.
+Native model `objects.find` picking lookup is unchanged.
+
+The DOM observer observes sidebar attributes/children, canvas frame attributes, modal/settings
+mounts and direct child lists along their ancestor mount paths (including body). Discovery
+observation follows unclassified mount branches with child-list-only subtrees, splitting at
+known roots so empty replacements and partially mounted sibling branches remain discoverable.
+Disconnected branches are pruned; roots are rediscovered after mount or replacement.
+There is no whole-document class subscription. Sidebar class records only
+clear ghosts once per batch, without ancestor-selector walks or DOM sync; sidebar child/identity
+changes still mount controls. Frame metadata still clears ghosts/selection and invalidates
+scene caches; late settings and replaced canvases still trigger setup.

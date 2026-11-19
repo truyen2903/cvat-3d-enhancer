@@ -25,6 +25,8 @@ import {
   deferHiddenCuboidMeshUpdates,
   deferHiddenOrientationArrowUpdates,
 } from './hidden-orientation-arrows';
+import { accelerateIncrementalObjects } from './incremental-objects';
+import { cacheVisibleCuboids } from './visible-cuboids';
 import { showMeowToast } from './meow-toast';
 
 export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
@@ -785,12 +787,23 @@ export class Cvat3dPreRenderEnhancer {
     }
   }
 
+  private readonly hotPathCleanups = new Set<() => void>();
+
+  public disposeHotPaths(): void {
+    for (const cleanup of this.hotPathCleanups) cleanup();
+    this.hotPathCleanups.clear();
+  }
+
   public ensureHooked(canvas3d: CvatInternalCanvas3dLike | null): boolean {
     const view = canvas3d?.view;
     if (!view || typeof view !== 'object') {
       return false;
     }
 
+    const incrementalCleanup = accelerateIncrementalObjects(view);
+    if (incrementalCleanup) this.hotPathCleanups.add(incrementalCleanup);
+    const cleanup = cacheVisibleCuboids(view);
+    if (cleanup) this.hotPathCleanups.add(cleanup);
     if (this.hookedViews.has(view)) {
       if (this.dirty || countViews(view) !== this.lastViewCount) {
         this.dirty = true;

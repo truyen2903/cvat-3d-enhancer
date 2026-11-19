@@ -65,7 +65,7 @@ const { Cvat3dPreRenderEnhancer, DEFAULT_CVAT_3D_RENDER_OPTIONS } =
   await import('../src/integration/cvat/runtime/pre-render-enhancer.ts');
 const { ActiveObjectCameraFollower } =
   await import('../src/integration/cvat/runtime/camera-follow.ts');
-const { lockRaycasterHoverToActiveObject } =
+const { lockRaycasterHoverToActiveObject, installPointerButtonEventTracking } =
   await import('../src/integration/cvat/runtime/hover-lock.ts');
 
 let findObjectStateByClientId = null;
@@ -668,6 +668,137 @@ function measureStateLookup100k() {
   };
 }
 
+// Native algorithms copied from the supplied develop canvas3dView.ts. Private mutation
+// methods are no-ops here so these measurements isolate list construction/partitioning.
+function hotPathView() {
+  return {
+    drawnObjects: drawnObjects100k,
+    notify() {},
+    getAllVisibleCuboids(view = 'perspective') {
+      return Object.values(this.drawnObjects)
+        .map(({ cuboid }) => cuboid[view])
+        .filter((mesh) => mesh.visible);
+    },
+    setupObjectsIncremental(states) {
+      const created = states.filter((state) => !(state.clientID in this.drawnObjects));
+      const updated = states.filter(
+        (state) =>
+          state.clientID in this.drawnObjects &&
+          this.drawnObjects[state.clientID].data.updated !== state.updated
+      );
+      const deleted = Object.keys(this.drawnObjects)
+        .map((key) => +key)
+        .filter((clientID) => states.findIndex((state) => state.clientID === clientID) === -1);
+      this.deactivateObject();
+      this.createObjects(created);
+      this.updateObjects(updated);
+      this.deleteObjects(deleted);
+      this.activateObject();
+    },
+    deactivateObject() {},
+    createObjects() {},
+    updateObjects() {},
+    deleteObjects() {},
+    activateObject() {},
+  };
+}
+
+function sampleThree(fn) {
+  const samples = [];
+  for (let run = 0; run < 3; run++) {
+    const start = performance.now();
+    fn();
+    samples.push(performance.now() - start);
+  }
+  return { medianMs: median(samples), runsMs: samples.map(roundMs) };
+}
+
+function measureVisibleCuboids60() {
+  const view = hotPathView();
+  const before = sampleThree(() => {
+    for (let tick = 0; tick < 60; tick++) view.getAllVisibleCuboids();
+  });
+  const enhancer = new Cvat3dPreRenderEnhancer();
+  enhancer.ensureHooked({ view });
+  const coldStart = performance.now();
+  view.getAllVisibleCuboids();
+  const coldBuildMs = roundMs(performance.now() - coldStart);
+  const first = view.getAllVisibleCuboids();
+  const after = sampleThree(() => {
+    for (let tick = 0; tick < 60; tick++) {
+      if (view.getAllVisibleCuboids() !== first) throw new Error('Unstable visible list');
+    }
+  });
+  enhancer.disposeHotPaths();
+  return { before, after, coldBuildMs };
+}
+
+function measureIncrementalAlreadyDrawn() {
+  const view = hotPathView();
+  const before = sampleThree(() => view.setupObjectsIncremental(states100k));
+  const enhancer = new Cvat3dPreRenderEnhancer();
+  enhancer.ensureHooked({ view });
+  const after = sampleThree(() => view.setupObjectsIncremental(states100k));
+  enhancer.disposeHotPaths();
+  return { before, after };
+}
+
+function measureClickRaycast() {
+  // Synchronous capture -> canvas handler -> bubble dispatch, matching the browser.
+  const captures = [];
+  const bubbles = [];
+  installPointerButtonEventTracking({
+    addEventListener(type, listener, capture) {
+      if (type === 'click') (capture ? captures : bubbles).push(listener);
+    },
+    setTimeout() {
+      return 0;
+    },
+  });
+  const native = new Raycaster(new Vector3(TARGET_X, TARGET_Y, 50), new Vector3(0, 0, -1));
+  const patched = new Raycaster(native.ray.origin.clone(), native.ray.direction.clone());
+  const nativeIntersect = patched.intersectObjects.bind(patched);
+  let candidateCount = CUBOID_COUNT;
+  patched.intersectObjects = (objects, ...rest) => {
+    candidateCount = objects.length;
+    return nativeIntersect(objects, ...rest);
+  };
+  lockRaycasterHoverToActiveObject(patched, () => '99999', undefined, {
+    useCachedClickBounds: () => true,
+  });
+  const expected = native.intersectObjects(meshList100k, false);
+  let hits;
+  const click = () => {
+    for (const begin of captures) begin();
+    try {
+      hits = patched.intersectObjects(meshList100k, false);
+    } finally {
+      for (const end of bubbles) end();
+    }
+    if (
+      hits.length !== expected.length ||
+      hits.some(
+        (hit, i) => hit.object !== expected[i].object || hit.distance !== expected[i].distance
+      )
+    ) {
+      throw new Error('Click differs from native');
+    }
+  };
+  const coldStart = performance.now();
+  click();
+  const coldBuildMs = roundMs(performance.now() - coldStart);
+  const before = sampleThree(() => native.intersectObjects(meshList100k, false));
+  const after = sampleThree(click);
+  return {
+    before,
+    after,
+    coldBuildMs,
+    nativeCandidates: CUBOID_COUNT,
+    candidateCount,
+    hits: hits.length,
+  };
+}
+
 const totalStart = performance.now();
 const results = {
   meta: {
@@ -677,10 +808,17 @@ const results = {
     node: process.version,
     setupMs,
   },
-  'next-frame-default': measureNextFrameDefault(),
-  'filter-toggle-default': measureFilterToggleDefault(),
-  'steady-render-60-ticks': measureSteadyRender60Ticks(),
-  'state-lookup-100k': measureStateLookup100k(),
+  ...(process.argv.includes('--click-only')
+    ? {}
+    : {
+        'next-frame-default': measureNextFrameDefault(),
+        'filter-toggle-default': measureFilterToggleDefault(),
+        'steady-render-60-ticks': measureSteadyRender60Ticks(),
+        'state-lookup-100k': measureStateLookup100k(),
+        'visible-cuboids-60-renders': measureVisibleCuboids60(),
+        'objects-updated-already-drawn': measureIncrementalAlreadyDrawn(),
+      }),
+  'click-raycast': measureClickRaycast(),
 };
 results.meta.totalBenchmarkMs = roundMs(performance.now() - totalStart);
 

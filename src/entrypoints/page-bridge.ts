@@ -1,3 +1,4 @@
+import { canReuseVisibleCuboidBounds } from '../integration/cvat/runtime/visible-cuboids';
 import { TrackGhostOverlay } from '../integration/cvat/runtime/track-ghost-overlay';
 import { installMouseFrameNavigation } from '../integration/cvat/runtime/mouse-frame-navigation';
 import {
@@ -40,6 +41,7 @@ import {
   installPointerButtonEventTracking,
   invalidateHoverSpatialIndex,
   lockRaycasterHoverToActiveObject,
+  unlockRaycasterHover,
   type RaycasterLike,
 } from '../integration/cvat/runtime/hover-lock';
 import {
@@ -198,6 +200,7 @@ export class PageBridgeRuntimeHost {
   private readonly preRenderEnhancer: Cvat3dPreRenderEnhancer;
   private reduxStore: CvatReduxStoreLike | null = null;
   private pluginRegistered = false;
+  private readonly hoverRaycasters = new Set<RaycasterLike>();
   private settingsObserver: MutationObserver | null = null;
   private readonly hookedPerspectiveCanvases = new WeakSet<HTMLCanvasElement>();
   private readonly hookedSetupCanvases = new WeakSet<HTMLCanvasElement>();
@@ -448,10 +451,67 @@ export class PageBridgeRuntimeHost {
       let fullSidebarReconcile = false;
       const dirtySidebarCards = new Set<HTMLElement>();
 
+      let structuralRoots = new Set<Element>();
+      const pendingMountRoots = new Set<Element>();
+      let rootsChanged = false;
+      const observeRoots = (): void => {
+        const observer = this.settingsObserver;
+        if (!observer) return;
+        observer.disconnect();
+        structuralRoots = new Set<Element>();
+        const roots = this.doc.querySelectorAll(
+          '.cvat-objects-sidebar, canvas, .cvat-canvas-container, ' +
+            '.cvat-canvas3d-perspective, .cvat-canvas3d-orthographic-view, ' +
+            '.cvat-workspace-settings, .ant-modal-root'
+        );
+        for (const root of roots) {
+          observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: root.matches('.cvat-objects-sidebar')
+              ? ['class', 'aria-label', 'id', 'data-client-id']
+              : ['data-frame-number'],
+          });
+          // Watch only direct children along each mount path, so replacing a React root
+          // is detected without subscribing to every sidebar descendant's attributes.
+          for (let parent = root.parentElement; parent; parent = parent.parentElement) {
+            if (!parent.matches('.cvat-objects-sidebar, .ant-modal-root')) {
+              structuralRoots.add(parent);
+            }
+          }
+        }
+        if (this.doc.body) structuralRoots.add(this.doc.body);
+        structuralRoots.add(this.doc.documentElement);
+        for (const root of structuralRoots) {
+          // Do not overwrite a scoped subtree registration above.
+          if (![...roots].includes(root)) observer.observe(root, { childList: true });
+        }
+        if (this.doc.body) pendingMountRoots.add(this.doc.body);
+        const scopedRoots = new Set(roots);
+        // Split discovery along known mount paths. An unclassified sibling can receive a
+        // sidebar/modal later even when another sibling has already mounted its canvas.
+        for (const root of pendingMountRoots) {
+          if (!root.isConnected || scopedRoots.has(root)) {
+            pendingMountRoots.delete(root);
+          } else if ([...roots].some((known) => root.contains(known))) {
+            pendingMountRoots.delete(root);
+            for (const child of root.children) {
+              if (!scopedRoots.has(child) && !isIgnoredMutationNode(child))
+                pendingMountRoots.add(child);
+            }
+          } else {
+            observer.observe(root, { childList: true, subtree: true });
+          }
+        }
+      };
+
       const runDomSync = (): void => {
         this.domSyncRafId = null;
         baseGuide.prune();
         const hadChildList = pendingChildListChange;
+        if (hadChildList || rootsChanged) observeRoots();
+        rootsChanged = false;
         pendingChildListChange = false;
         const hadSidebarChange = pendingSidebarChange;
         pendingSidebarChange = false;
@@ -493,8 +553,17 @@ export class PageBridgeRuntimeHost {
 
       this.settingsObserver = new MutationObserver((records) => {
         let hasRelevantMutation = false;
+        let clearedClassGhosts = false;
         for (let i = 0; i < records.length; i += 1) {
           const rec = records[i]!;
+          // Class churn never needs a DOM reconciliation or ancestor selector walk.
+          if (rec.type === 'attributes' && rec.attributeName === 'class') {
+            if (!clearedClassGhosts && (rec.target as Element).matches(SIDEBAR_CARD_SELECTOR)) {
+              clearedClassGhosts = true;
+              this.trackGhosts?.clear();
+            }
+            continue;
+          }
           const targetNode =
             rec.target.nodeType === 1 ? (rec.target as Element) : rec.target.parentElement;
           if (!targetNode) {
@@ -572,6 +641,14 @@ export class PageBridgeRuntimeHost {
             }
           }
 
+          if (structuralRoots.has(targetNode) || pendingMountRoots.has(targetNode)) {
+            rootsChanged = true;
+            hasRelevantMutation = true;
+            for (const node of rec.addedNodes) {
+              if (node.nodeType === 1 && !isIgnoredMutationNode(node))
+                pendingMountRoots.add(node as Element);
+            }
+          }
           const card = targetNode.closest?.<HTMLElement>(SIDEBAR_CARD_SELECTOR);
           const inSidebar = Boolean(card) || Boolean(targetNode.closest?.('.cvat-objects-sidebar'));
 
@@ -676,6 +753,7 @@ export class PageBridgeRuntimeHost {
                     el.querySelector('.cvat-objects-sidebar, .cvat-objects-sidebar-state-item')
                   ))
               ) {
+                rootsChanged = true;
                 pendingSidebarChange = true;
                 fullSidebarReconcile = true;
                 dirtySidebarCards.clear();
@@ -713,12 +791,7 @@ export class PageBridgeRuntimeHost {
           }
         }
       });
-      this.settingsObserver.observe(this.doc.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['data-frame-number', 'class', 'aria-label', 'id', 'data-client-id'],
-      });
+      observeRoots();
     }
 
     this.tryMountWorkspaceSettingsCheckboxes();
@@ -737,6 +810,9 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
       this.win.removeEventListener('message', this.handleMessage);
       uninstallOrthoEditor();
+      this.preRenderEnhancer.disposeHotPaths();
+      for (const raycaster of this.hoverRaycasters) unlockRaycasterHover(raycaster);
+      this.hoverRaycasters.clear();
       this.preRenderEnhancer.setCanvasRenderListener(null);
       trackGhosts.dispose();
       this.trackGhosts = null;
@@ -797,11 +873,15 @@ export class PageBridgeRuntimeHost {
     this.cachedInstance = instance;
     const perspective = instance.view?.views?.perspective as
       { rayCaster?: { renderer?: RaycasterLike } } | undefined;
+    const raycaster = perspective?.rayCaster?.renderer;
+    if (raycaster) this.hoverRaycasters.add(raycaster);
     lockRaycasterHoverToActiveObject(
-      perspective?.rayCaster?.renderer,
+      raycaster,
       () => this.getActiveObjectClientId(this.cachedInstance ?? instance),
       undefined,
       {
+        useCachedClickBounds: () =>
+          this.cachedInstance?.view === instance.view && canReuseVisibleCuboidBounds(instance.view),
         resolveActiveObject: (activeId) => {
           const id = Number(activeId);
           return Number.isFinite(id)

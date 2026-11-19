@@ -11,7 +11,8 @@
  * 2. While no object is active (`activeClientId === null`) on dense scenes, stationary rays reuse
  *    a per-raycaster O(1) Idle Ray Cache and moving rays shortlist candidates via an SoA
  *    Ray-Sphere broad-phase before delegating exact geometry intersection to Three.js.
- * 3. Clicking another cuboid always runs unfiltered so the user can switch selection explicitly.
+ * 3. Button events use a fresh conservative broad phase and native exact picking for every
+ *    candidate, independently of the active object.
  */
 
 import { isNumericClientIdName } from './state-lookup';
@@ -35,12 +36,16 @@ export interface RaycasterLike {
 }
 
 export interface HoverLockOptions {
+  readonly useCachedClickBounds?: () => boolean;
   readonly resolveActiveObject?: (activeClientId: string) => unknown;
 }
 
 interface MeshBoundsLike {
   readonly name?: unknown;
   readonly visible?: boolean;
+  readonly isMesh?: boolean;
+  readonly isSkinnedMesh?: boolean;
+  readonly morphTargetInfluences?: unknown;
   readonly parent?: {
     readonly matrixWorld?: { readonly elements?: ArrayLike<number> | null } | null;
   } | null;
@@ -63,16 +68,17 @@ interface MeshBoundsLike {
 interface HoverSpatialSoA {
   readonly epoch: number;
   readonly count: number;
-  readonly cxs: Float32Array;
-  readonly cys: Float32Array;
-  readonly czs: Float32Array;
-  readonly rSqs: Float32Array;
+  readonly cxs: Float64Array;
+  readonly cys: Float64Array;
+  readonly czs: Float64Array;
+  readonly rSqs: Float64Array;
   readonly boundedIndices: Int32Array;
   readonly objIndexToSlot: Int32Array;
   readonly alwaysIncludeIndices: readonly number[];
 }
 
 interface HoverCandidateIndex {
+  readonly epoch: number;
   readonly sourceObjects: unknown[];
   readonly length: number;
   readonly first: unknown;
@@ -88,6 +94,7 @@ interface HoverCandidateIndex {
   lastActiveId: string | null;
   lastActiveResult: unknown[] | null;
   spatial: HoverSpatialSoA | null;
+  clickSpatial: HoverSpatialSoA | null;
 }
 
 interface IdleRayCacheState {
@@ -112,6 +119,12 @@ interface IdleRayCacheState {
 }
 
 const LOCKED_MARKER = '__cvat3dEnhancerHoverLocked';
+const hoverLockCleanups = new WeakMap<RaycasterLike, () => void>();
+
+export function unlockRaycasterHover(rayCaster: RaycasterLike): void {
+  hoverLockCleanups.get(rayCaster)?.();
+  hoverLockCleanups.delete(rayCaster);
+}
 const INDEX_CACHE_MIN_OBJECTS = 32;
 const IDLE_CACHE_MIN_OBJECTS = 64;
 const BROADPHASE_MIN_OBJECTS = 256;
@@ -128,6 +141,7 @@ let lastCandidateIndexSlot: HoverCandidateIndex | null = null;
  */
 export function invalidateHoverSpatialIndex(): void {
   globalHoverSpatialEpoch += 1;
+  lastCandidateIndexSlot = null;
 }
 
 let pointerButtonEventDepth = 0;
@@ -135,7 +149,7 @@ let pointerTrackingInstalled = false;
 
 /**
  * Tracks whether a real mouse button event (click/dblclick/mousedown/mouseup/contextmenu)
- * is currently being dispatched, so raycasts executed inside those handlers are never filtered.
+ * is currently being dispatched, so picking is independent of the active-object hover lock.
  */
 export function installPointerButtonEventTracking(win: Window = window): void {
   if (pointerTrackingInstalled) {
@@ -241,7 +255,7 @@ function computeHitsStamp(hits: readonly unknown[]): number {
 
 function isCandidateIndexValid(index: HoverCandidateIndex, objects: unknown[]): boolean {
   const len = objects.length;
-  if (len !== index.length || len === 0) {
+  if (index.epoch !== globalHoverSpatialEpoch || len !== index.length || len === 0) {
     return false;
   }
   const first = objects[0];
@@ -316,6 +330,7 @@ function getOrBuildCandidateIndex(objects: unknown[]): HoverCandidateIndex {
   const mid = objects[len >>> 1];
   const last = objects[len - 1];
   const built: HoverCandidateIndex = {
+    epoch: globalHoverSpatialEpoch,
     sourceObjects: objects,
     length: len,
     first,
@@ -331,6 +346,7 @@ function getOrBuildCandidateIndex(objects: unknown[]): HoverCandidateIndex {
     lastActiveId: null,
     lastActiveResult: null,
     spatial: null,
+    clickSpatial: null,
   };
 
   candidateIndexWeakMap.set(objects, built);
@@ -379,7 +395,8 @@ function mergeIndexedSubsets(
 
 function computeWorldSphere(
   mesh: MeshBoundsLike,
-  out: { cx: number; cy: number; cz: number; rSq: number }
+  out: { cx: number; cy: number; cz: number; rSq: number },
+  nativeBounds = false
 ): boolean {
   const geom = mesh.geometry;
   const elements = mesh.matrixWorld?.elements;
@@ -391,6 +408,7 @@ function computeWorldSphere(
     try {
       geom.computeBoundingSphere();
     } catch {
+      if (nativeBounds) return false;
       // Fallback to boundingBox below
     }
   }
@@ -406,7 +424,7 @@ function computeWorldSphere(
     localY = Number(bs.center?.y ?? 0);
     localZ = Number(bs.center?.z ?? 0);
     localRadius = bs.radius;
-  } else if (geom.boundingBox?.min && geom.boundingBox.max) {
+  } else if (!nativeBounds && geom.boundingBox?.min && geom.boundingBox.max) {
     const min = geom.boundingBox.min;
     const max = geom.boundingBox.max;
     const minX = Number(min.x);
@@ -442,7 +460,7 @@ function computeWorldSphere(
   // Hidden cuboids have `updateMatrixWorld` deferred, so `mesh.matrixWorld` may still sit at
   // the identity origin `(0, 0, 0)` while `mesh.position` and `mesh.scale` hold the true live
   // coordinates. Use `position`/`scale` (+ parent world transform if present) when hidden.
-  if (mesh.visible === false && mesh.position && mesh.scale) {
+  if (!nativeBounds && mesh.visible === false && mesh.position && mesh.scale) {
     const px = Number(mesh.position.x ?? 0);
     const py = Number(mesh.position.y ?? 0);
     const pz = Number(mesh.position.z ?? 0);
@@ -573,13 +591,13 @@ function computeWorldSphere(
 
 const scratchSphere = { cx: 0, cy: 0, cz: 0, rSq: 0 };
 
-function buildSpatialSoA(index: HoverCandidateIndex): HoverSpatialSoA {
+function buildSpatialSoA(index: HoverCandidateIndex, nativePicking = false): HoverSpatialSoA {
   const objects = index.sourceObjects;
   const len = objects.length;
-  const cxs = new Float32Array(len);
-  const cys = new Float32Array(len);
-  const czs = new Float32Array(len);
-  const rSqs = new Float32Array(len);
+  const cxs = new Float64Array(len);
+  const cys = new Float64Array(len);
+  const czs = new Float64Array(len);
+  const rSqs = new Float64Array(len);
   const boundedIndices = new Int32Array(len);
   const objIndexToSlot = new Int32Array(len);
   objIndexToSlot.fill(-1);
@@ -588,7 +606,13 @@ function buildSpatialSoA(index: HoverCandidateIndex): HoverSpatialSoA {
 
   for (let i = 0; i < len; i += 1) {
     const mesh = objects[i] as MeshBoundsLike | null;
-    if (!mesh || !isNumericClientIdName(mesh.name) || !computeWorldSphere(mesh, scratchSphere)) {
+    if (
+      !mesh ||
+      !isNumericClientIdName(mesh.name) ||
+      (nativePicking
+        ? !canBoundNativeMesh(mesh) || !computeNativeClickSphere(mesh)
+        : !computeWorldSphere(mesh, scratchSphere))
+    ) {
       alwaysIncludeIndices.push(i);
       continue;
     }
@@ -615,8 +639,12 @@ function buildSpatialSoA(index: HoverCandidateIndex): HoverSpatialSoA {
   };
 }
 
-function syncSpatialSlotForObject(index: HoverCandidateIndex, objIndex: number): void {
-  const spatial = index.spatial;
+function syncSpatialSlotForObject(
+  index: HoverCandidateIndex,
+  objIndex: number,
+  nativePicking = false
+): void {
+  const spatial = nativePicking ? index.clickSpatial : index.spatial;
   if (!spatial || objIndex < 0 || objIndex >= spatial.objIndexToSlot.length) {
     return;
   }
@@ -625,8 +653,12 @@ function syncSpatialSlotForObject(index: HoverCandidateIndex, objIndex: number):
     return;
   }
   const mesh = index.sourceObjects[objIndex] as MeshBoundsLike | null;
-  if (!mesh || !computeWorldSphere(mesh, scratchSphere)) {
-    index.spatial = null;
+  if (
+    !mesh ||
+    (nativePicking ? !computeNativeClickSphere(mesh) : !computeWorldSphere(mesh, scratchSphere))
+  ) {
+    if (nativePicking) index.clickSpatial = null;
+    else index.spatial = null;
     return;
   }
   spatial.cxs[slot] = scratchSphere.cx;
@@ -635,51 +667,161 @@ function syncSpatialSlotForObject(index: HoverCandidateIndex, objIndex: number):
   spatial.rSqs[slot] = scratchSphere.rSq;
 }
 
+// CVAT cuboid boxes have an origin-centered local sphere. Keep their common click path
+// scalar-only; unusual geometry/transforms use the general conservative implementation.
+function computeNativeClickSphere(mesh: MeshBoundsLike): boolean {
+  const sphere = mesh.geometry?.boundingSphere;
+  const e = mesh.matrixWorld?.elements;
+  if (
+    !sphere ||
+    !e ||
+    e.length < 16 ||
+    e[15] !== 1 ||
+    sphere.center?.x !== 0 ||
+    sphere.center.y !== 0 ||
+    sphere.center.z !== 0 ||
+    typeof sphere.radius !== 'number' ||
+    sphere.radius < 0
+  ) {
+    return computeWorldSphere(mesh, scratchSphere, true);
+  }
+  const scaleSq = Math.max(
+    e[0]! * e[0]! + e[1]! * e[1]! + e[2]! * e[2]!,
+    e[4]! * e[4]! + e[5]! * e[5]! + e[6]! * e[6]!,
+    e[8]! * e[8]! + e[9]! * e[9]! + e[10]! * e[10]!
+  );
+  const radius = sphere.radius * Math.sqrt(scaleSq) + SPHERE_RADIUS_PAD_METERS;
+  scratchSphere.cx = e[12]!;
+  scratchSphere.cy = e[13]!;
+  scratchSphere.cz = e[14]!;
+  scratchSphere.rSq = radius * radius;
+  return (
+    Number.isFinite(scratchSphere.cx) &&
+    Number.isFinite(scratchSphere.cy) &&
+    Number.isFinite(scratchSphere.cz) &&
+    Number.isFinite(scratchSphere.rSq)
+  );
+}
+
+// Only ordinary Three.js Mesh prototypes use the bounding-sphere picking contract.
+// Subclasses, per-instance raycast overrides, skinning and morphing stay native.
+const nativeMeshPrototypes = new WeakMap<object, boolean>();
+function canBoundNativeMesh(mesh: MeshBoundsLike): boolean {
+  if (
+    !mesh.isMesh ||
+    mesh.isSkinnedMesh ||
+    mesh.morphTargetInfluences ||
+    Object.hasOwn(mesh, 'raycast')
+  )
+    return false;
+  const prototype: object | null = Object.getPrototypeOf(mesh);
+  if (!prototype) return false;
+  let supported = nativeMeshPrototypes.get(prototype);
+  if (supported === undefined) {
+    supported = ['raycast', 'getVertexPosition', 'updateMorphTargets'].every((key) =>
+      Object.hasOwn(prototype, key)
+    );
+    nativeMeshPrototypes.set(prototype, supported);
+  }
+  return supported;
+}
+
+function sphereCouldIntersectRay(
+  cx: number,
+  cy: number,
+  cz: number,
+  rSq: number,
+  ox: number,
+  oy: number,
+  oz: number,
+  ux: number,
+  uy: number,
+  uz: number
+): boolean {
+  const vx = cx - ox;
+  const vy = cy - oy;
+  const vz = cz - oz;
+  const vLenSq = vx * vx + vy * vy + vz * vz;
+  if (vLenSq <= rSq) return true;
+  const tca = vx * ux + vy * uy + vz * uz;
+  const roundingMargin = Number.EPSILON * 16 * (vLenSq + tca * tca + rSq);
+  return tca >= 0 && vLenSq - tca * tca <= rSq + roundingMargin;
+}
+
 function shortlistBroadPhaseRayCandidates(
   objects: unknown[],
-  index: HoverCandidateIndex,
+  index: HoverCandidateIndex | null,
   ox: number,
   oy: number,
   oz: number,
   dx: number,
   dy: number,
-  dz: number
+  dz: number,
+  nativePicking = false
 ): unknown[] {
   const dirLen = Math.hypot(dx, dy, dz);
   if (!Number.isFinite(dirLen) || dirLen <= 1e-12) {
     return objects;
   }
-  if (!index.spatial || index.spatial.epoch !== globalHoverSpatialEpoch) {
-    index.spatial = buildSpatialSoA(index);
-  }
-  const spatial = index.spatial;
-  if (spatial.count === 0) {
-    return objects;
-  }
-
   const invLen = 1 / dirLen;
   const ux = dx * invLen;
   const uy = dy * invLen;
   const uz = dz * invLen;
+  if (nativePicking && Math.abs(dirLen - 1) > Number.EPSILON * 8) return objects;
+  if (!index) {
+    // Clicks snapshot current native world bounds in one pass, without N-sized scratch
+    // arrays or dependencies on a preceding hover/notification. Preserve input order.
+    if (Math.abs(dirLen - 1) > Number.EPSILON * 8) return objects;
+    const out: unknown[] = [];
+    for (const object of objects) {
+      const mesh = object as MeshBoundsLike | null;
+      if (
+        !mesh ||
+        !isNumericClientIdName(mesh.name) ||
+        !canBoundNativeMesh(mesh) ||
+        !computeNativeClickSphere(mesh) ||
+        sphereCouldIntersectRay(
+          scratchSphere.cx,
+          scratchSphere.cy,
+          scratchSphere.cz,
+          scratchSphere.rSq,
+          ox,
+          oy,
+          oz,
+          ux,
+          uy,
+          uz
+        )
+      ) {
+        out.push(object);
+      }
+    }
+    return out;
+  }
+  if (
+    nativePicking &&
+    (!index.clickSpatial || index.clickSpatial.epoch !== globalHoverSpatialEpoch)
+  ) {
+    index.clickSpatial = buildSpatialSoA(index, true);
+  } else if (
+    !nativePicking &&
+    (!index.spatial || index.spatial.epoch !== globalHoverSpatialEpoch)
+  ) {
+    index.spatial = buildSpatialSoA(index);
+  }
+  const spatial = nativePicking ? index.clickSpatial! : index.spatial!;
+  if (spatial.count === 0) return objects;
 
   const { count, cxs, cys, czs, rSqs, boundedIndices, alwaysIncludeIndices } = spatial;
   const matchedIndices: number[] = [];
 
   for (let k = 0; k < count; k += 1) {
-    const vx = cxs[k]! - ox;
-    const vy = cys[k]! - oy;
-    const vz = czs[k]! - oz;
-    const rSq = rSqs[k]!;
-    const vLenSq = vx * vx + vy * vy + vz * vz;
-    if (vLenSq > rSq) {
-      const tca = vx * ux + vy * uy + vz * uz;
-      if (tca < 0 || vLenSq - tca * tca > rSq) {
-        continue;
-      }
+    if (!sphereCouldIntersectRay(cxs[k]!, cys[k]!, czs[k]!, rSqs[k]!, ox, oy, oz, ux, uy, uz)) {
+      continue;
     }
     const objIdx = boundedIndices[k]!;
     const candidate = objects[objIdx];
-    if ((candidate as { visible?: boolean } | null)?.visible === false) {
+    if (!nativePicking && (candidate as { visible?: boolean } | null)?.visible === false) {
       continue;
     }
     matchedIndices.push(objIdx);
@@ -870,12 +1012,60 @@ export function lockRaycasterHoverToActiveObject(
     lastHits: [],
   };
 
-  const original = rayCaster.intersectObjects.bind(rayCaster);
+  let enabled = true;
+  const nativeMethod = rayCaster.intersectObjects;
+  const original = nativeMethod.bind(rayCaster);
   const resolveActiveObject = options?.resolveActiveObject;
 
-  rayCaster.intersectObjects = (objects: unknown[], recursive?: boolean, ...rest: unknown[]) => {
-    if (!isEnabled() || isInsidePointerButtonEvent()) {
-      return original(objects, recursive, ...rest);
+  const wrapped = (objects: unknown[], recursive?: boolean, ...rest: unknown[]): unknown[] => {
+    if (!enabled || !isEnabled()) return original(objects, recursive, ...rest);
+    if (isInsidePointerButtonEvent()) {
+      let candidates = objects;
+      try {
+        const origin = rayCaster.ray?.origin;
+        const direction = rayCaster.ray?.direction;
+        if (
+          !recursive &&
+          Array.isArray(objects) &&
+          objects.length > BROADPHASE_MIN_OBJECTS &&
+          origin &&
+          direction &&
+          [origin.x, origin.y, origin.z, direction.x, direction.y, direction.z].every(
+            Number.isFinite
+          )
+        ) {
+          const index = options?.useCachedClickBounds?.()
+            ? getOrBuildCandidateIndex(objects)
+            : null;
+          if (index?.clickSpatial) {
+            // CVAT can preview the active cuboid while dragging before notifying the model.
+            const activeId = getActiveClientId();
+            if (activeId !== null) {
+              const denseId = parseDenseCanonicalId(activeId, index.denseIdToIndex.length - 1);
+              const objectIndex = denseId >= 0 ? index.denseIdToIndex[denseId]! : -1;
+              if (objectIndex >= 0) syncSpatialSlotForObject(index, objectIndex, true);
+              else
+                for (const i of index.sparseByName?.get(activeId) ?? [])
+                  syncSpatialSlotForObject(index, i, true);
+            }
+          }
+          candidates = shortlistBroadPhaseRayCandidates(
+            objects,
+            index,
+            origin.x,
+            origin.y,
+            origin.z,
+            direction.x,
+            direction.y,
+            direction.z,
+            true
+          );
+        }
+      } catch {
+        // Unfamiliar runtime bounds or helpers must never prevent a native click.
+        candidates = objects;
+      }
+      return original(candidates, recursive, ...rest);
     }
 
     const activeClientId = getActiveClientId();
@@ -979,6 +1169,22 @@ export function lockRaycasterHoverToActiveObject(
     if (!Array.isArray(hits) || hits.length === 0) return hits;
     return filterHoverIntersections(hits, activeClientId);
   };
-  marked[LOCKED_MARKER] = true;
-  return true;
+  try {
+    if (!Reflect.set(rayCaster, 'intersectObjects', wrapped)) return false;
+    if (!Reflect.set(marked, LOCKED_MARKER, true)) {
+      Reflect.set(rayCaster, 'intersectObjects', nativeMethod);
+      return false;
+    }
+    hoverLockCleanups.set(rayCaster, () => {
+      enabled = false;
+      idleCache.valid = false;
+      idleCache.lastHits = [];
+      if (rayCaster.intersectObjects === wrapped)
+        Reflect.set(rayCaster, 'intersectObjects', nativeMethod);
+      Reflect.deleteProperty(marked, LOCKED_MARKER);
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -293,9 +293,12 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(controls).not.toHaveBeenCalled();
       expect(settings).not.toHaveBeenCalled();
       expect(canvases).not.toHaveBeenCalled();
-      document.querySelector('.cvat-objects-sidebar-state-item')!.classList.add('active');
+      for (let i = 0; i < 2000; i++) {
+        document.querySelector('.cvat-objects-sidebar-state-item')!.className =
+          `cvat-objects-sidebar-state-item active churn-${i}`;
+      }
       await flush();
-      expect(controls).toHaveBeenCalledTimes(1);
+      expect(controls).not.toHaveBeenCalled();
       expect(canvases).not.toHaveBeenCalled();
       expect(settings).not.toHaveBeenCalled();
       controls.mockClear();
@@ -309,6 +312,53 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       document
         .querySelector('.cvat-objects-sidebar-state-item')!
         .appendChild(document.createElement('canvas'));
+      await flush();
+      expect(canvases).toHaveBeenCalledOnce();
+      controls.mockClear();
+      document.querySelector('.cvat-objects-sidebar')!.outerHTML =
+        '<div class="cvat-objects-sidebar"><div class="cvat-objects-sidebar-state-item"></div></div>';
+      await flush();
+      expect(controls).toHaveBeenCalledOnce();
+      controls.mockClear();
+      const lateMount = document.createElement('div');
+      document.querySelector('.cvat-objects-sidebar')!.replaceWith(lateMount);
+      await flush();
+      lateMount.innerHTML =
+        '<div class="cvat-objects-sidebar"><div class="cvat-objects-sidebar-state-item"></div></div>';
+      await flush();
+      expect(controls).toHaveBeenCalledOnce();
+      controls.mockClear();
+      document
+        .querySelector('.cvat-objects-sidebar-state-item')!
+        .setAttribute('data-client-id', '9');
+      await flush();
+      expect(controls).toHaveBeenCalledOnce();
+      controls.mockClear();
+      const partialMount = document.createElement('div');
+      partialMount.innerHTML = '<canvas></canvas><div class="pending-sidebar"></div>';
+      document.body.appendChild(partialMount);
+      await flush();
+      partialMount.querySelector('.pending-sidebar')!.innerHTML =
+        '<div class="cvat-objects-sidebar"><div class="cvat-objects-sidebar-state-item"></div></div>';
+      await flush();
+      expect(controls).toHaveBeenCalledOnce();
+      settings.mockClear();
+      const modal = document.createElement('div');
+      modal.className = 'ant-modal-root';
+      document.body.appendChild(modal);
+      await flush();
+      modal.innerHTML = '<div class="cvat-workspace-settings"></div>';
+      await flush();
+      expect(settings).toHaveBeenCalledOnce();
+      settings.mockClear();
+      canvases.mockClear();
+      const oldCanvas = document.querySelector('canvas')!;
+      const replacement = document.createElement('canvas');
+      oldCanvas.replaceWith(replacement);
+      await flush();
+      expect(canvases).toHaveBeenCalledOnce();
+      canvases.mockClear();
+      replacement.setAttribute('data-frame-number', '2');
       await flush();
       expect(canvases).toHaveBeenCalledOnce();
     } finally {

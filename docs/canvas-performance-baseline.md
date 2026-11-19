@@ -8,21 +8,21 @@ Chrome DevTools Performance recorded the existing live CVAT tab for 14.63 second
 
 Summary displayed by DevTools:
 
-| Category | Time |
-| --- | ---: |
+| Category  |      Time |
+| --------- | --------: |
 | Scripting | 12,044 ms |
-| Painting | 1,374 ms |
-| System | 1,108 ms |
+| Painting  |  1,374 ms |
+| System    |  1,108 ms |
 
 Bottom-up displayed:
 
-| Function | Self | Total |
-| --- | ---: | ---: |
-| multiplyMatrices | 5,528.1 ms | 5,528.3 ms |
-| updateMatrixWorld | 3,259.7 ms | 10,476.6 ms |
-| compose | 1,589.0 ms | 1,589.0 ms |
-| Commit | 1,374.4 ms | 1,374.4 ms |
-| Profiling overhead | 586.5 ms | 887.2 ms |
+| Function           |       Self |       Total |
+| ------------------ | ---------: | ----------: |
+| multiplyMatrices   | 5,528.1 ms |  5,528.3 ms |
+| updateMatrixWorld  | 3,259.7 ms | 10,476.6 ms |
+| compose            | 1,589.0 ms |  1,589.0 ms |
+| Commit             | 1,374.4 ms |  1,374.4 ms |
+| Profiling overhead |   586.5 ms |    887.2 ms |
 
 Nested total times overlap and must not be added together. The CPU trace points toward repeated scene-transform work; it does not establish GPU headroom, actual FPS or exclusive ownership of all work by native CVAT. Extension hooks executing in the page world may be attributed to the page or their caller. The 43.3 ms attributed explicitly to Meow in the summary is not a measurement of all extension overhead.
 
@@ -34,10 +34,10 @@ A temporary per-object transform cache was tested against Three.js 0.184.0. Corr
 
 A CPU-only synthetic test used a scene with 2,535 objects, 300 traversals per sample, seven samples and warmed-up scenes. Median traversal times:
 
-| Scenario | Native | Cache experiment |
-| --- | ---: | ---: |
-| Static transforms | 35.43 ms | 42.52 ms |
-| One moving group | 32.66 ms | 44.08 ms |
+| Scenario          |   Native | Cache experiment |
+| ----------------- | -------: | ---------------: |
+| Static transforms | 35.43 ms |         42.52 ms |
+| One moving group  | 32.66 ms |         44.08 ms |
 
 These totals cover 300 traversals, not one presented frame. Node CPU timings do not predict browser FPS. The experiment showed no benefit and was removed, including its temporary test dependencies. It is not in the current build.
 
@@ -73,11 +73,55 @@ Reproducible CPU microbenchmark: `node scripts/benchmark-hidden-arrows.mjs` (Nod
 
 One run, median of seven samples, 362 groups with three arrows each, 300 matrix traversals per sample:
 
-| Arrows | Parent motion | Native | Optimized |
-| --- | --- | ---: | ---: |
-| Hidden | Static | 73.08 ms | 10.38 ms |
-| Hidden | One moving parent | 74.60 ms | 10.56 ms |
-| Visible | Static | 85.70 ms | 87.38 ms |
-| Visible | One moving parent | 82.35 ms | 86.88 ms |
+| Arrows  | Parent motion     |   Native | Optimized |
+| ------- | ----------------- | -------: | --------: |
+| Hidden  | Static            | 73.08 ms |  10.38 ms |
+| Hidden  | One moving parent | 74.60 ms |  10.56 ms |
+| Visible | Static            | 85.70 ms |  87.38 ms |
+| Visible | One moving parent | 82.35 ms |  86.88 ms |
 
 This reduces hidden-arrow traversal work substantially, with a small wrapper cost when arrows are visible. These timings exclude all GPU drawing, picking and UI work; they are not an FPS promise. Live before/after capture after loading the new extension build remains necessary. Tests cover native world-matrix recovery after parent translation/rotation/scale, resized arrows, hidden coordinate queries, idempotence, custom hook fallback and newly created cuboids.
+
+## Large-scene hot paths: synthetic before/after
+
+Measured 2026-11-19 with `node scripts/benchmark-100k-objects.mjs`, Node v24.22.3,
+100,000 cuboids, 120,000 LiDAR points and seed 42. Times below are CPU milliseconds,
+median of three runs. These isolate the inspected CVAT algorithms; they do not measure a
+browser's complete next-frame transition, React rendering, GPU work or real-job interaction.
+
+| Fix / operation                                                                             | Native before | Patched after |
+| ------------------------------------------------------------------------------------------- | ------------: | ------------: |
+| M1: DOM sync calls for 2,000 sidebar class mutations (regression fixture, not milliseconds) |             1 |             0 |
+| C1: 60 steady `getAllVisibleCuboids()` reads                                                |   1,105.71 ms |      <0.01 ms |
+| C3: `objects_updated`, 100k states already drawn                                            |  20,872.99 ms |      40.03 ms |
+| C2: click raycast, warm versioned bounds                                                    |      42.47 ms |       3.40 ms |
+
+C1's cold list build and visibility-hook installation cost **243.72 ms**. C2's cold click
+index/bounds build cost **108.39 ms**, including picking: it is slower than a single native
+cast in this synthetic scene. The large click improvement is for subsequent casts while
+geometry/visibility are unchanged; native notifications invalidate the snapshot. The native
+list itself is reused in O(1) between changes, without N-sized steady-render allocations.
+
+The click broad phase reduced 100,000 native candidates to **232** and retained all **6**
+native hits in identical order and distance. The benchmark's static scene explicitly enables
+versioned bounds; the page bridge enables reuse only while its native notification/visibility
+cache hook is active. Native active-object previews refresh their bound before every click.
+Without that contract, clicks inspect fresh world bounds; that fallback can be slower than a
+native cast and makes no warm-cache timing claim. Recursive and unsupported picks remain native.
+Use `--click-only` to run the picking comparison without the expensive quadratic reference pass.
+
+The C3 benchmark copies native partitioning and uses no-op mutation methods, isolating deleted-ID
+lookup and partition construction. It excludes the cost of creating/updating/deleting actual
+Three.js objects. C1 compares the original native list builder against a warmed native-result
+cache. The M1 count comes from the observer integration fixture: scoped class churn clears ghosts
+once per batch and performs no DOM reconciliation. It is not a DOM elapsed-time benchmark.
+
+Regression coverage includes seeded native-oracle comparisons for visibility/hidden/outside
+changes, activation notifications, deletion/replacement and incremental update partitions;
+steady list identity/no enumeration; hover membership invalidation; native click hits/order with
+helpers, ties, hidden meshes, cached/fresh bounds and active previews; empty/partial late mounts,
+frame attributes, sidebar identity changes and teardown. Typecheck, ESLint, all 230 Vitest tests,
+security scan, production build and artifact E2E passed. Neither timing-sensitive suite required
+an isolated rerun. See [compatibility contracts](compatibility.md#large-scene-native-hot-paths)
+for runtime shape detection, fallback and the notification assumptions that still need live-job
+validation. The optional native model `objects.find` optimization was not applied.
