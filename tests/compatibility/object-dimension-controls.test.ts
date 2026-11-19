@@ -57,7 +57,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
     const button = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="RIDE_STATE"]')!;
     expect(button.textContent).toBe('RS');
-    expect(card.querySelectorAll('button')).toHaveLength(5);
+    expect(card.querySelectorAll('button')).toHaveLength(8);
     button.click();
     button.click();
     await Promise.resolve();
@@ -72,18 +72,18 @@ describe('dimension controls on customized CVAT sidebars', () => {
     rideState.isAvailable.mockReturnValue(false);
     injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
     expect(card.querySelector('[data-enhancer-sync-dim="RIDE_STATE"]')).toBeNull();
-    expect(card.querySelectorAll('button')).toHaveLength(4);
+    expect(card.querySelectorAll('button')).toHaveLength(7);
   });
 
   it.each([
     '<div class="ant-col ant-col-20 css-n0gjrg"><div class="ant-row"><span class="cvat-object-item-button-first-keyframe" style="opacity:0.5;pointer-events:none"></span></div></div>',
     '<div class="ant-col ant-col-24 css-company"><div class="company-actions"><span class="cvat-object-item-button-first-keyframe"></span></div></div>',
     '<div class="company-actions"><span class="cvat-object-item-button-lock anticon-unlock"></span></div>',
-  ])('mounts all four actionable icons independently of the host grid: %s', async (content) => {
+  ])('mounts all seven actionable icons independently of the host grid: %s', async (content) => {
     const card = mountCard(content);
     const onSync = sync();
     expect(injectCvatObjectDimensionSyncControls(document, onSync)).toBe(1);
-    expect(card.querySelectorAll(`${rowSelector} svg path`)).toHaveLength(4);
+    expect(card.querySelectorAll(`${rowSelector} svg path`)).toHaveLength(7);
     const row = card.querySelector<HTMLElement>(rowSelector)!;
     expect(row.parentElement).toBe(card);
     expect(row.style.getPropertyPriority('display')).toBe('important');
@@ -102,7 +102,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     card.querySelector('[data-enhancer-sync-dim="H"] svg')!.remove();
     card.querySelector('[data-enhancer-sync-dim="W"]')!.remove();
     injectCvatObjectDimensionSyncControls(document, onSync);
-    expect(card.querySelectorAll('svg path')).toHaveLength(4);
+    expect(card.querySelectorAll('svg path')).toHaveLength(7);
     const row = card.querySelector(rowSelector)!;
     row.replaceWith(row.cloneNode(true));
     injectCvatObjectDimensionSyncControls(document, onSync);
@@ -111,7 +111,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     await vi.waitFor(() => expect(onSync).toHaveBeenCalledTimes(1));
     card.querySelector(rowSelector)!.remove();
     expect(injectCvatObjectDimensionSyncControls(document, onSync)).toBe(1);
-    expect(card.querySelectorAll('svg path')).toHaveLength(4);
+    expect(card.querySelectorAll('svg path')).toHaveLength(7);
   });
 
   it.each(['cvat-object-item-button-lock-enabled', 'anticon-lock'])(
@@ -273,7 +273,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
       expect(unobserved.has(farCard)).toBe(true);
       const farRow = farCard.querySelector(rowSelector);
       expect(farRow).not.toBeNull();
-      expect(farCard.querySelectorAll('button')).toHaveLength(5);
+      expect(farCard.querySelectorAll('button')).toHaveLength(8);
       farCard.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="H"]')!.click();
       await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(95, 'H'));
     } finally {
@@ -307,5 +307,76 @@ describe('dimension controls on customized CVAT sidebars', () => {
     expect(card1.querySelector(rowSelector)).toBeNull();
     expect(card2.querySelector(rowSelector)).not.toBeNull();
     expect(rideState.isAvailable).toHaveBeenCalledExactlyOnceWith(2, card2);
+  });
+});
+
+describe('track editing sidebar actions', () => {
+  it('forwards Shift+click for whole-track flip and swap, retaining ordinary click', async () => {
+    const card = mountCard('');
+    const onSync = sync();
+    injectCvatObjectDimensionSyncControls(document, onSync);
+    const flip = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="FLIP_180"]')!;
+    flip.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(1, 'FLIP_180', true));
+    await vi.waitFor(() => expect(flip.disabled).toBe(false));
+    const swap = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="SWAP_LW"]')!;
+    swap.click();
+    await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(1, 'SWAP_LW'));
+    await vi.waitFor(() => expect(swap.disabled).toBe(false));
+    swap.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(1, 'SWAP_LW', true));
+  });
+
+  it('offers mutable attributes on demand and applies only the selected ID', async () => {
+    const card = mountCard('');
+    const getAttributes = vi.fn(() => [
+      { id: 10, name: 'sitting' },
+      { id: 11, name: 'ride_state' },
+    ]);
+    const syncAttribute = vi.fn(async () => ({
+      clientID: 1,
+      targetValue: 'true',
+      updatedKeyframes: 2,
+      totalKeyframes: 3,
+    }));
+    injectCvatObjectDimensionSyncControls(
+      document,
+      sync(),
+      {},
+      { isAvailable: () => false, sync: vi.fn(), getAttributes, syncAttribute }
+    );
+    expect(getAttributes).not.toHaveBeenCalled();
+    card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="ATTRIBUTES"]')!.click();
+    await vi.waitFor(() => expect(card.querySelector('select')).not.toBeNull());
+    const select = card.querySelector('select')!;
+    select.value = '11';
+    card.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
+    await vi.waitFor(() => expect(syncAttribute).toHaveBeenCalledExactlyOnceWith(1, 11));
+    expect(card.querySelector('select')).toBeNull();
+  });
+
+  it('uses explicit yaw endpoints on Shift+click', async () => {
+    const card = mountCard('');
+    const onSync = sync();
+    injectCvatObjectDimensionSyncControls(
+      document,
+      onSync,
+      {},
+      {
+        isAvailable: () => false,
+        sync: vi.fn(),
+        getYawRangeOptions: () => ({ frames: [0, 5, 10], currentFrame: 3 }),
+      }
+    );
+    card
+      .querySelector('[data-enhancer-sync-dim="YAW_INTERPOLATE"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await vi.waitFor(() => expect(card.querySelectorAll('select')).toHaveLength(2));
+    const selects = card.querySelectorAll('select');
+    selects[1]!.value = '10';
+    card.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
+    await vi.waitFor(() =>
+      expect(onSync).toHaveBeenCalledWith(1, 'YAW_INTERPOLATE', false, [0, 10])
+    );
   });
 });

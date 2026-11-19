@@ -226,7 +226,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       await flush();
       await flush();
       await flush();
-      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row svg path')).toHaveLength(4);
+      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row svg path')).toHaveLength(7);
       expect(frames).toHaveLength(0);
       document.querySelector('.cvat-3d-enhancer-dim-sync-row')!.remove();
       await flush();

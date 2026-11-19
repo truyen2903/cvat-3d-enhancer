@@ -15,12 +15,17 @@ const INITIAL_EAGER_MOUNT_LIMIT = 32;
 
 type SyncDimension = (
   clientID: number,
-  dimension: CuboidDimensionKey
+  dimension: CuboidDimensionKey,
+  wholeTrack?: boolean,
+  yawRange?: readonly [number, number]
 ) => Promise<DimensionSyncResult> | DimensionSyncResult;
 
 export interface RideStateControl {
   isAvailable: (clientID: number, card?: HTMLElement) => boolean;
   sync: (clientID: number) => Promise<RideStateSyncResult>;
+  getYawRangeOptions?: (clientID: number) => { frames: readonly number[]; currentFrame: number };
+  getAttributes?: (clientID: number) => readonly { id: number; name: string }[];
+  syncAttribute?: (clientID: number, attributeID: number) => Promise<RideStateSyncResult>;
 }
 
 export interface DimensionSyncControlOptions {
@@ -29,7 +34,7 @@ export interface DimensionSyncControlOptions {
   targetCards?: Iterable<HTMLElement> | null;
 }
 
-type SidebarAction = CuboidDimensionKey | 'RIDE_STATE';
+type SidebarAction = CuboidDimensionKey | 'RIDE_STATE' | 'ATTRIBUTES';
 
 interface ButtonConfig {
   readonly key: SidebarAction;
@@ -99,9 +104,29 @@ const DIMENSION_BUTTON_CONFIGS: readonly ButtonConfig[] = [
   {
     key: 'FLIP_180',
     className: 'cvat-object-item-button-flip-180',
-    title: 'Flip heading 180° on current frame (Lật đầu xe 180° ở frame hiện tại)',
+    title: '180°: click = current frame; Shift+click = all track keyframes',
     svgPath:
       'M12 2L16 6H13V11H11V6H8L12 2ZM12 22L8 18H11V13H13V18H16L12 22ZM5.64 5.64L7.05 7.05C5.17 8.93 4.69 11.74 5.62 14.12L3.77 14.9C2.5 11.74 3.16 8.12 5.64 5.64ZM18.36 18.36L16.95 16.95C18.83 15.07 19.31 12.26 18.38 9.88L20.23 9.1C21.5 12.26 20.84 15.88 18.36 18.36Z',
+  },
+  {
+    key: 'SWAP_LW',
+    className: 'cvat-object-item-button-swap-lw',
+    title: 'L↔W + yaw 90°: click = current frame; Shift+click = all keyframes',
+    svgPath:
+      'M4 7H18L14 3L16 1L23 8L16 15L14 13L18 9H4V7ZM20 17H6L10 13L8 11L1 18L8 25L10 23L6 19H20V17Z',
+  },
+  {
+    key: 'YAW_INTERPOLATE',
+    className: 'cvat-object-item-button-yaw-interpolate',
+    title:
+      'Yaw: interpolate only yaw between keyframes surrounding the current frame; Shift+click chooses endpoints',
+    svgPath: 'M3 3H6V18H21V21H3V3ZM8 14L12 8L16 12L20 4L22 5L17 16L12 12L10 16Z',
+  },
+  {
+    key: 'ATTRIBUTES',
+    className: 'cvat-object-item-button-sync-attributes',
+    title: 'Attr: apply one current mutable attribute to every track keyframe',
+    svgPath: 'M3 3H21V5H3ZM3 11H21V13H3ZM3 19H21V21H3Z',
   },
 ];
 
@@ -114,7 +139,11 @@ const CONFIG_VARIANTS: readonly ConfigVariant[] = Array.from({ length: 8 }, (_, 
   const enableFlip = (mask & 2) !== 0;
   const enableRide = (mask & 1) !== 0;
   const configs = DIMENSION_BUTTON_CONFIGS.filter((cfg) =>
-    cfg.key === 'RIDE_STATE' ? enableRide : cfg.key === 'FLIP_180' ? enableFlip : enableDim
+    cfg.key === 'RIDE_STATE'
+      ? enableRide
+      : cfg.key === 'FLIP_180' || cfg.key === 'SWAP_LW' || cfg.key === 'YAW_INTERPOLATE'
+        ? enableFlip
+        : enableDim
   );
   return {
     configs,
@@ -128,6 +157,9 @@ const ACTION_NAMES: Readonly<Record<SidebarAction, string>> = {
   W: 'đồng bộ chiều rộng (W)',
   L: 'đồng bộ chiều dài (L)',
   FLIP_180: 'lật hướng 180°',
+  SWAP_LW: 'đổi L↔W và xoay 90°',
+  YAW_INTERPOLATE: 'nội suy riêng yaw',
+  ATTRIBUTES: 'áp dụng thuộc tính cho toàn track',
   RIDE_STATE: 'áp dụng ride_state cho mọi frame',
 };
 const feedbackTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
@@ -207,8 +239,18 @@ function createButtonTemplate(doc: Document, cfg: ButtonConfig): HTMLTemplateEle
   path.setAttribute('d', cfg.svgPath);
   svg.appendChild(path);
   button.appendChild(svg);
-  if (cfg.key === 'RIDE_STATE') {
-    button.appendChild(doc.createTextNode('RS'));
+  if (['RIDE_STATE', 'SWAP_LW', 'YAW_INTERPOLATE', 'ATTRIBUTES'].includes(cfg.key)) {
+    button.appendChild(
+      doc.createTextNode(
+        cfg.key === 'RIDE_STATE'
+          ? 'RS'
+          : cfg.key === 'SWAP_LW'
+            ? 'L↔W'
+            : cfg.key === 'ATTRIBUTES'
+              ? 'Attr'
+              : 'Yaw'
+      )
+    );
     button.style.width = '48px';
     button.style.gap = '2px';
   }
@@ -248,6 +290,7 @@ function handleRowClick(event: MouseEvent): void {
   const cfg = actionKey ? BUTTON_CONFIG_BY_KEY.get(actionKey) : undefined;
   if (!cfg || !activeHandler.enabled.has(cfg.key)) return;
   const name = ACTION_NAMES[cfg.key];
+  const wholeTrack = event.shiftKey;
   if (currentCard?.querySelector(LOCK_SELECTOR)) {
     showMeowToast(doc, `#${id}: object đang bị khóa — mở khóa để ${name}`, 'error');
     return;
@@ -263,6 +306,19 @@ function handleRowClick(event: MouseEvent): void {
   const toast = showMeowToast(doc, `#${id}: đang ${name}…`, 'loading');
   void Promise.resolve()
     .then(async () => {
+      if (cfg.key === 'ATTRIBUTES') {
+        const attributes = activeHandler.rideState?.getAttributes?.(id) ?? [];
+        if (!attributes.length || !activeHandler.rideState?.syncAttribute)
+          throw new Error('Không có thuộc tính mutable');
+        const attributeID = await chooseMutableAttribute(currentCard!, attributes);
+        if (attributeID === null) return { ok: false, message: `#${id}: đã hủy` };
+        const result = await activeHandler.rideState.syncAttribute(id, attributeID);
+        const label = attributes.find((a) => a.id === attributeID)?.name ?? String(attributeID);
+        return {
+          ok: true,
+          message: `#${id}: ${label} = ${result.targetValue}, đã cập nhật ${result.updatedKeyframes}/${result.totalKeyframes} keyframe`,
+        };
+      }
       if (cfg.key === 'RIDE_STATE') {
         const result = await activeHandler.rideState?.sync(id);
         if (!result) throw new Error('ride_state is unavailable');
@@ -276,19 +332,27 @@ function handleRowClick(event: MouseEvent): void {
         button.title = `ride_state = ${result.targetValue} across all frames (${result.updatedKeyframes}/${result.totalKeyframes} keyframes updated)`;
         return { ok: true, message };
       }
-      const result = await activeHandler.onSync(id, cfg.key);
+      let yawRange: readonly [number, number] | undefined;
+      if (cfg.key === 'YAW_INTERPOLATE' && wholeTrack) {
+        const options = activeHandler.rideState?.getYawRangeOptions?.(id);
+        if (!options) throw new Error('Track keyframes are unavailable');
+        const selected = await chooseYawRange(currentCard!, options.frames, options.currentFrame);
+        if (!selected) return { ok: false, message: `#${id}: đã hủy` };
+        yawRange = selected;
+      }
+      const result = await (yawRange
+        ? activeHandler.onSync(id, cfg.key, false, yawRange)
+        : wholeTrack
+          ? activeHandler.onSync(id, cfg.key, true)
+          : activeHandler.onSync(id, cfg.key));
       if (result.syncedFrames > 0) {
         const message =
-          cfg.key === 'FLIP_180'
+          cfg.key === 'FLIP_180' && !wholeTrack
             ? `#${id}: đã lật 180° ở frame hiện tại (Yaw = ${result.targetValue === null ? '' : ((result.targetValue * 180) / Math.PI).toFixed(1)}°)`
-            : `#${id}: ${cfg.key} = ${result.targetValue?.toFixed(2) ?? ''} đã đồng bộ ${result.syncedFrames} keyframe` +
+            : `#${id}: ${name}, đã cập nhật ${result.syncedFrames} frame${wholeTrack ? ' (toàn track)' : ''}` +
               (result.skippedAttributeMismatchFrames
                 ? ` (bỏ qua ${result.skippedAttributeMismatchFrames} do khác attribute)`
                 : '');
-        button.title =
-          cfg.key === 'FLIP_180'
-            ? `Flipped 180° on current frame (Yaw = ${result.targetValue === null ? '' : ((result.targetValue * 180) / Math.PI).toFixed(1)}°)`
-            : `${cfg.key} = ${result.targetValue?.toFixed(2) ?? ''} synced to ${result.syncedFrames} keyframe(s) (${result.skippedAttributeMismatchFrames} skipped due to different attributes)`;
         return { ok: true, message };
       }
       const message = `#${id}: ${name} — không có frame nào được cập nhật`;
@@ -715,4 +779,92 @@ export function injectCvatObjectDimensionSyncControls(
     mountedCount += reconcileSingleCard(doc, cards[i]!, onSync, enableDim, enableFlip, rideState);
   }
   return mountedCount;
+}
+
+/** Created only on demand, inside the native object card; no attribute scans while idle. */
+function chooseMutableAttribute(
+  card: HTMLElement,
+  attributes: readonly { id: number; name: string }[]
+): Promise<number | null> {
+  return new Promise((resolve) => {
+    const doc = card.ownerDocument;
+    const panel = doc.createElement('div');
+    panel.className = 'cvat-3d-enhancer-attribute-picker';
+    const select = doc.createElement('select');
+    select.setAttribute('aria-label', 'Mutable attribute to apply to track');
+    for (const attribute of attributes) {
+      const option = doc.createElement('option');
+      option.value = String(attribute.id);
+      option.textContent = attribute.name;
+      select.appendChild(option);
+    }
+    const apply = doc.createElement('button');
+    apply.textContent = 'Áp dụng toàn track';
+    const cancel = doc.createElement('button');
+    cancel.textContent = 'Hủy';
+    apply.type = cancel.type = 'button';
+    const finish = (value: number | null): void => {
+      observer.disconnect();
+      panel.remove();
+      resolve(value);
+    };
+    const observer = new MutationObserver(() => {
+      if (!panel.isConnected) finish(null);
+    });
+    panel.addEventListener('click', (event) => event.stopPropagation());
+    panel.addEventListener('dblclick', (event) => event.stopPropagation());
+    apply.onclick = () => finish(Number(select.value));
+    cancel.onclick = () => finish(null);
+    panel.append(select, apply, cancel);
+    card.appendChild(panel);
+    observer.observe(card.parentNode ?? card, { childList: true, subtree: true });
+    select.focus();
+  });
+}
+
+function chooseYawRange(
+  card: HTMLElement,
+  frames: readonly number[],
+  currentFrame: number
+): Promise<readonly [number, number] | null> {
+  return new Promise((resolve) => {
+    const doc = card.ownerDocument;
+    const panel = doc.createElement('div');
+    panel.className = 'cvat-3d-enhancer-attribute-picker';
+    const start = doc.createElement('select');
+    const end = doc.createElement('select');
+    start.setAttribute('aria-label', 'Yaw start keyframe');
+    end.setAttribute('aria-label', 'Yaw end keyframe');
+    for (const frame of frames) {
+      for (const select of [start, end]) {
+        const option = doc.createElement('option');
+        option.value = String(frame);
+        option.textContent = String(frame);
+        select.appendChild(option);
+      }
+    }
+    start.value = String(frames.filter((f) => f < currentFrame).at(-1) ?? frames[0]);
+    end.value = String(frames.find((f) => f > currentFrame) ?? frames.at(-1));
+    const apply = doc.createElement('button');
+    apply.textContent = 'Nội suy yaw';
+    const cancel = doc.createElement('button');
+    cancel.textContent = 'Hủy';
+    apply.type = cancel.type = 'button';
+    const finish = (value: readonly [number, number] | null): void => {
+      observer.disconnect();
+      panel.remove();
+      resolve(value);
+    };
+    const observer = new MutationObserver(() => {
+      if (!panel.isConnected) finish(null);
+    });
+    panel.addEventListener('click', (event) => event.stopPropagation());
+    panel.addEventListener('dblclick', (event) => event.stopPropagation());
+    apply.onclick = () => finish([Number(start.value), Number(end.value)]);
+    cancel.onclick = () => finish(null);
+    panel.append(start, end, apply, cancel);
+    card.appendChild(panel);
+    observer.observe(card.parentNode ?? card, { childList: true, subtree: true });
+    start.focus();
+  });
 }

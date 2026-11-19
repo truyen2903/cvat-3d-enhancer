@@ -1,9 +1,13 @@
+import { TrackGhostOverlay } from '../integration/cvat/runtime/track-ghost-overlay';
 import { installMouseFrameNavigation } from '../integration/cvat/runtime/mouse-frame-navigation';
 import {
   installSidebarQuickFilterGuard,
   resolveSidebarObjectContext,
   sidebarHasRideState,
   syncSidebarRideState,
+  sidebarMutableAttributes,
+  sidebarYawRangeOptions,
+  syncSidebarMutableAttribute,
 } from '../integration/cvat/runtime/sidebar-enhancements';
 import { BASE_GUIDE_CLASS, CuboidBaseGuide } from '../integration/cvat/runtime/cuboid-base-guide';
 import { MessageProtocol } from '../integration/cvat/bridge';
@@ -208,6 +212,7 @@ export class PageBridgeRuntimeHost {
     () => this.getActiveObjectClientId(this.cachedInstance),
     () => this.preRenderEnhancer.getOptionsReadonly().followActiveObject ?? true
   );
+  private trackGhosts: TrackGhostOverlay | null = null;
   private baseGuide: CuboidBaseGuide | null = null;
   private cachedInstance: CvatCanvas3dLike | null = null;
   private domSyncRafId: number | null = null;
@@ -288,8 +293,30 @@ export class PageBridgeRuntimeHost {
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true
     ));
+    const trackGhosts = (this.trackGhosts = new TrackGhostOverlay(
+      this.doc,
+      () => this.preRenderEnhancer.getOptionsReadonly().enableTrackGhosts ?? true,
+      () => {
+        const active = this.resolveActiveCuboid(true);
+        if (!active) return null;
+        const state = resolveSidebarObjectContext(this.doc, active.clientID)?.state ?? active.state;
+        const canvas = this.doc.querySelector<HTMLCanvasElement>(
+          '.cvat-canvas3d-perspective canvas'
+        );
+        return state && canvas
+          ? {
+              state,
+              canvas,
+              camera: this.preRenderEnhancer.getLastRenderCameraForCanvas(
+                canvas
+              ) as OrthoCameraLike | null,
+            }
+          : null;
+      }
+    ));
     this.syncKeyboardEnabledAttribute();
     this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) => {
+      trackGhosts.render(canvas, camera as OrthoCameraLike);
       const cam = camera as OrthoCameraLike;
       if (!cam?.isOrthographicCamera) return;
       if ((this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true) === false) {
@@ -425,8 +452,12 @@ export class PageBridgeRuntimeHost {
             }
             hasRelevantMutation = true;
             if (rec.attributeName === 'data-frame-number') {
+              this.trackGhosts?.clear();
               this.invalidateSceneObjectCaches();
               pendingChildListChange = true;
+            }
+            if (rec.attributeName === 'class' && targetNode.matches(SIDEBAR_CARD_SELECTOR)) {
+              this.trackGhosts?.clear();
             }
             const card = targetNode.closest?.<HTMLElement>(SIDEBAR_CARD_SELECTOR);
             if (card) {
@@ -638,6 +669,8 @@ export class PageBridgeRuntimeHost {
       this.win.removeEventListener('message', this.handleMessage);
       uninstallOrthoEditor();
       this.preRenderEnhancer.setCanvasRenderListener(null);
+      trackGhosts.dispose();
+      this.trackGhosts = null;
       baseGuide.clear();
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
@@ -807,6 +840,7 @@ export class PageBridgeRuntimeHost {
         this.syncKeyboardEnabledAttribute();
         this.tryMountObjectItemDimensionSyncControls();
         this.baseGuide?.refresh();
+        this.trackGhosts?.refreshEnabled();
       }
     );
   }
@@ -824,8 +858,13 @@ export class PageBridgeRuntimeHost {
     const opts = this.preRenderEnhancer.getOptionsReadonly();
     injectCvatObjectDimensionSyncControls(
       this.doc,
-      (clientID: number, dimension: CuboidDimensionKey): Promise<DimensionSyncResult> =>
-        this.handleSyncObjectDimension(clientID, dimension),
+      (
+        clientID: number,
+        dimension: CuboidDimensionKey,
+        wholeTrack?: boolean,
+        yawRange?: readonly [number, number]
+      ): Promise<DimensionSyncResult> =>
+        this.handleSyncObjectDimension(clientID, dimension, wholeTrack, yawRange),
       targetCards != null
         ? {
             enableDimensionSync: opts.enableDimensionSync,
@@ -836,13 +875,18 @@ export class PageBridgeRuntimeHost {
       {
         isAvailable: (id, card) => sidebarHasRideState(this.doc, id, card),
         sync: (id) => syncSidebarRideState(this.doc, id),
+        getYawRangeOptions: (id) => sidebarYawRangeOptions(this.doc, id),
+        getAttributes: (id) => sidebarMutableAttributes(this.doc, id),
+        syncAttribute: (id, attr) => syncSidebarMutableAttribute(this.doc, id, attr),
       }
     );
   }
 
   private async handleSyncObjectDimension(
     clientID: number,
-    dimension: CuboidDimensionKey
+    dimension: CuboidDimensionKey,
+    wholeTrack = false,
+    yawRange?: readonly [number, number]
   ): Promise<DimensionSyncResult> {
     const sidebar = resolveSidebarObjectContext(this.doc, clientID);
     const instance = sidebar ? null : this.getActiveCanvas3dInstance();
@@ -877,6 +921,8 @@ export class PageBridgeRuntimeHost {
       this.doc.querySelector<PerspDomCanvasElement>('.cvat-canvas3d-perspective canvas');
 
     const result = await syncTrackCuboidDimension(clientID, dimension, {
+      wholeTrack,
+      yawRange,
       drawnEntry,
       stateOnCurrentFrame,
       perspectiveCanvas: perspCanvas,
@@ -1146,6 +1192,7 @@ export class PageBridgeRuntimeHost {
           this.invalidateSceneObjectCaches();
         }
 
+        this.trackGhosts?.contextChanged(nextFrame, nextActivatedId);
         this.hasReduxSnapshot = true;
         this.lastReduxFrame = nextFrame;
         this.lastReduxActivatedId = nextActivatedId;
@@ -1217,6 +1264,7 @@ export class PageBridgeRuntimeHost {
     }
     this.hookedSetupCanvases.add(canvas);
     canvas.addEventListener('canvas.setup', () => {
+      this.trackGhosts?.clear();
       this.invalidateSceneObjectCaches();
       this.viewsMapDirty = true;
       this.preRenderEnhancer.markViewStructureChanged();

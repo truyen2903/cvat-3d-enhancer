@@ -1,5 +1,10 @@
+import { trackKeyframes } from './track-editing';
 import { injectCvatObjectDimensionSyncControls } from './object-dimension-controls';
-import { getRideStateAttribute, syncTrackRideState } from './ride-state-sync';
+import {
+  getRideStateAttribute,
+  syncTrackRideState,
+  syncTrackMutableAttribute,
+} from './ride-state-sync';
 import {
   CLIENT_SETTINGS_STORAGE_KEY,
   ENHANCER_STANDALONE_STORAGE_KEY,
@@ -147,12 +152,16 @@ export function resolveSidebarObjectContext(
 export async function syncSidebarObjectDimension(
   doc: Document,
   clientID: number,
-  dimension: CuboidDimensionKey
+  dimension: CuboidDimensionKey,
+  wholeTrack = false,
+  yawRange?: readonly [number, number]
 ): Promise<DimensionSyncResult> {
   const context = resolveSidebarObjectContext(doc, clientID);
   if (!context) throw new Error('CVAT sidebar ObjectState is unavailable');
   const result = await syncTrackCuboidDimension(clientID, dimension, {
     stateOnCurrentFrame: context.state,
+    wholeTrack,
+    yawRange,
   });
   if (result.syncedFrames > 0) await context.refresh?.();
   return result;
@@ -173,6 +182,31 @@ export async function syncSidebarRideState(doc: Document, clientID: number) {
   const context = resolveSidebarObjectContext(doc, clientID);
   if (!context) throw new Error('CVAT sidebar ObjectState is unavailable');
   const result = await syncTrackRideState(clientID, context.state);
+  if (result.updatedKeyframes > 0) await context.refresh?.();
+  return result;
+}
+
+export function sidebarYawRangeOptions(doc: Document, clientID: number) {
+  const context = resolveSidebarObjectContext(doc, clientID);
+  if (!context) throw new Error('CVAT sidebar ObjectState is unavailable');
+  return { frames: trackKeyframes(context.state), currentFrame: context.state.frame ?? 0 };
+}
+
+export function sidebarMutableAttributes(doc: Document, clientID: number) {
+  return (
+    resolveSidebarObjectContext(doc, clientID)?.state.label?.attributes?.filter((a) => a.mutable) ??
+    []
+  );
+}
+
+export async function syncSidebarMutableAttribute(
+  doc: Document,
+  clientID: number,
+  attributeID: number
+) {
+  const context = resolveSidebarObjectContext(doc, clientID);
+  if (!context) throw new Error('CVAT sidebar ObjectState is unavailable');
+  const result = await syncTrackMutableAttribute(clientID, context.state, attributeID);
   if (result.updatedKeyframes > 0) await context.refresh?.();
   return result;
 }
@@ -255,9 +289,17 @@ export function installSidebarEnhancements(doc: Document, win: Window): () => vo
   const rideStateBridge = {
     isAvailable: (id: number, card?: HTMLElement) => sidebarHasRideState(doc, id, card),
     sync: (id: number) => syncSidebarRideState(doc, id),
+    getYawRangeOptions: (id: number) => sidebarYawRangeOptions(doc, id),
+    getAttributes: (id: number) => sidebarMutableAttributes(doc, id),
+    syncAttribute: (id: number, attributeID: number) =>
+      syncSidebarMutableAttribute(doc, id, attributeID),
   };
-  const handleSync = (id: number, dim: CuboidDimensionKey) =>
-    syncSidebarObjectDimension(doc, id, dim);
+  const handleSync = (
+    id: number,
+    dim: CuboidDimensionKey,
+    wholeTrack?: boolean,
+    yawRange?: readonly [number, number]
+  ) => syncSidebarObjectDimension(doc, id, dim, wholeTrack, yawRange);
 
   let observer: MutationObserver | null = null;
   const reconcile = (

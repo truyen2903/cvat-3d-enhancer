@@ -12,6 +12,7 @@
  *    pass runs ONLY when dirty (view structure or object updates), never on every render.
  */
 
+import { interpolateTrackYaw, reorientTrack, wrapYaw } from './track-editing';
 import {
   WORKSPACE_FEATURE_DEFAULTS,
   WORKSPACE_FEATURE_KEYS,
@@ -1088,9 +1089,11 @@ export function injectCvatWorkspaceSettingsControls(
   return mountedAny;
 }
 
-export type CuboidDimensionKey = 'H' | 'W' | 'L' | 'FLIP_180';
+export type CuboidDimensionKey = 'H' | 'W' | 'L' | 'FLIP_180' | 'SWAP_LW' | 'YAW_INTERPOLATE';
 
 export const CUBOID_DIMENSION_INDEX: Readonly<Record<CuboidDimensionKey, number>> = Object.freeze({
+  SWAP_LW: 5,
+  YAW_INTERPOLATE: 5,
   FLIP_180: 5, // rotation.z (Yaw / Hướng đầu xe)
   L: 6, // scale.x (Length / Dài)
   W: 7, // scale.y (Width / Rộng)
@@ -1098,15 +1101,10 @@ export const CUBOID_DIMENSION_INDEX: Readonly<Record<CuboidDimensionKey, number>
 });
 
 /**
- * Normalizes `rz + Math.PI` (180-degree heading flip) into `[-Math.PI, Math.PI)`.
+ * Normalizes `rz + Math.PI` (180-degree heading flip) into `[0, 2 * Math.PI)`.
  */
 export function flipYawAngle180Rad(rz: number): number {
-  const raw = (Number(rz) || 0) + Math.PI;
-  let wrapped = (raw + Math.PI) % (2 * Math.PI);
-  if (wrapped < 0) {
-    wrapped += 2 * Math.PI;
-  }
-  return wrapped - Math.PI;
+  return wrapYaw((Number(rz) || 0) + Math.PI);
 }
 
 export interface DimensionSyncResult {
@@ -1169,6 +1167,7 @@ export async function flipCuboidYaw180OnCurrentFrame(
   updatedPoints[5] = nextYaw;
 
   const currentFrame = Number(currentState.frame ?? 0);
+  currentState.updateFlags?.reset?.();
   currentState.points = updatedPoints;
   if (currentState.updateFlags) {
     currentState.updateFlags.points = true;
@@ -1259,6 +1258,8 @@ export async function syncTrackCuboidDimension(
   clientID: number,
   dimension: CuboidDimensionKey,
   options: {
+    wholeTrack?: boolean;
+    yawRange?: readonly [number, number];
     drawnEntry?: CvatDrawnObjectEntry | null;
     stateOnCurrentFrame?: CvatObjectStateLike | null;
     perspectiveCanvas?:
@@ -1269,6 +1270,43 @@ export async function syncTrackCuboidDimension(
     onAfterSync?: () => void;
   }
 ): Promise<DimensionSyncResult> {
+  if (
+    dimension === 'SWAP_LW' ||
+    dimension === 'YAW_INTERPOLATE' ||
+    (dimension === 'FLIP_180' && options.wholeTrack)
+  ) {
+    const current = options.stateOnCurrentFrame ?? options.drawnEntry?.state;
+    if (!current) throw new Error('CVAT ObjectState is unavailable');
+    const syncedFrames =
+      dimension === 'YAW_INTERPOLATE'
+        ? await interpolateTrackYaw(clientID, current, options.yawRange)
+        : await reorientTrack(
+            clientID,
+            current,
+            dimension === 'SWAP_LW' ? 'swap' : 'flip',
+            options.wholeTrack
+          );
+    current.updateFlags!.reset!();
+    const fresh = current.__internal!.save!(current.frame!, current);
+    if (fresh.points) {
+      const entry = options.drawnEntry;
+      if (entry) {
+        entry.data.points = [...fresh.points];
+        entry.cuboid.setScale?.(fresh.points[6]!, fresh.points[7]!, fresh.points[8]!);
+        entry.cuboid.setRotation?.(fresh.points[3]!, fresh.points[4]!, fresh.points[5]!);
+      }
+      // Native keyframe writes above already persist locally. Refresh once below;
+      // canvas.edited/updatePosition would save the displayed frame a second time.
+    }
+    options.onAfterSync?.();
+    return {
+      clientID,
+      dimension,
+      targetValue: fresh.points?.[5] ?? null,
+      syncedFrames,
+      skippedAttributeMismatchFrames: 0,
+    };
+  }
   if (dimension === 'FLIP_180') {
     return flipCuboidYaw180OnCurrentFrame(clientID, options);
   }
@@ -1414,6 +1452,9 @@ export async function syncTrackCuboidDimension(
     }
 
     const updatedPoints = [...existingKfPoints];
+    if (dimension === 'H') {
+      updatedPoints[2] = existingKfPoints[2]! + (targetValue - existingKfPoints[8]!) / 2;
+    }
     updatedPoints[dimIndex] = targetValue;
     shape.points = updatedPoints;
 
@@ -1424,13 +1465,13 @@ export async function syncTrackCuboidDimension(
       }
       if (typeof internalSave === 'function') {
         const saved = internalSave(kfFrame, kfState);
-        if (kfFrame === currentFrame || stateToDispatchForCanvasUpdate === null) {
+        if (kfFrame === currentFrame) {
           stateToDispatchForCanvasUpdate = saved;
           pointsToDispatchForCanvasUpdate = updatedPoints;
         }
       } else if (typeof kfState.save === 'function') {
         const saved = await kfState.save();
-        if (kfFrame === currentFrame || stateToDispatchForCanvasUpdate === null) {
+        if (kfFrame === currentFrame) {
           stateToDispatchForCanvasUpdate = saved;
           pointsToDispatchForCanvasUpdate = updatedPoints;
         }
@@ -1442,8 +1483,18 @@ export async function syncTrackCuboidDimension(
 
   // Also ensure currentFrame state & cuboid scale reflect the synced dimension in real-time
   const nextCurrentPoints = [...currentPoints];
+  if (dimension === 'H') {
+    nextCurrentPoints[2] = currentPoints[2]! + (targetValue - currentPoints[8]!) / 2;
+  }
   nextCurrentPoints[dimIndex] = targetValue;
   if (entry?.data?.points && entry.data.points.length >= 9) {
+    if (dimension === 'H') {
+      entry.data.points[2] = entry.data.points[2]! + (targetValue - entry.data.points[8]!) / 2;
+      for (const viewKey of ['perspective', 'top', 'side', 'front'] as const) {
+        const position = entry.cuboid[viewKey]?.position;
+        if (position) position.z = entry.data.points[2]!;
+      }
+    }
     entry.data.points[dimIndex] = targetValue;
   }
   if (typeof entry?.cuboid?.setScale === 'function') {

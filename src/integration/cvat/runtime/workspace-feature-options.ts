@@ -1,6 +1,7 @@
 /** Defaults preserve the enhancements already enabled before Workspace controls were added. */
 export const WORKSPACE_FEATURE_DEFAULTS = {
   showCuboidBaseGuide: true,
+  enableTrackGhosts: true,
   disableSidebarQuickFilter: true,
   enableDimensionSync: true,
   enableHeadingFlip: true,
@@ -30,6 +31,11 @@ export function normalizeWorkspaceFeatureOptions(
 
 export const WORKSPACE_FEATURE_CONTROLS = [
   {
+    key: 'enableTrackGhosts',
+    title: 'Hold Alt+G: track ghosts in 3D',
+    description: 'Show local keyframe wireframes and direction path while Alt+G is held',
+  },
+  {
     key: 'enableMouseFrameNavigation',
     title: 'Mouse side buttons: previous / next frame',
     description: 'Use Back and Forward side buttons to navigate CVAT frames in 3D jobs',
@@ -52,8 +58,9 @@ export const WORKSPACE_FEATURE_CONTROLS = [
   },
   {
     key: 'enableHeadingFlip',
-    title: 'Show 180° heading flip button',
-    description: 'Flip the active cuboid heading on the current frame from the object sidebar',
+    title: 'Show track heading tools (180°, L↔W, Yaw)',
+    description:
+      'Click flips/swaps current frame; Shift+click edits all keyframes; Yaw interpolates yaw only',
   },
   {
     key: 'enableOrthoKeyboard',

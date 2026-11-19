@@ -49,18 +49,33 @@ Bản **Load unpacked** cần cập nhật thủ công theo các bước trên. 
 
 Trên thẻ **CUBOID TRACK** ở sidebar, Meow thêm các nút:
 
-| Nút      | Chức năng                                                           |
-| -------- | ------------------------------------------------------------------- |
-| **H**    | Đồng bộ chiều cao của cuboid sang các keyframe phù hợp trong track. |
-| **W**    | Đồng bộ chiều rộng.                                                 |
-| **L**    | Đồng bộ chiều dài.                                                  |
-| **180°** | Đảo hướng yaw 180° trên frame hiện tại.                             |
+| Nút      | Chức năng                                                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **H**    | Đồng bộ chiều cao, dịch tâm Z để giữ nguyên mặt đáy từng keyframe.                                                        |
+| **W**    | Đồng bộ chiều rộng.                                                                                                       |
+| **L**    | Đồng bộ chiều dài.                                                                                                        |
+| **180°** | Click: lật yaw 180° frame hiện tại. **Shift+click**: mọi keyframe của track.                                              |
+| **L↔W**  | Click: đổi L/W và cộng yaw 90° frame hiện tại, giữ cùng hộp vật lý (Euler XYZ). **Shift+click**: mọi keyframe.            |
+| **Yaw**  | Nội suy riêng yaw giữa hai keyframe bao quanh frame hiện tại. **Shift+click**: chọn hai keyframe đầu/cuối ngay trong thẻ. |
+| **Attr** | Chọn một thuộc tính mutable, rồi **Áp dụng toàn track** để dùng giá trị frame hiện tại tại mọi keyframe.                  |
 
 Nút **RS** cạnh H/W/L áp dụng giá trị `ride_state` hiện tại (bật hoặc tắt) cho mọi frame của cùng track. Nút chỉ hiện khi nhãn có thuộc tính `ride_state` thay đổi theo frame. Thao tác chỉ sửa thuộc tính này tại các keyframe, giữ nguyên hình học và các thuộc tính khác; sau đó dùng **Save** của CVAT để lưu lên server.
+
+**Attr** hỗ trợ mọi thuộc tính mutable của nhãn (`ride_state`, `sitting`, text, số, lựa chọn...), chỉ sửa thuộc tính được chọn, kể cả keyframe outside. Thuộc tính immutable không có trong danh sách. RS vẫn là lối tắt riêng cho checkbox `ride_state`.
+
+**Yaw** dùng đường góc ngắn nhất, chuẩn hóa yaw về [0, 2π). Chỉ các frame ở giữa trở thành keyframe mới, giữ nguyên tâm, kích thước, rx/ry và thuộc tính theo snapshot nội suy sẵn của CVAT; hai đầu giữ nguyên. Từ chối khoảng có frame outside, thiếu hai keyframe biên, hoặc dài hơn 10.000 frame. Sau thao tác, toast báo số frame đã cập nhật. Nội suy riêng yaw có thể tạo nhiều keyframe và làm thay đổi cách nội suy về sau; kiểm tra trước khi Save.
+
+Lật toàn track và đổi L/W chỉ sửa các keyframe hiện có, kể cả outside, không lọc theo thuộc tính. Mọi thao tác chỉ thay đổi dữ liệu trong trình duyệt; dùng **Save** của CVAT như thường lệ. Không gộp thành một bước Undo chung: mỗi lần ghi dùng lịch sử native của CVAT.
 
 H/W/L dùng giá trị của frame hiện tại. Theo mặc định, các keyframe được đồng bộ khi thuộc tính trùng khớp; mã nguồn có xử lý riêng cho nhãn **two-wheels** đối với H và L. Các nút được vô hiệu hóa khi object bị khóa. Nếu thao tác không thực hiện được, di chuột lên nút để xem thông báo trong tooltip.
 
 Kết quả phụ thuộc ObjectState và API track của bản CVAT đang chạy. Với CVAT được tùy chỉnh, hãy kiểm tra kết quả trên job được phép sử dụng trước khi áp dụng rộng rãi.
+
+### Ghost box của track
+
+Chọn cuboid track rồi **giữ Alt+G** trong view 3D chính: Meow vẽ wireframe tại các keyframe đã có trong trình duyệt và đường nối tâm theo thứ tự frame, có mũi tên chỉ chiều thời gian. Màu **xanh lam** là quá khứ, **hồng** là tương lai, **vàng** đánh dấu frame hiện tại. Không tải annotation từ server, không vẽ thêm mọi frame nội suy; bỏ qua các keyframe outside. Đường nối chỉ biểu diễn thứ tự các tâm hiển thị, không phải quỹ đạo nội suy chính xác, kể cả khi đi qua khoảng outside.
+
+Overlay tự mất khi thả G hoặc Alt, mất focus, đổi object/frame, hoặc tắt **Hold Alt+G: track ghosts in 3D** trong Workspace (mặc định bật). Không nhận hotkey trong ô nhập liệu. Hình học và bộ đệm chiếu được tạo một lần khi nhấn, dùng lại khi camera render; không đọc track hay cấp phát hình học mỗi tick. Overlay nằm trên WebGL nên không bị point cloud che khuất. Alt+G không trùng các phím Meow hiện có; phím tắt CVAT tùy chỉnh/hệ điều hành vẫn cần kiểm tra trên máy thực tế.
 
 ### Chỉnh cuboid bằng bàn phím
 
@@ -93,8 +108,9 @@ Meow thêm các checkbox vào tab Workspace của CVAT. Tên dưới đây khớ
 | Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                            |
 | Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.    |
 | Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D. |
-| Show H/W/L dimension sync buttons                       | Hiện nút đồng bộ kích thước.                              |
-| Show 180° heading flip button                           | Hiện nút đảo hướng.                                       |
+| Show H/W/L dimension sync buttons                       | Hiện H/W/L và bộ chọn thuộc tính Attr.                    |
+| Show track heading tools (180°, L↔W, Yaw)               | Hiện nút lật, đổi L/W và nội suy yaw.                     |
+| Hold Alt+G: track ghosts in 3D                          | Bật ghost box và đường nối tâm khi giữ Alt+G.             |
 | Edit cuboids with W/A/S/D/Q/E                           | Bật chỉnh box bằng bàn phím trong Top/Side/Front.         |
 | Double W/A/S/D/Q/E sensitivity                          | Dùng bước di chuyển và xoay lớn gấp đôi.                  |
 | Save keyboard edits immediately on key release          | Lưu khi thả phím; khi tắt, chờ 250 ms không thao tác.     |

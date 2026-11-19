@@ -92,10 +92,10 @@ describe('recent Workspace feature options', () => {
       '<div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item"></div>';
     const sync = () => result;
     injectCvatObjectDimensionSyncControls(document, sync, { enableDimensionSync: false });
-    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(3);
     expect(document.querySelector('[data-enhancer-sync-dim="FLIP_180"]')).not.toBeNull();
     injectCvatObjectDimensionSyncControls(document, sync, { enableHeadingFlip: false });
-    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(3);
+    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(4);
     expect(document.querySelector('[data-enhancer-sync-dim="FLIP_180"]')).toBeNull();
     injectCvatObjectDimensionSyncControls(document, sync, {
       enableDimensionSync: false,
@@ -103,7 +103,7 @@ describe('recent Workspace feature options', () => {
     });
     expect(document.querySelector('.cvat-3d-enhancer-dim-sync-row')).toBeNull();
     injectCvatObjectDimensionSyncControls(document, sync);
-    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(4);
+    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(7);
   });
 
   it('restores native double-click handling immediately when the filter override is disabled', () => {

@@ -36,6 +36,19 @@ export async function syncTrackRideState(
   current: CvatObjectStateLike
 ): Promise<RideStateSyncResult> {
   const attribute = getRideStateAttribute(current);
+  const value = attribute ? current.attributes?.[attribute.id] : undefined;
+  if (!attribute || (value !== 'true' && value !== 'false')) {
+    throw new Error('Mutable ride_state checkbox is required');
+  }
+  return syncTrackMutableAttribute(clientID, current, attribute.id);
+}
+
+export async function syncTrackMutableAttribute(
+  clientID: number,
+  current: CvatObjectStateLike,
+  attributeID: number
+): Promise<RideStateSyncResult> {
+  const attribute = current.label?.attributes?.find((a) => a.id === attributeID && a.mutable);
   const targetValue = attribute ? current.attributes?.[attribute.id] : undefined;
   const readState = current.__internal?.save;
   const exportTrack = current.__internal?.export;
@@ -45,12 +58,12 @@ export async function syncTrackRideState(
     current.shapeType !== 'cuboid' ||
     current.lock ||
     !attribute ||
-    (targetValue !== 'true' && targetValue !== 'false') ||
+    typeof targetValue !== 'string' ||
     !readState ||
     !exportTrack ||
     !current.updateFlags?.reset
   ) {
-    throw new Error('Unlocked cuboid track with a mutable ride_state checkbox is required');
+    throw new Error('Unlocked cuboid track with a mutable attribute is required');
   }
 
   const shapes = exportTrack().shapes;

@@ -107,7 +107,7 @@ points) are dropped from saved settings the next time they are read.
 
 ## 9. Workspace controls for recent enhancements
 
-Settings → Workspace includes nine independent checkboxes: frame follow for the active
+Settings → Workspace includes independent checkboxes for: frame follow for the active
 object, mouse side-button navigation, cuboid base guide, native focus without automatic
 Quick filter, H/W/L sync buttons, heading flip button, W/A/S/D/Q/E editing, double keyboard
 sensitivity, and immediate key-release commit. Existing installations default to enabled
@@ -176,3 +176,17 @@ Camera follow waits while `model.data.isFrameUpdating` is true, retaining the pr
 anchor during temporary deactivation. It prefers frame-stamped entries in `model.objects`
 over unversioned `drawnObjects.data` used by customized builds. Native sidebar
 `focusAndExpand` is supported without invoking the combined Quick-filter handler.
+
+## 15. Track editing tools
+
+- H sync keeps each keyframe's bottom at `z - H/2` by shifting its center by `(newH - oldH)/2`. Existing attribute matching and two-wheels exceptions remain. This is the upright-box ground convention; it is not a tilted-face ground fit.
+- 180° click edits the current frame; Shift+click flips every exported keyframe, including outside keyframes. L↔W follows the same scope and swaps scales X/Y while adding π/2 to yaw. For CVAT's Euler XYZ order this preserves the physical cuboid, including tilt. New yaw values wrap to [0, 2π). Locked tracks are refused.
+- Attr opens an inline native-card selector populated only on demand from mutable label attributes. Applying propagates the current value to existing keyframes, including outside, and preserves every other attribute, geometry and visibility flag. RS remains the boolean ride_state shortcut. Immutable attributes and frame-range attribute editing are not supported.
+- Yaw click uses the keyframes strictly before/after the current frame. Shift+click offers explicit exported keyframe endpoints. The shortest signed angular delta is interpolated, writing only points[5] on interior frames, which become keyframes. Native snapshots preserve position, size, tilt and attributes; endpoints remain intact. Outside intervals, absent boundaries and intervals exceeding 10,000 frames are refused. Native CVAT history receives individual writes rather than one extension-wide undo transaction.
+- Hold Alt+G shows local exported, non-outside keyframe wireframes in the main perspective view, plus the current frame and a center polyline with direction arrowheads. Blue denotes earlier frames, pink later frames and yellow the current frame. Only already-loaded export data is used; there are no server requests and no all-frame interpolation. The polyline joins visible samples, including across omitted outside spans; it is not an exact trajectory.
+
+Ghosts are a non-interactive Canvas2D overlay projected using the native camera's view and projection matrices. They are intentionally visible through point clouds and are not depth-tested. World geometry, screen buffers, context and overlay are allocated on keydown and reused across renders. Idle render calls return immediately; state-change cleanup uses scalar IDs/frame numbers without scanning job objects. Keyup (G or Alt), blur, visibility changes, object/frame changes, canvas setup, option disable and host disposal remove the overlay. Scroll/resize refresh its viewport rectangle. The Workspace option **Hold Alt+G: track ghosts in 3D** defaults on. Text inputs retain Alt+G; custom CVAT shortcut maps and OS bindings can still conflict.
+
+All writes use CVAT's existing local ObjectState adapters and require normal CVAT **Save** to persist to the server. Snapshot reads assume `__internal.save(frame, state)` with reset update flags returns the native interpolated state without creating a keyframe; point-only writes assume it promotes interior frames to keyframes while preserving untouched state. Attribute writes use the existing native `ObjectState.save()` path. The adapter preflights every target snapshot before writes and requests refresh/redraw once per geometry action, not once per keyframe. Native write failures mid-batch do not have an automatic rollback.
+
+Automated fixtures exercise these contracts, lock refusal, shortest-angle interpolation, selective attributes, native-card actions and ghost lifecycle/reuse, including the 100k-object performance regression. These five additions have not been verified against a live authorized CVAT job in this session; custom ObjectState implementations, native undo grouping and camera/shortcut behavior require live validation.
