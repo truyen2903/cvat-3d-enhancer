@@ -26,6 +26,13 @@ import {
   deferHiddenOrientationArrowUpdates,
 } from './hidden-orientation-arrows';
 import { accelerateIncrementalObjects } from './incremental-objects';
+import {
+  beginPerfSpan,
+  endPerfSpan,
+  PERF_CLICK_SPAN,
+  PERF_FRAME_SPAN,
+  timePerf,
+} from './perf-probe';
 import { cacheVisibleCuboids } from './visible-cuboids';
 import { showMeowToast } from './meow-toast';
 
@@ -819,23 +826,27 @@ export class Cvat3dPreRenderEnhancer {
       view.notify = (model: unknown, reason: string): void => {
         // Native notify can render synchronously or emit nested objects_updated events;
         // wait for the outermost call before touching newly drawn cuboids.
+        if (reason === 'image_changed') beginPerfSpan(PERF_FRAME_SPAN);
         this.nativeNotifyDepth += 1;
         try {
-          origNotify(model, reason);
+          timePerf(`cvat.notify:${reason}`, () => origNotify(model, reason));
         } finally {
           this.nativeNotifyDepth -= 1;
         }
+        if (reason === 'shape_activated') endPerfSpan(PERF_CLICK_SPAN);
         if (reason === 'objects_updated') {
           this.needsIncrementalCuboidSync = true;
         }
         if (this.nativeNotifyDepth === 0) {
-          if (this.dirty) {
-            this.needsIncrementalCuboidSync = false;
-            this.applyOnceIfNeeded(view, canvas3d?.model);
-          } else if (this.needsIncrementalCuboidSync) {
-            this.needsIncrementalCuboidSync = false;
-            this.syncDrawnCuboidsIncremental(view.drawnObjects);
-          }
+          timePerf('meow.afterNotify', () => {
+            if (this.dirty) {
+              this.needsIncrementalCuboidSync = false;
+              this.applyOnceIfNeeded(view, canvas3d?.model);
+            } else if (this.needsIncrementalCuboidSync) {
+              this.needsIncrementalCuboidSync = false;
+              this.syncDrawnCuboidsIncremental(view.drawnObjects);
+            }
+          });
         }
       };
     }
@@ -844,9 +855,9 @@ export class Cvat3dPreRenderEnhancer {
       const origRender = view.render.bind(view);
       view.render = (): void => {
         if (this.dirty) {
-          this.applyOnceIfNeeded(view, canvas3d?.model);
+          timePerf('meow.applyOnce', () => this.applyOnceIfNeeded(view, canvas3d?.model));
         }
-        origRender();
+        timePerf('cvat.render', origRender);
       };
     }
 

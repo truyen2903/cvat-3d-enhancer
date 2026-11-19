@@ -1,4 +1,5 @@
 import { invalidateHoverSpatialIndex } from './hover-lock';
+import { timePerf } from './perf-probe';
 
 interface RuntimeView {
   drawnObjects?: Record<string, { cuboid?: Record<string, unknown> }>;
@@ -58,7 +59,7 @@ export function cacheVisibleCuboids(input: unknown): (() => void) | null {
     }
     if (cached) return cached;
     // Call native outside the optimization catch: never retry a native exception.
-    const result = native.apply(view, args);
+    const result = timePerf('meow.visibleCuboids.rebuild', () => native.apply(view, args));
     try {
       generation += 1;
       const expected: unknown[] = [];

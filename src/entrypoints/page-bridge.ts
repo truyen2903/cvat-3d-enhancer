@@ -1,4 +1,12 @@
 import { canReuseVisibleCuboidBounds } from '../integration/cvat/runtime/visible-cuboids';
+import {
+  beginPerfSpan,
+  endPerfSpan,
+  installPerfProbeConsole,
+  PERF_CLICK_SPAN,
+  PERF_FRAME_SPAN,
+  timePerf,
+} from '../integration/cvat/runtime/perf-probe';
 import { TrackGhostOverlay } from '../integration/cvat/runtime/track-ghost-overlay';
 import { installMouseFrameNavigation } from '../integration/cvat/runtime/mouse-frame-navigation';
 import {
@@ -292,6 +300,14 @@ export class PageBridgeRuntimeHost {
   }
 
   public start(): () => void {
+    const removePerfProbe = installPerfProbeConsole(this.win);
+    const onPerfPointerDown = (event: PointerEvent): void => {
+      const target = event.target as Element | null;
+      if (event.button === 0 && target?.closest?.('.cvat-canvas3d-perspective')) {
+        beginPerfSpan(PERF_CLICK_SPAN);
+      }
+    };
+    this.win.addEventListener('pointerdown', onPerfPointerDown, true);
     const removeMouseFrameNavigation = installMouseFrameNavigation(
       this.doc,
       this.win,
@@ -386,7 +402,11 @@ export class PageBridgeRuntimeHost {
       },
     });
     this.syncKeyboardEnabledAttribute();
-    this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) => {
+    const onCanvasRender = (
+      canvas: HTMLCanvasElement,
+      camera: unknown,
+      scene?: ThreeSceneLike
+    ): void => {
       trackGhosts.render(canvas, camera as OrthoCameraLike);
       const cam = camera as OrthoCameraLike;
       if (!cam?.isOrthographicCamera) return;
@@ -413,7 +433,10 @@ export class PageBridgeRuntimeHost {
               ? cuboid.front
               : undefined;
       baseGuide.update(canvas, cam, hidden ? null : points, mesh);
-    });
+    };
+    this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) =>
+      timePerf('meow.renderListener', () => onCanvasRender(canvas, camera, scene))
+    );
     const onPluginReady = () => {
       this.tryHookCvatUIPlugin();
     };
@@ -506,7 +529,7 @@ export class PageBridgeRuntimeHost {
         }
       };
 
-      const runDomSync = (): void => {
+      const runDomSyncImpl = (): void => {
         this.domSyncRafId = null;
         baseGuide.prune();
         const hadChildList = pendingChildListChange;
@@ -550,8 +573,9 @@ export class PageBridgeRuntimeHost {
         }
         this.settingsObserver?.takeRecords();
       };
+      const runDomSync = (): void => timePerf('meow.domSync', runDomSyncImpl);
 
-      this.settingsObserver = new MutationObserver((records) => {
+      const onSettingsMutations = (records: MutationRecord[]): void => {
         let hasRelevantMutation = false;
         let clearedClassGhosts = false;
         for (let i = 0; i < records.length; i += 1) {
@@ -790,7 +814,10 @@ export class PageBridgeRuntimeHost {
             runDomSync();
           }
         }
-      });
+      };
+      this.settingsObserver = new MutationObserver((records) =>
+        timePerf('meow.mutationObserver', () => onSettingsMutations(records))
+      );
       observeRoots();
     }
 
@@ -810,6 +837,8 @@ export class PageBridgeRuntimeHost {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
       this.win.removeEventListener('message', this.handleMessage);
       uninstallOrthoEditor();
+      this.win.removeEventListener('pointerdown', onPerfPointerDown, true);
+      removePerfProbe();
       this.preRenderEnhancer.disposeHotPaths();
       for (const raycaster of this.hoverRaycasters) unlockRaycasterHover(raycaster);
       this.hoverRaycasters.clear();
@@ -1358,6 +1387,10 @@ export class PageBridgeRuntimeHost {
   }
 
   private handleGlobalStateUpdate(): void {
+    timePerf('meow.reduxUpdate', () => this.handleGlobalStateUpdateImpl());
+  }
+
+  private handleGlobalStateUpdateImpl(): void {
     if (this.reduxStore) {
       try {
         const state = this.reduxStore.getState();
@@ -1463,6 +1496,7 @@ export class PageBridgeRuntimeHost {
     }
     this.hookedSetupCanvases.add(canvas);
     canvas.addEventListener('canvas.setup', () => {
+      endPerfSpan(PERF_FRAME_SPAN);
       this.trackGhosts?.clear();
       this.selection?.onCanvasSetup();
       this.invalidateSceneObjectCaches();

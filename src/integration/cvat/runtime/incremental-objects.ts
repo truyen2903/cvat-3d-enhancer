@@ -1,3 +1,5 @@
+import { timePerf } from './perf-probe';
+
 interface State {
   clientID: number;
   updated?: unknown;
@@ -31,7 +33,7 @@ export function accelerateIncrementalObjects(input: unknown): (() => void) | nul
   if (view[PATCH_MARKER]) return view[PATCH_MARKER];
   const native = view.setupObjectsIncremental;
   let enabled = true;
-  const wrapped = (states: State[]): void => {
+  const wrappedImpl = (states: State[]): void => {
     if (!enabled) return native.call(view, states);
     let created: State[];
     let updated: State[];
@@ -62,6 +64,8 @@ export function accelerateIncrementalObjects(input: unknown): (() => void) | nul
     view.deleteObjects(deleted);
     view.activateObject();
   };
+  const wrapped = (states: State[]): void =>
+    timePerf('cvat.setupObjectsIncremental', () => wrappedImpl(states));
   const dispose = (): void => {
     enabled = false;
     if (view.setupObjectsIncremental === wrapped)

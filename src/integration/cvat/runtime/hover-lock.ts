@@ -16,6 +16,7 @@
  */
 
 import { isNumericClientIdName } from './state-lookup';
+import { isPerfProbeEnabled, timePerf } from './perf-probe';
 
 interface RaycastIntersectionLike {
   readonly object?: { readonly name?: string } | null;
@@ -1017,7 +1018,7 @@ export function lockRaycasterHoverToActiveObject(
   const original = nativeMethod.bind(rayCaster);
   const resolveActiveObject = options?.resolveActiveObject;
 
-  const wrapped = (objects: unknown[], recursive?: boolean, ...rest: unknown[]): unknown[] => {
+  const wrappedImpl = (objects: unknown[], recursive?: boolean, ...rest: unknown[]): unknown[] => {
     if (!enabled || !isEnabled()) return original(objects, recursive, ...rest);
     if (isInsidePointerButtonEvent()) {
       let candidates = objects;
@@ -1169,6 +1170,12 @@ export function lockRaycasterHoverToActiveObject(
     if (!Array.isArray(hits) || hits.length === 0) return hits;
     return filterHoverIntersections(hits, activeClientId);
   };
+  const wrapped = (objects: unknown[], recursive?: boolean, ...rest: unknown[]): unknown[] =>
+    isPerfProbeEnabled()
+      ? timePerf(isInsidePointerButtonEvent() ? 'cvat.raycast.click' : 'cvat.raycast.hover', () =>
+          wrappedImpl(objects, recursive, ...rest)
+        )
+      : wrappedImpl(objects, recursive, ...rest);
   try {
     if (!Reflect.set(rayCaster, 'intersectObjects', wrapped)) return false;
     if (!Reflect.set(marked, LOCKED_MARKER, true)) {
