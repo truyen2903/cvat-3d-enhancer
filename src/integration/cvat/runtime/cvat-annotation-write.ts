@@ -32,6 +32,8 @@ export interface CvatJobLike {
       filters: readonly unknown[]
     ) => Promise<CvatObjectStateLike[]> | CvatObjectStateLike[];
     saveStates?: (states: CvatObjectStateLike[]) => Promise<unknown> | unknown;
+    /** cvat-core `annotations.put(states)`: creates objects, resolves to their clientIDs. */
+    put?: (states: unknown[]) => Promise<unknown> | unknown;
   };
   readonly actions?: {
     get?: () => Promise<unknown> | unknown;

@@ -100,7 +100,7 @@ Menu khi có **gốc + 1 đích**:
 
 Menu khi có **cụm** (chọn bằng khung):
 
-- **Thêm cụm vào filter hiện tại**, **Chỉ lọc cụm này**: ghi thẳng vào **filter thật của CVAT** dưới dạng nhóm `ObjectID == …` nối bằng OR, đúng định dạng hộp thoại Filter của CVAT tạo ra, nên mở **Filter** của CVAT sẽ thấy và sửa được. Thêm nhiều lần vẫn gộp vào một nhóm OR, không trùng ID. Cụm gồm cả object outside / đang bị lọc nên lọc theo cụm giữ được cả các xe đang ẩn. **Trả về filter trước** khôi phục filter CVAT trước đó (tối đa 10 bước).
+- **Thêm cụm vào filter hiện tại**, **Chỉ lọc cụm này**: ghi thẳng vào **filter thật của CVAT** dưới dạng nhóm `ObjectID == …` nối bằng OR, đúng định dạng hộp thoại Filter của CVAT tạo ra, nên mở **Filter** của CVAT sẽ thấy và sửa được. Thêm nhiều lần vẫn gộp vào một nhóm OR, không trùng ID. Cụm gồm cả object outside / đang bị lọc nên lọc theo cụm giữ được cả các xe đang ẩn. **Trả về filter trước** khôi phục filter CVAT trước đó (tối đa 10 bước). Khi filter do Meow áp vẫn đang dùng, **object mới tạo** (vẽ mới, dán) được tự thêm ID vào filter nên không bị ẩn ngay sau khi vẽ; nếu bạn tự sửa filter trong CVAT thì Meow thôi tự thêm.
 - **Ẩn cụm / Hiện lại cụm**: dùng cờ `hidden` của CVAT (biểu tượng con mắt ở sidebar).
 - **Ghim đáy theo gốc (frame này)**: gốc là object đang active. Mỗi box khác giữ nguyên H và có `z = đáy_gốc + H/2`.
 - **Ghim đáy theo gốc (frame này → cuối track)**: ghim như trên tại frame hiện tại và tại **mọi keyframe sau đó** của gốc hoặc của box (đáy gốc đọc đúng tại từng frame), nên các frame nội suy ở giữa cũng nằm trên đáy gốc. Frame f−1 được giữ nguyên để các frame trước không đổi. Frame nào gốc outside thì giữ nguyên.

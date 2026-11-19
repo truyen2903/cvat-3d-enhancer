@@ -400,10 +400,16 @@ interface RunScope {
 
 const ABORTED = 'Đã đổi frame trong lúc xử lý, thao tác bị hủy (chưa ghi gì)';
 
+const FOLLOW_MARKER = Symbol.for('meowFollowCreatedObjects');
+
+type PutFn = (states: unknown[]) => Promise<unknown> | unknown;
+
 export class MultiObjectRunner {
   public readonly filterHistory = new FilterHistory();
   private busy = false;
   private scope: RunScope | null = null;
+  /** JSON of the CVAT filter Meow applied last; new objects follow it while it is still active. */
+  private managedFilterKey: string | null = null;
 
   public constructor(private readonly host: MultiActionHost) {}
 
@@ -493,6 +499,52 @@ export class MultiObjectRunner {
     }
     const text = notes.length ? `${doneText} (${notes.join(', ')})` : doneText;
     this.host.toast(text, summary.written > 0 && summary.failed === 0 ? 'success' : 'error');
+  }
+
+  /**
+   * Objects created while a Meow ID filter is active would be hidden by it right away. Wrap the
+   * job's `annotations.put` (cvat-core resolves it to the new clientIDs; cvat-ui then runs
+   * `fetchAnnotationsAsync`) and append those IDs to the filter before CVAT re-fetches, so the
+   * new object stays visible. Stops following as soon as the filter was changed by anyone else.
+   */
+  private followCreatedObjects(job: CvatJobLike): void {
+    const annotations = job.annotations as
+      (NonNullable<CvatJobLike['annotations']> & { [FOLLOW_MARKER]?: true }) | undefined;
+    const original = annotations?.put;
+    if (!annotations || typeof original !== 'function' || annotations[FOLLOW_MARKER]) return;
+    const wrapped: PutFn = async (states: unknown[]) => {
+      const ids = await original.call(annotations, states);
+      try {
+        this.addCreatedToFilter(ids);
+      } catch {
+        // Never break CVAT's own object creation.
+      }
+      return ids;
+    };
+    try {
+      if (Reflect.set(annotations, 'put', wrapped)) Reflect.set(annotations, FOLLOW_MARKER, true);
+    } catch {
+      // Frozen / read-only annotations API: new objects simply are not added to the filter.
+    }
+  }
+
+  /** Synchronous on purpose: CVAT fetches right after `put` resolves, with the updated filter. */
+  public addCreatedToFilter(ids: unknown): number[] {
+    if (this.managedFilterKey === null || !Array.isArray(ids)) return [];
+    const created = ids.filter((id): id is number => Number.isInteger(id));
+    if (!created.length) return [];
+    const store = this.host.getStore();
+    if (!store) return [];
+    const ctx = readCvatContext(store);
+    if (JSON.stringify(ctx.filters) !== this.managedFilterKey || ctx.groundTruthShown) {
+      this.managedFilterKey = null;
+      return [];
+    }
+    const next = composeAddFilter(ctx.filters, created);
+    store.dispatch({ type: 'CHANGE_ANNOTATIONS_FILTERS', payload: { filters: [...next] } });
+    this.managedFilterKey = JSON.stringify(next);
+    this.host.toast(`Đã thêm object mới #${created.join(', #')} vào filter`, 'info');
+    return created;
   }
 
   /** Executes one action; returns false when it did not apply. Never throws. */
@@ -899,6 +951,13 @@ export class MultiObjectRunner {
     const ok = await applyCvatFilters(store, next);
     if (ok && id !== 'filter-restore') this.filterHistory.push(current);
     else if (!ok && popped) this.filterHistory.push(popped);
+    if (ok && id !== 'filter-restore') {
+      this.managedFilterKey = JSON.stringify(next);
+      const job = readCvatContext(store).job;
+      if (job) this.followCreatedObjects(job);
+    } else if (ok) {
+      this.managedFilterKey = null;
+    }
     this.host.afterWrite();
     this.host.toast(
       ok

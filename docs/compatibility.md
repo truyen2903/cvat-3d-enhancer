@@ -213,6 +213,10 @@ Robustness rules: gestures start only when `annotation.canvas.activeControl` is 
   (`filters-modal.tsx:322-339`). The previous `{"in": …}` form could not be loaded by the dialog,
   which then showed an empty filter. "Add" appends to an existing top-level OR group without
   duplicates.
+- While the filter Meow applied is still the active one (JSON-equal in Redux), Meow wraps the job's
+  `annotations.put` (resolves to the new clientIDs; `annotation-actions.ts` create/paste then
+  call `fetchAnnotationsAsync`) and dispatches `CHANGE_ANNOTATIONS_FILTERS` with those IDs appended
+  before CVAT re-fetches, so newly created objects stay visible. Any other filter change stops it.
 - `sync-size-track` writes only the target track's existing keyframes (size from the source at the
   current frame, each keyframe keeps its bottom). `pin-bottom-forward` writes the current frame and
   every later keyframe of the target or the source (source bottom read at each frame), after

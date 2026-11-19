@@ -886,6 +886,39 @@ describe('filters', () => {
     expect(runner.filterHistory.size).toBe(1);
   });
 
+  it('adds objects created while the Meow filter is active, before CVAT re-fetches', async () => {
+    const w = createWorld();
+    await w.load();
+    const put = vi.fn(async () => [99]);
+    (w.job.annotations as Record<string, unknown>).put = put;
+    const { runner, toast } = makeRunner(w.store);
+    await runner.run('filter-only', [4, 5], 1);
+    const ids = await (
+      w.job.annotations as unknown as { put: (s: unknown[]) => Promise<number[]> }
+    ).put([{}]);
+    expect(ids).toEqual([99]);
+    expect(put).toHaveBeenCalledOnce();
+    expect(w.redux.filters).toEqual([objectIdLogic([4, 5, 99])]);
+    expect(String(toast.mock.calls.at(-1)![0])).toContain('#99');
+    // wrapped only once even if the filter is applied again
+    await runner.run('filter-add', [7], 1);
+    await (w.job.annotations as unknown as { put: (s: unknown[]) => Promise<number[]> }).put([]);
+    expect(put).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops following new objects once the filter was changed outside Meow', async () => {
+    const w = createWorld();
+    await w.load();
+    (w.job.annotations as Record<string, unknown>).put = vi.fn(async () => [99]);
+    const { runner } = makeRunner(w.store);
+    await runner.run('filter-only', [4], 1);
+    const manual = [{ '==': [{ var: 'label' }, 'car'] }];
+    w.redux.filters = manual;
+    await (w.job.annotations as unknown as { put: (s: unknown[]) => Promise<number[]> }).put([{}]);
+    expect(w.redux.filters).toBe(manual);
+    expect(runner.addCreatedToFilter([100])).toEqual([]);
+  });
+
   it('refuses to change filters while ground truth is shown (a fetch would drop its states)', async () => {
     const w = createWorld();
     await w.load();
