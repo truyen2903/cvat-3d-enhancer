@@ -1,3 +1,4 @@
+import { removeMeowUi } from '../integration/cvat/runtime/meow-ui';
 import { canReuseVisibleCuboidBounds } from '../integration/cvat/runtime/visible-cuboids';
 import {
   beginPerfSpan,
@@ -116,7 +117,7 @@ const MAX_TARGETED_SIDEBAR_CARDS = 128;
 
 const IGNORED_MUTATION_SELECTOR =
   `.cvat-appearance-block, .${BASE_GUIDE_CLASS}, ` +
-  '#meow-toast-stack, .meow-selection-ui, #cvat-3d-enhancer-workspace-settings-section, ' +
+  '#meow-toast-stack, [data-meow-owned], .meow-selection-ui, #cvat-3d-enhancer-workspace-settings-section, ' +
   '[data-enhancer-workspace-settings], .ant-select-dropdown, .ant-tooltip, .ant-popover';
 
 const CAMERA_KEY_MAPPING: Record<
@@ -142,7 +143,8 @@ function isIgnoredMutationNode(node: Node): boolean {
   const el = node as Element;
   if (
     el.id === 'meow-toast-stack' ||
-    el.id === 'meow-toast-style' ||
+    el.id === 'meow-ui-style' ||
+    el.hasAttribute('data-meow-owned') ||
     el.classList.contains('meow-selection-ui') ||
     el.id === 'cvat-3d-enhancer-workspace-settings-section' ||
     el.classList.contains(BASE_GUIDE_CLASS) ||
@@ -853,6 +855,7 @@ export class PageBridgeRuntimeHost {
       }
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
+      removeMeowUi(this.doc);
     };
   }
 

@@ -215,6 +215,56 @@ describe('CanvasSelectionController', () => {
     controller.dispose();
   });
 
+  it('shows a compact toolbar with three primary actions and accessible overflow', () => {
+    const { controller, shiftClick, host } = setup();
+    expect(document.querySelector('[role="toolbar"]')).toBeNull();
+    shiftClick(client(0.5, 0));
+    const toolbar = document.querySelector('[role="toolbar"]')!;
+    expect(toolbar.textContent).toContain('1 chọn');
+    expect(toolbar.querySelectorAll('button')).toHaveLength(5);
+    expect(toolbar.querySelector('[data-action="swap-attributes"]')).toBeNull();
+    toolbar.querySelector<HTMLButtonElement>('[data-action="filter-only"]')!.click();
+    expect(host.runAction).toHaveBeenCalledWith('filter-only', [2]);
+    controller.dispose();
+  });
+
+  it('focuses menu actions and restores the overflow trigger on Escape', () => {
+    const { controller, shiftClick } = setup();
+    shiftClick(client(0.5, 0));
+    const trigger = document.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!;
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    trigger.click();
+    const actions = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(actions[0]);
+    actions[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement).toBe(actions[1]);
+    actions[1]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+    expect(controller.ids()).toEqual([2]);
+    controller.dispose();
+  });
+
+  it('groups applicable menu actions and closes the menu with Escape', () => {
+    const { controller, shiftClick, fire } = setup();
+    shiftClick(client(0.5, 0));
+    fire('contextmenu', client(0.5, 0), { button: 2 });
+    const menu = document.querySelector('[role="menu"]')!;
+    expect(
+      [...menu.querySelectorAll('[role="group"]')].map((group) => group.getAttribute('aria-label'))
+    ).toEqual(['Cặp', 'Lọc', 'Hiển thị', 'Theo gốc', 'Khác']);
+    expect(menu.querySelector('[data-action="filter-restore"]')).toBeNull();
+    expect(menu.querySelector('[data-action="swap-attributes"]')?.getAttribute('title')).toContain(
+      'attribute'
+    );
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(controller.ids()).toEqual([2]);
+    controller.dispose();
+  });
+
   it('opens the Meow menu on right-click inside the selection and leaves CVAT alone otherwise', () => {
     const { controller, shiftClick, fire, host } = setup();
     const before = fire('contextmenu', client(0.5, 0), { button: 2 });
@@ -225,10 +275,12 @@ describe('CanvasSelectionController', () => {
     const inside = fire('contextmenu', client(0.5, 0), { button: 2 });
     expect(inside.defaultPrevented).toBe(true);
     const menu = document.querySelector('[role="menu"]')!;
-    expect(menu.textContent).toContain('Tráo vị trí + kích thước');
-    expect(menu.textContent).toContain('Chỉ lọc cụm này');
-    const swap = [...menu.querySelectorAll('button')].find((b) =>
-      b.textContent!.includes('Tráo vị trí')
+    expect(menu.querySelector('[data-action="swap-geometry"]')?.getAttribute('title')).toBe(
+      'Tráo vị trí + kích thước'
+    );
+    expect(menu.textContent).toContain('Chỉ cụm này');
+    const swap = [...menu.querySelectorAll('button')].find(
+      (b) => b.dataset.action === 'swap-geometry'
     )!;
     swap.click();
     expect(host.runAction).toHaveBeenCalledWith('swap-geometry', [2]);
@@ -240,7 +292,7 @@ describe('CanvasSelectionController', () => {
     const { controller, fire, shiftClick, host } = setup();
     shiftClick(client(0.5, 0));
     fire('contextmenu', client(0.5, 0), { button: 2 });
-    [...document.querySelectorAll('[role="menu"] button')]
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]
       .find((b) => b.textContent === 'Đặt làm gốc')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(host.activate).toHaveBeenCalledWith(2);
@@ -279,7 +331,7 @@ describe('CanvasSelectionController', () => {
     const { controller, shiftClick, fire, setActive } = setup();
     shiftClick(client(0.5, 0));
     fire('contextmenu', client(0.5, 0), { button: 2 });
-    [...document.querySelectorAll('[role="menu"] button')]
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]
       .find((b) => b.textContent === 'Đặt làm gốc')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     setActive(2);
@@ -297,8 +349,8 @@ describe('CanvasSelectionController', () => {
       { id: 98, points: [-0.9, -0.9, 0, 0, 0, 0, 0.2, 0.2, 0.2] },
     ]);
     fire('contextmenu', client(0.5, 0), { button: 2 });
-    [...document.querySelectorAll('[role="menu"] button')]
-      .find((b) => b.textContent === 'Thêm vật thể xung quanh')!
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]
+      .find((b) => b.dataset.action === 'add-surroundings')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await vi.waitFor(() => expect(controller.has(99)).toBe(true));
     expect(controller.has(98)).toBe(false);
@@ -412,11 +464,11 @@ describe('CanvasSelectionController robustness and scope', () => {
     shiftClick(client(0.5, 0));
     fire('contextmenu', client(0.5, 0), { button: 2 });
     host.isIdle.mockReturnValue(false);
-    [...document.querySelectorAll('[role="menu"] button')]
-      .find((b) => b.textContent!.includes('Tráo vị trí'))!
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]
+      .find((b) => b.dataset.action === 'swap-geometry')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(host.runAction).not.toHaveBeenCalled();
-    expect(host.toast).toHaveBeenLastCalledWith(expect.stringContaining('thoát chế độ'), 'error');
+    expect(host.toast).toHaveBeenLastCalledWith(expect.stringContaining('Thoát chế độ'), 'error');
     controller.dispose();
   });
 

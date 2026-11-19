@@ -50,7 +50,7 @@ describe('recent Workspace feature options', () => {
       expect(healed.workspace.cvat3dEnhancer[key]).toBe(false);
   });
 
-  it('mounts all eight options, toggles them independently, and resyncs existing controls', () => {
+  it('mounts every option, toggles them independently, and resyncs existing controls', () => {
     document.body.innerHTML = '<div class="cvat-workspace-settings"></div>';
     let options = { ...DEFAULT_CVAT_3D_RENDER_OPTIONS };
     const mount = () =>
@@ -62,20 +62,60 @@ describe('recent Workspace feature options', () => {
         }
       );
     mount();
-    for (const key of WORKSPACE_FEATURE_KEYS) {
+    const keys = [...WORKSPACE_FEATURE_KEYS, 'followActiveObject'] as const;
+    for (const key of keys) {
       const input = document.querySelector<HTMLInputElement>(`input[data-enhancer-opt="${key}"]`)!;
       expect(input.checked).toBe(true);
       input.checked = false;
       input.dispatchEvent(new Event('change'));
       expect(options[key]).toBe(false);
     }
-    options = { ...options, ...normalizeWorkspaceFeatureOptions({}) };
+    options = { ...options, ...normalizeWorkspaceFeatureOptions({}), followActiveObject: true };
     mount();
-    for (const key of WORKSPACE_FEATURE_KEYS)
+    for (const key of keys)
       expect(
         document.querySelector<HTMLInputElement>(`input[data-enhancer-opt="${key}"]`)!.checked
       ).toBe(true);
     expect(document.querySelectorAll('[data-enhancer-workspace-settings]')).toHaveLength(1);
+  });
+
+  it('keeps all controls reachable in four named groups inside one collapsed Meow section', () => {
+    document.body.innerHTML =
+      '<div class="cvat-workspace-settings"><div class="ant-row css-fixture"></div></div>';
+    injectCvatWorkspaceSettingsControls(document, () => DEFAULT_CVAT_3D_RENDER_OPTIONS, vi.fn());
+
+    const section = document.querySelector<HTMLDetailsElement>(
+      'details[data-enhancer-workspace-settings]'
+    )!;
+    expect(section).not.toBeNull();
+    expect(section.open).toBe(false);
+    expect(section.querySelector('summary')?.textContent).toBe('Meow');
+    const groups = [...section.querySelectorAll('fieldset')];
+    expect(groups.map((group) => group.querySelector('legend')?.textContent)).toEqual([
+      'Hiển thị',
+      'Chỉnh box',
+      'Điều hướng',
+      'Chọn nhiều',
+    ]);
+    expect(groups.map((group) => group.querySelectorAll('input').length)).toEqual([2, 5, 3, 1]);
+    expect(section.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(11);
+    for (const input of section.querySelectorAll<HTMLInputElement>('input')) {
+      expect(input.getAttribute('aria-label')).toBeTruthy();
+      expect(input.closest('fieldset')).not.toBeNull();
+      expect(input.closest('label')?.classList.contains('css-fixture')).toBe(true);
+    }
+
+    section.open = true;
+    injectCvatWorkspaceSettingsControls(
+      document,
+      () => ({ ...DEFAULT_CVAT_3D_RENDER_OPTIONS, followActiveObject: false }),
+      vi.fn()
+    );
+    expect(document.querySelectorAll('details[data-enhancer-workspace-settings]')).toHaveLength(1);
+    expect(section.open).toBe(true);
+    expect(
+      section.querySelector<HTMLInputElement>('[data-enhancer-opt="followActiveObject"]')?.checked
+    ).toBe(false);
   });
 
   it('upgrades an existing settings panel with missing controls', () => {
@@ -92,7 +132,7 @@ describe('recent Workspace feature options', () => {
       '<div id="cvat-objects-sidebar-state-item-1" class="cvat-objects-sidebar-state-item"></div>';
     const sync = () => result;
     injectCvatObjectDimensionSyncControls(document, sync, { enableDimensionSync: false });
-    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(3);
+    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(2);
     expect(document.querySelector('[data-enhancer-sync-dim="FLIP_180"]')).not.toBeNull();
     injectCvatObjectDimensionSyncControls(document, sync, { enableHeadingFlip: false });
     expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(4);
@@ -103,7 +143,7 @@ describe('recent Workspace feature options', () => {
     });
     expect(document.querySelector('.cvat-3d-enhancer-dim-sync-row')).toBeNull();
     injectCvatObjectDimensionSyncControls(document, sync);
-    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(7);
+    expect(document.querySelectorAll('[data-enhancer-sync-dim]')).toHaveLength(5);
   });
 
   it('restores native double-click handling immediately when the filter override is disabled', () => {

@@ -178,6 +178,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(guide.isConnected).toBe(false);
     } finally {
       stop();
+      expect(document.getElementById('meow-ui-style')).toBeNull();
     }
   });
 
@@ -226,7 +227,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       await flush();
       await flush();
       await flush();
-      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row svg path')).toHaveLength(7);
+      expect(document.querySelectorAll('.cvat-3d-enhancer-dim-sync-row svg path')).toHaveLength(5);
       expect(frames).toHaveLength(0);
       document.querySelector('.cvat-3d-enhancer-dim-sync-row')!.remove();
       await flush();
@@ -236,6 +237,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(frames).toHaveLength(0);
     } finally {
       stop();
+      expect(document.getElementById('meow-ui-style')).toBeNull();
     }
   });
 
@@ -363,6 +365,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(canvases).toHaveBeenCalledOnce();
     } finally {
       stop();
+      expect(document.getElementById('meow-ui-style')).toBeNull();
     }
   });
 

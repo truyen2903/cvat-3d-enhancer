@@ -167,7 +167,7 @@ describe('cuboid lowest slice guide', () => {
     const camera = cameraFor(DEFAULT_ORTHO_CAMERA_FRAMES.side);
     guide.update(canvas, camera, points);
     const svg = document.querySelector<SVGSVGElement>('.cvat-3d-enhancer-base-guide')!;
-    expect(svg.style.pointerEvents).toBe('none');
+    expect(getComputedStyle(svg).pointerEvents).toBe('none');
     expect(svg.lastElementChild!.getAttribute('stroke')).toBe('#ef4444');
     expect(svg.lastElementChild!.hasAttribute('stroke-dasharray')).toBe(false);
     expect(svg.style.left).toBe('20px');

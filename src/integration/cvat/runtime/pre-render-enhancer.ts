@@ -17,6 +17,8 @@ import {
   WORKSPACE_FEATURE_DEFAULTS,
   WORKSPACE_FEATURE_KEYS,
   WORKSPACE_FEATURE_CONTROLS,
+  WORKSPACE_FEATURE_GROUPS,
+  type WorkspaceFeatureGroup,
   normalizeWorkspaceFeatureOptions,
   type WorkspaceFeatureOptions,
 } from './workspace-feature-options';
@@ -35,6 +37,7 @@ import {
 } from './perf-probe';
 import { cacheVisibleCuboids } from './visible-cuboids';
 import { showMeowToast } from './meow-toast';
+import { decorateMeowSurface, ensureMeowStyle } from './meow-ui';
 
 export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
   readonly followActiveObject?: boolean;
@@ -932,9 +935,8 @@ function computeOptionsSignature(opts: Cvat3dWorkspaceRenderOptions): string {
 }
 
 /**
- * Injects the tickable 3D render options directly into CVAT's native Settings -> Workspace tab
- * (`.cvat-workspace-settings`) using CVAT's exact Ant Design Row/Col/Checkbox/Text DOM structure
- * so the options blend seamlessly with native CVAT settings.
+ * Groups 3D options in a collapsed Meow section in CVAT's Settings -> Workspace tab.
+ * Native Ant Design checkbox classes and the current CSS hash preserve CVAT's visual states.
  */
 export function injectCvatWorkspaceSettingsControls(
   doc: Document,
@@ -945,6 +947,8 @@ export function injectCvatWorkspaceSettingsControls(
   if (containers.length === 0) {
     return false;
   }
+
+  ensureMeowStyle(doc);
 
   const syncCheckboxVisualState = (input: HTMLInputElement, checked: boolean): void => {
     if (input.checked !== checked) {
@@ -966,15 +970,16 @@ export function injectCvatWorkspaceSettingsControls(
   const items: {
     readonly key: keyof Cvat3dWorkspaceRenderOptions;
     readonly rowClass: string;
+    readonly group: WorkspaceFeatureGroup;
     readonly title: string;
     readonly description: string;
   }[] = [
     {
       key: 'followActiveObject',
       rowClass: 'cvat-workspace-settings-3d-follow-active-object',
-      title: 'Keep active object fixed on screen when changing frames',
-      description:
-        'Move the 3D perspective camera with the active object so it stays at the same screen position on Next/Previous frame',
+      group: 'Điều hướng',
+      title: 'Giữ box trên màn hình',
+      description: 'Camera đi theo box đang chọn khi chuyển frame.',
     },
   ];
 
@@ -993,7 +998,11 @@ export function injectCvatWorkspaceSettingsControls(
     let existing = container.querySelector<HTMLElement>(
       `#${WORKSPACE_SETTINGS_INJECTED_ID}, [data-enhancer-workspace-settings="true"]`
     );
-    if (existing && existing.querySelectorAll('input[data-enhancer-opt]').length !== items.length) {
+    if (
+      existing &&
+      (existing.tagName !== 'DETAILS' ||
+        existing.querySelectorAll('input[data-enhancer-opt]').length !== items.length)
+    ) {
       existing.remove();
       existing = null;
     }
@@ -1019,43 +1028,57 @@ export function injectCvatWorkspaceSettingsControls(
     }
 
     const antdHash = extractAntdHashClass(container);
-    const wrapper = doc.createElement('div');
+    const wrapper = doc.createElement('details');
+    wrapper.className = 'meow-workspace-settings';
+    decorateMeowSurface(wrapper);
     wrapper.id = WORKSPACE_SETTINGS_INJECTED_ID;
     wrapper.dataset.enhancerWorkspaceSettings = 'true';
     wrapper.dataset.enhancerOptsSig = optsSig;
+
+    const summary = doc.createElement('summary');
+    summary.className = 'meow-workspace-summary';
+    summary.textContent = 'Meow';
+    wrapper.appendChild(summary);
+
+    const body = doc.createElement('div');
+    body.className = 'meow-workspace-body';
+    wrapper.appendChild(body);
+    const groups = new Map<WorkspaceFeatureGroup, HTMLFieldSetElement>();
+    for (const name of WORKSPACE_FEATURE_GROUPS) {
+      const group = doc.createElement('fieldset');
+      group.className = 'meow-workspace-group';
+      const legend = doc.createElement('legend');
+      legend.className = 'meow-workspace-group-title';
+      legend.textContent = name;
+      group.appendChild(legend);
+      body.appendChild(group);
+      groups.set(name, group);
+    }
 
     for (const item of items) {
       const isChecked = opts[item.key] ?? DEFAULT_CVAT_3D_RENDER_OPTIONS[item.key] ?? false;
 
       const row = doc.createElement('div');
-      row.className = `ant-row ${item.rowClass} cvat-player-setting${antdHash}`;
-      row.style.position = 'relative';
+      row.className = `ant-row ${item.rowClass} meow-workspace-option${antdHash}`;
 
       const checkboxCol = doc.createElement('div');
       checkboxCol.className = `ant-col ant-col-24${antdHash}`;
 
       const label = doc.createElement('label');
-      label.className = `ant-checkbox-wrapper cvat-text-color${antdHash}${
+      label.className = `ant-checkbox-wrapper meow-workspace-label cvat-text-color${antdHash}${
         isChecked ? ' ant-checkbox-wrapper-checked' : ''
       }`;
-      label.style.cssText =
-        'position: relative; display: inline-flex; align-items: center; cursor: pointer; user-select: none;';
 
       const checkboxSpan = doc.createElement('span');
-      checkboxSpan.className = `ant-checkbox${antdHash}${isChecked ? ' ant-checkbox-checked' : ''}`;
-      checkboxSpan.style.cssText =
-        'position: relative; display: inline-block; line-height: 1; cursor: pointer;';
+      checkboxSpan.className = `ant-checkbox meow-workspace-checkbox${antdHash}${isChecked ? ' ant-checkbox-checked' : ''}`;
 
       const checkboxInput = doc.createElement('input');
       checkboxInput.type = 'checkbox';
-      checkboxInput.className = 'ant-checkbox-input';
+      checkboxInput.className = 'ant-checkbox-input meow-workspace-input';
+      checkboxInput.setAttribute('aria-label', item.title);
+      checkboxInput.title = item.description;
       checkboxInput.dataset.enhancerOpt = item.key;
       checkboxInput.checked = isChecked;
-      // Strictly contain the invisible input inside the 16x16 .ant-checkbox box so it never stretches
-      // over neighboring checkboxes when Ant Design CSS-in-JS classes change
-      checkboxInput.style.cssText =
-        'position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1;';
-
       const checkboxInner = doc.createElement('span');
       checkboxInner.className = 'ant-checkbox-inner';
 
@@ -1063,6 +1086,7 @@ export function injectCvatWorkspaceSettingsControls(
       checkboxSpan.appendChild(checkboxInner);
 
       const titleSpan = doc.createElement('span');
+      titleSpan.className = 'meow-workspace-option-title';
       titleSpan.textContent = item.title;
 
       label.appendChild(checkboxSpan);
@@ -1073,7 +1097,8 @@ export function injectCvatWorkspaceSettingsControls(
       descCol.className = `ant-col ant-col-24${antdHash}`;
 
       const descText = doc.createElement('span');
-      descText.className = `ant-typography ant-typography-secondary${antdHash}`;
+      descText.className = `ant-typography ant-typography-secondary meow-workspace-description${antdHash}`;
+      descText.title = item.description;
       descText.textContent = item.description;
       descCol.appendChild(descText);
 
@@ -1109,7 +1134,7 @@ export function injectCvatWorkspaceSettingsControls(
 
       row.appendChild(checkboxCol);
       row.appendChild(descCol);
-      wrapper.appendChild(row);
+      groups.get(item.group)?.appendChild(row);
     }
 
     container.appendChild(wrapper);

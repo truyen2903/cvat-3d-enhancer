@@ -1,3 +1,4 @@
+import { ensureMeowStyle } from './meow-ui';
 import { cuboidAxes, readCameraFrame, worldToLocal2d } from './ortho-cuboid-editor';
 import type { CameraFrame, OrthoCameraLike } from './ortho-cuboid-editor';
 
@@ -408,10 +409,9 @@ export class CuboidBaseGuide {
 
     if (!svg || !svg.isConnected) {
       svg = this.doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.classList.add(BASE_GUIDE_CLASS);
+      ensureMeowStyle(this.doc);
+      svg.classList.add(BASE_GUIDE_CLASS, 'meow-base-guide');
       svg.setAttribute('aria-hidden', 'true');
-      svg.style.cssText =
-        'position:fixed !important; pointer-events:none !important; z-index:1000; overflow:hidden; margin:0 !important; padding:0 !important; border:0 !important;';
       svg.setAttribute('preserveAspectRatio', 'none');
       const path = this.doc.createElementNS('http://www.w3.org/2000/svg', 'line');
       path.setAttribute('stroke', '#ef4444');

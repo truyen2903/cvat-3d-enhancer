@@ -1,8 +1,14 @@
+import { removeMeowUi } from '../../src/integration/cvat/runtime/meow-ui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   VIEWPORT_DEFER_THRESHOLD,
   injectCvatObjectDimensionSyncControls,
 } from '../../src/integration/cvat/runtime/object-dimension-controls';
+
+function overflow(card: HTMLElement): HTMLElement {
+  card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="MORE"]')!.click();
+  return document.getElementById('meow-sidebar-menu')!;
+}
 
 const rowSelector = '.cvat-3d-enhancer-dim-sync-row';
 const sync = () =>
@@ -27,11 +33,12 @@ function mountCard(content: string, type = 'CUBOID TRACK'): HTMLElement {
 }
 
 afterEach(() => {
+  removeMeowUi(document);
   document.body.innerHTML = '';
 });
 
 describe('dimension controls on customized CVAT sidebars', () => {
-  it('shows RS beside dimensions only for supported tracks and prevents overlapping operations', async () => {
+  it('offers ride_state in overflow only for supported tracks and prevents overlapping operations', async () => {
     const card = mountCard('');
     let finish!: (result: {
       clientID: number;
@@ -55,9 +62,11 @@ describe('dimension controls on customized CVAT sidebars', () => {
     };
     const onSync = sync();
     injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
-    const button = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="RIDE_STATE"]')!;
-    expect(button.textContent).toBe('RS');
-    expect(card.querySelectorAll('button')).toHaveLength(8);
+    const button = overflow(card).querySelector<HTMLButtonElement>(
+      '[data-enhancer-sync-dim="RIDE_STATE"]'
+    )!;
+    expect(button.textContent).toContain('ride_state');
+    expect(card.querySelectorAll('button')).toHaveLength(5);
     button.click();
     button.click();
     await Promise.resolve();
@@ -68,25 +77,25 @@ describe('dimension controls on customized CVAT sidebars', () => {
     expect(onSync).not.toHaveBeenCalled();
     finish({ clientID: 1, targetValue: 'true', updatedKeyframes: 3, totalKeyframes: 4 });
     await vi.waitFor(() => expect(button.disabled).toBe(false));
-    expect(button.title).toContain('ride_state = true across all frames');
+    expect(button.title).toContain('ride_state = true');
     rideState.isAvailable.mockReturnValue(false);
     injectCvatObjectDimensionSyncControls(document, onSync, {}, rideState);
     expect(card.querySelector('[data-enhancer-sync-dim="RIDE_STATE"]')).toBeNull();
-    expect(card.querySelectorAll('button')).toHaveLength(7);
+    expect(card.querySelectorAll('button')).toHaveLength(5);
   });
 
   it.each([
     '<div class="ant-col ant-col-20 css-n0gjrg"><div class="ant-row"><span class="cvat-object-item-button-first-keyframe" style="opacity:0.5;pointer-events:none"></span></div></div>',
     '<div class="ant-col ant-col-24 css-company"><div class="company-actions"><span class="cvat-object-item-button-first-keyframe"></span></div></div>',
     '<div class="company-actions"><span class="cvat-object-item-button-lock anticon-unlock"></span></div>',
-  ])('mounts all seven actionable icons independently of the host grid: %s', async (content) => {
+  ])('mounts a compact action row independently of the host grid: %s', async (content) => {
     const card = mountCard(content);
     const onSync = sync();
     expect(injectCvatObjectDimensionSyncControls(document, onSync)).toBe(1);
-    expect(card.querySelectorAll(`${rowSelector} svg path`)).toHaveLength(7);
+    expect(card.querySelectorAll(`${rowSelector} svg path`)).toHaveLength(5);
     const row = card.querySelector<HTMLElement>(rowSelector)!;
     expect(row.parentElement).toBe(card);
-    expect(row.style.getPropertyPriority('display')).toBe('important');
+    expect(row.classList.contains('meow-dimension-row')).toBe(true);
     const button = row.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="H"]')!;
     expect(button.disabled).toBe(false);
     button.querySelector('path')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -102,7 +111,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     card.querySelector('[data-enhancer-sync-dim="H"] svg')!.remove();
     card.querySelector('[data-enhancer-sync-dim="W"]')!.remove();
     injectCvatObjectDimensionSyncControls(document, onSync);
-    expect(card.querySelectorAll('svg path')).toHaveLength(7);
+    expect(card.querySelectorAll('svg path')).toHaveLength(5);
     const row = card.querySelector(rowSelector)!;
     row.replaceWith(row.cloneNode(true));
     injectCvatObjectDimensionSyncControls(document, onSync);
@@ -111,7 +120,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     await vi.waitFor(() => expect(onSync).toHaveBeenCalledTimes(1));
     card.querySelector(rowSelector)!.remove();
     expect(injectCvatObjectDimensionSyncControls(document, onSync)).toBe(1);
-    expect(card.querySelectorAll('svg path')).toHaveLength(7);
+    expect(card.querySelectorAll('svg path')).toHaveLength(5);
   });
 
   it.each(['cvat-object-item-button-lock-enabled', 'anticon-lock'])(
@@ -161,7 +170,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
     injectCvatObjectDimensionSyncControls(document, () => Promise.reject(new Error('unsupported')));
     const button = card.querySelector<HTMLButtonElement>('button')!;
     button.click();
-    await vi.waitFor(() => expect(button.title).toContain('Sync failed'));
+    await vi.waitFor(() => expect(button.title).toContain('Đồng bộ lỗi'));
   });
 
   it('does not mutate the DOM on an unchanged reconciliation', async () => {
@@ -273,7 +282,7 @@ describe('dimension controls on customized CVAT sidebars', () => {
       expect(unobserved.has(farCard)).toBe(true);
       const farRow = farCard.querySelector(rowSelector);
       expect(farRow).not.toBeNull();
-      expect(farCard.querySelectorAll('button')).toHaveLength(8);
+      expect(farCard.querySelectorAll('button')).toHaveLength(5);
       farCard.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="H"]')!.click();
       await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(95, 'H'));
     } finally {
@@ -311,6 +320,25 @@ describe('dimension controls on customized CVAT sidebars', () => {
 });
 
 describe('track editing sidebar actions', () => {
+  it('shares one overflow menu across cards and closes on Escape and outside click', () => {
+    const card = mountCard('');
+    injectCvatObjectDimensionSyncControls(document, sync());
+    expect(card.querySelector('[data-enhancer-sync-dim="SWAP_LW"]')).toBeNull();
+    const menu = overflow(card);
+    expect(menu.getAttribute('role')).toBe('menu');
+    expect(menu.querySelector('[data-enhancer-sync-dim="RIDE_STATE"]')).toBeNull();
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(menu.isConnected).toBe(false);
+    const second = card.cloneNode(true) as HTMLElement;
+    second.id = 'cvat-objects-sidebar-state-item-2';
+    document.body.appendChild(second);
+    injectCvatObjectDimensionSyncControls(document, sync());
+    expect(overflow(second)).toBe(menu);
+    expect(document.querySelectorAll('#meow-sidebar-menu')).toHaveLength(1);
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    expect(menu.isConnected).toBe(false);
+  });
+
   it('forwards Shift+click for whole-track flip and swap, retaining ordinary click', async () => {
     const card = mountCard('');
     const onSync = sync();
@@ -319,7 +347,9 @@ describe('track editing sidebar actions', () => {
     flip.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
     await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(1, 'FLIP_180', true));
     await vi.waitFor(() => expect(flip.disabled).toBe(false));
-    const swap = card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="SWAP_LW"]')!;
+    const swap = overflow(card).querySelector<HTMLButtonElement>(
+      '[data-enhancer-sync-dim="SWAP_LW"]'
+    )!;
     swap.click();
     await vi.waitFor(() => expect(onSync).toHaveBeenCalledWith(1, 'SWAP_LW'));
     await vi.waitFor(() => expect(swap.disabled).toBe(false));
@@ -346,13 +376,15 @@ describe('track editing sidebar actions', () => {
       { isAvailable: () => false, sync: vi.fn(), getAttributes, syncAttribute }
     );
     expect(getAttributes).not.toHaveBeenCalled();
-    card.querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="ATTRIBUTES"]')!.click();
-    await vi.waitFor(() => expect(card.querySelector('select')).not.toBeNull());
-    const select = card.querySelector('select')!;
+    overflow(card)
+      .querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="ATTRIBUTES"]')!
+      .click();
+    await vi.waitFor(() => expect(document.querySelector('select')).not.toBeNull());
+    const select = document.querySelector('select')!;
     select.value = '11';
-    card.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
+    document.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
     await vi.waitFor(() => expect(syncAttribute).toHaveBeenCalledExactlyOnceWith(1, 11));
-    expect(card.querySelector('select')).toBeNull();
+    expect(document.querySelector('select')).toBeNull();
   });
 
   it('uses explicit yaw endpoints on Shift+click', async () => {
@@ -368,15 +400,51 @@ describe('track editing sidebar actions', () => {
         getYawRangeOptions: () => ({ frames: [0, 5, 10], currentFrame: 3 }),
       }
     );
-    card
+    overflow(card)
       .querySelector('[data-enhancer-sync-dim="YAW_INTERPOLATE"]')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
-    await vi.waitFor(() => expect(card.querySelectorAll('select')).toHaveLength(2));
-    const selects = card.querySelectorAll('select');
+    await vi.waitFor(() => expect(document.querySelectorAll('select')).toHaveLength(2));
+    const selects = document.querySelectorAll('select');
     selects[1]!.value = '10';
-    card.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
+    document.querySelector<HTMLButtonElement>('.cvat-3d-enhancer-attribute-picker button')!.click();
     await vi.waitFor(() =>
       expect(onSync).toHaveBeenCalledWith(1, 'YAW_INTERPOLATE', false, [0, 10])
     );
+  });
+  it('cancels an anchored picker with Escape and settles pending work on teardown', async () => {
+    const card = mountCard('');
+    const syncAttribute = vi.fn();
+    injectCvatObjectDimensionSyncControls(
+      document,
+      sync(),
+      {},
+      {
+        isAvailable: () => false,
+        sync: vi.fn(),
+        getAttributes: () => [{ id: 10, name: 'sitting' }],
+        syncAttribute,
+      }
+    );
+    const attributeButton = overflow(card).querySelector<HTMLButtonElement>(
+      '[data-enhancer-sync-dim="ATTRIBUTES"]'
+    )!;
+    attributeButton.click();
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeNull());
+    expect(card.querySelector('[role="dialog"]')).toBeNull();
+    document
+      .querySelector('select')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await vi.waitFor(() => expect(attributeButton.disabled).toBe(false));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(syncAttribute).not.toHaveBeenCalled();
+    overflow(card)
+      .querySelector<HTMLButtonElement>('[data-enhancer-sync-dim="ATTRIBUTES"]')!
+      .click();
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeNull());
+    removeMeowUi(document);
+    await Promise.resolve();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.querySelector('#meow-ui-style')).toBeNull();
+    expect(syncAttribute).not.toHaveBeenCalled();
   });
 });

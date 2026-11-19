@@ -1,3 +1,4 @@
+import { ensureMeowStyle } from './meow-ui';
 import type { CvatObjectStateLike } from './pre-render-enhancer';
 import type { GuideCameraLike } from './cuboid-base-guide';
 import { cuboidAxes } from './ortho-cuboid-editor';
@@ -112,10 +113,9 @@ export class TrackGhostOverlay {
       this.source = active.canvas;
       this.clientID = state.clientID ?? null;
       this.overlay = this.doc.createElement('canvas');
+      ensureMeowStyle(this.doc);
       this.overlay.className = 'meow-track-ghosts';
       this.overlay.setAttribute('aria-hidden', 'true');
-      this.overlay.style.cssText =
-        'position:fixed;pointer-events:none;z-index:1000;margin:0;padding:0;border:0;';
       this.context = this.overlay.getContext('2d');
       if (!this.context) throw new Error('Canvas2D không khả dụng');
       (this.doc.fullscreenElement ?? this.doc.documentElement).appendChild(this.overlay);

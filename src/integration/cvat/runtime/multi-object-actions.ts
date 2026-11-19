@@ -398,7 +398,7 @@ interface RunScope {
   readonly job: CvatJobLike;
 }
 
-const ABORTED = 'Đã đổi frame trong lúc xử lý, thao tác bị hủy (chưa ghi gì)';
+const ABORTED = 'Đã đổi frame; hủy thao tác, chưa ghi.';
 
 const FOLLOW_MARKER = Symbol.for('meowFollowCreatedObjects');
 
@@ -475,10 +475,7 @@ export class MultiObjectRunner {
       );
       this.host.afterWrite();
       if (refreshed === 'failed')
-        this.host.toast(
-          'Đã ghi vào CVAT nhưng chưa làm mới giao diện; hãy đổi frame để cập nhật',
-          'info'
-        );
+        this.host.toast('Đã ghi. Đổi frame để làm mới giao diện.', 'info');
     }
     return summary;
   }
@@ -489,7 +486,7 @@ export class MultiObjectRunner {
     if (summary.skippedOutside) notes.push(`${summary.skippedOutside} object outside`);
     if (summary.failed) notes.push(`${summary.failed} lỗi ghi`);
     if (summary.historyMode === 'per-object' && summary.undoSteps > 1)
-      notes.push(`bản CVAT này không gộp undo: cần Ctrl+Z ${summary.undoSteps} lần`);
+      notes.push(`CVAT không gộp undo: Ctrl+Z ${summary.undoSteps} lần`);
     if (summary.refused) {
       this.host.toast(
         `Đã hủy, chưa ghi gì (${notes.join(', ') || 'object không ghi được'})`,
@@ -612,7 +609,7 @@ export class MultiObjectRunner {
   ): Promise<boolean> {
     const pair = resolvePair(selection, activeID);
     if (!pair) {
-      this.host.toast('Cần đúng 2 object: gốc (đang chọn) và 1 đích (Shift+click)', 'error');
+      this.host.toast('Chọn 1 gốc và 1 đích bằng Shift+click.', 'error');
       return false;
     }
     if (id === 'sync-source-target' && pair.source === null) {
@@ -662,10 +659,7 @@ export class MultiObjectRunner {
     activeID: number | null
   ): Promise<boolean> {
     if (activeID === null) {
-      this.host.toast(
-        'Chưa có object gốc: click thường vào một object (hoặc chuột phải → Đặt làm gốc)',
-        'error'
-      );
+      this.host.toast('Chọn object gốc bằng click hoặc Đặt làm gốc.', 'error');
       return false;
     }
     const others = selection.filter((x) => x !== activeID);
@@ -722,10 +716,7 @@ export class MultiObjectRunner {
     activeID: number | null
   ): Promise<boolean> {
     if (activeID === null) {
-      this.host.toast(
-        'Chưa có object gốc: click thường vào một object (hoặc chuột phải → Đặt làm gốc)',
-        'error'
-      );
+      this.host.toast('Chọn object gốc bằng click hoặc Đặt làm gốc.', 'error');
       return false;
     }
     const scope = this.scope!;
@@ -964,7 +955,7 @@ export class MultiObjectRunner {
         ? id === 'filter-restore'
           ? 'Đã trả về filter trước'
           : `Đã lọc ${selection.length} object`
-        : 'Không áp dụng được filter (không truy cập được Redux/job của CVAT, hoặc đang hiển thị Ground truth)',
+        : 'Không lọc được: CVAT chưa sẵn sàng hoặc đang hiện Ground truth',
       ok ? 'success' : 'error'
     );
     return ok;

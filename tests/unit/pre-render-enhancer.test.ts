@@ -118,7 +118,7 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       'input[data-enhancer-opt="followActiveObject"]'
     );
     expect(followCheckbox).not.toBeNull();
-    expect(followCheckbox!.style.position).toBe('absolute');
+    expect(followCheckbox!.classList.contains('meow-workspace-input')).toBe(true);
     followCheckbox!.checked = false;
     followCheckbox!.dispatchEvent(new Event('change'));
 

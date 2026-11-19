@@ -32,6 +32,7 @@ import {
   type MultiActionId,
 } from './multi-object-actions';
 import type { MeowToastKind } from './meow-toast';
+import { decorateMeowSurface, ensureMeowStyle, setMeowIcon } from './meow-ui';
 
 /** Highlight color for selected boxes (stand-in for CVAT's private GROUPING_COLOR constant). */
 export const SELECTION_HIGHLIGHT_COLOR = '#ffd400';
@@ -82,6 +83,7 @@ export class CanvasSelectionController {
   private marqueeEl: HTMLElement | null = null;
   private toolbarEl: HTMLElement | null = null;
   private menuEl: HTMLElement | null = null;
+  private menuReturnFocus: HTMLElement | null = null;
   private busy = false;
   private disposed = false;
 
@@ -337,12 +339,9 @@ export class CanvasSelectionController {
     ) {
       drag.marquee = true;
       this.marqueeEl = this.doc.createElement('div');
-      this.marqueeEl.className = UI_CLASS;
+      ensureMeowStyle(this.doc);
+      this.marqueeEl.className = `${UI_CLASS} meow-selection-marquee${drag.remove ? ' is-removing' : ''}`;
       this.marqueeEl.setAttribute('aria-hidden', 'true');
-      this.marqueeEl.style.cssText =
-        'position:fixed;z-index:2147482000;pointer-events:none;box-sizing:border-box;' +
-        `border:1px solid ${drag.remove ? '#ff4d4f' : SELECTION_HIGHLIGHT_COLOR};` +
-        `background:${drag.remove ? 'rgba(255,77,79,.12)' : 'rgba(255,212,0,.14)'};`;
       this.doc.body.appendChild(this.marqueeEl);
     }
     if (drag.marquee && this.marqueeEl) {
@@ -380,7 +379,7 @@ export class CanvasSelectionController {
       return;
     const camera = this.host.getCamera(drag.canvas);
     if (!camera) {
-      this.host.toast('Chưa có camera render để chiếu; hãy thử lại sau khi canvas vẽ xong', 'info');
+      this.host.toast('Canvas chưa sẵn sàng. Thử lại sau khi vẽ xong.', 'info');
       return;
     }
     const rect = drag.canvas.getBoundingClientRect();
@@ -452,7 +451,7 @@ export class CanvasSelectionController {
     }
     this.setSelected(next);
     this.host.toast(
-      `${remove ? 'Bỏ thêm' : 'Thêm'} ${ids.length} object outside/đang bị lọc trong vùng (đang chọn ${next.size})`,
+      `${remove ? 'Bỏ' : 'Thêm'} ${ids.length} vật thể ngoài filter · ${next.size} chọn`,
       'info'
     );
   }
@@ -491,12 +490,30 @@ export class CanvasSelectionController {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
+    if (this.menuEl && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      const items = [...this.menuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+      if (!items.length) return;
+      const current = items.findIndex((item) => item === this.doc.activeElement);
+      const index =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? items.length - 1
+            : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      this.block(event);
+      items[index]?.focus();
+      return;
+    }
     if (event.key !== 'Escape') return;
     if (this.drag) {
       this.cancelTransient();
       return;
     }
-    if (this.menuEl) this.closeMenu();
+    if (this.menuEl) {
+      this.block(event);
+      this.closeMenu(true);
+      return;
+    }
     if (this.selected.size > 0) this.clear();
   }
 
@@ -520,24 +537,54 @@ export class CanvasSelectionController {
     };
   }
 
-  private labelFor(id: MultiActionId, fallback: string): string {
-    return id === 'filter-restore' ? `${fallback} (${this.host.filterHistorySize()})` : fallback;
+  private labelFor(id: MultiActionId): string {
+    const labels: Record<MultiActionId, string> = {
+      'swap-geometry': 'Tráo',
+      'swap-attributes': 'Tráo + attribute',
+      'sync-source-target': 'Gốc → đích',
+      'filter-only': 'Chỉ cụm này',
+      'filter-add': 'Thêm vào filter',
+      'filter-restore': `Trả về filter (${this.host.filterHistorySize()})`,
+      hide: 'Ẩn',
+      show: 'Hiện',
+      'pin-bottom': 'Ghim đáy · frame này',
+      'pin-bottom-forward': 'Ghim đáy · → cuối track',
+      'sync-size': 'Kích thước · frame này',
+      'sync-size-track': 'Kích thước · mọi frame',
+      'add-surroundings': 'Thêm xung quanh',
+      'set-source': 'Đặt làm gốc',
+      clear: 'Bỏ chọn',
+    };
+    return labels[id];
   }
 
   private button(label: string, onClick: () => void, compact: boolean): HTMLButtonElement {
     const button = this.doc.createElement('button');
     button.type = 'button';
     button.textContent = label;
-    button.style.cssText = compact
-      ? 'border:1px solid #d9d9d9;border-radius:4px;background:#fff;color:#1f1f1f;padding:2px 8px;font:12px/18px system-ui,sans-serif;cursor:pointer;'
-      : 'display:block;width:100%;text-align:left;border:0;background:transparent;color:#1f1f1f;padding:6px 14px;font:13px/18px system-ui,sans-serif;cursor:pointer;';
+    button.setAttribute('aria-label', label);
+    button.className = compact
+      ? 'meow-selection-button ant-btn ant-btn-default ant-btn-sm'
+      : 'meow-selection-menu-item ant-dropdown-menu-item';
+    if (!compact) {
+      button.setAttribute('role', 'menuitem');
+      button.tabIndex = -1;
+    }
     button.addEventListener('click', (event) => {
       event.stopPropagation();
       onClick();
     });
-    if (!compact) {
-      button.addEventListener('mouseenter', () => (button.style.background = '#f0f5ff'));
-      button.addEventListener('mouseleave', () => (button.style.background = 'transparent'));
+    return button;
+  }
+
+  private actionButton(id: MultiActionId, title: string, compact: boolean): HTMLButtonElement {
+    const button = this.button(this.labelFor(id), () => void this.invoke(id), compact);
+    button.dataset.action = id;
+    button.title = title;
+    if (compact) {
+      const icon = id === 'swap-geometry' ? 'swap' : id === 'filter-only' ? 'filter' : 'hide';
+      setMeowIcon(button, icon);
+      button.append(this.doc.createTextNode(this.labelFor(id)));
     }
     return button;
   }
@@ -557,7 +604,7 @@ export class CanvasSelectionController {
     }
     if (this.busy || this.disposed) return;
     if (!this.host.isEnabled() || !this.host.isIdle()) {
-      this.host.toast('Hãy thoát chế độ vẽ/gộp/tách/nhóm của CVAT trước khi dùng Meow', 'error');
+      this.host.toast('Thoát chế độ vẽ/gộp/tách/nhóm trước.', 'error');
       return;
     }
     this.busy = true;
@@ -609,45 +656,74 @@ export class CanvasSelectionController {
     this.setSelected(next);
     this.host.toast(
       unfiltered
-        ? `Đã thêm ${added} vật thể xung quanh (gồm cả vật thể bị filter ẩn)`
-        : `Đã thêm ${added} vật thể xung quanh; không đọc được dữ liệu chưa lọc nên chỉ lấy các object đang hiển thị`,
+        ? `Thêm ${added} vật thể (kể cả bị filter ẩn)`
+        : `Thêm ${added} vật thể đang hiện; chưa đọc được dữ liệu ngoài filter`,
       unfiltered ? 'success' : 'info'
     );
   }
 
-  private showMenu(x: number, y: number, targetID: number | null): void {
+  private showMenu(
+    x: number,
+    y: number,
+    targetID: number | null,
+    trigger?: HTMLButtonElement
+  ): void {
     this.closeMenu();
-    const defs = availableActions(this.availability()).filter((d) => d.id !== 'clear');
+    this.menuReturnFocus =
+      trigger ?? (this.doc.activeElement instanceof HTMLElement ? this.doc.activeElement : null);
+    const defs = availableActions(this.availability());
     const active = this.host.getActiveClientID();
+    ensureMeowStyle(this.doc);
     const menu = this.doc.createElement('div');
-    menu.className = UI_CLASS;
+    menu.className = `${UI_CLASS} meow-selection-menu ant-dropdown-menu ant-dropdown-menu-root ant-dropdown-menu-vertical`;
+    menu.id = 'meow-selection-menu';
     menu.setAttribute('role', 'menu');
-    menu.style.cssText =
-      'position:fixed;z-index:2147483100;min-width:220px;padding:4px 0;background:#fff;border-radius:6px;' +
-      'box-shadow:0 6px 20px rgba(0,0,0,.25);';
-    menu.style.left = `${Math.min(x, this.win.innerWidth - 240)}px`;
-    menu.style.top = `${Math.min(y, this.win.innerHeight - 40 * (defs.length + 2))}px`;
-    const header = this.doc.createElement('div');
-    header.textContent = `Meow · ${this.selected.size} object`;
-    header.style.cssText =
-      'padding:4px 14px;font:600 11px/16px system-ui,sans-serif;color:#8c8c8c;';
-    menu.appendChild(header);
-    if (targetID !== null && targetID !== active)
-      menu.appendChild(
-        this.button('Đặt làm gốc', () => void this.invoke('set-source', targetID), false)
-      );
-    for (const def of defs)
-      menu.appendChild(
-        this.button(this.labelFor(def.id, def.label), () => void this.invoke(def.id), false)
-      );
-    menu.appendChild(this.button('Bỏ chọn (Esc)', () => void this.invoke('clear'), false));
+    menu.setAttribute('aria-label', 'Thao tác vùng chọn');
+    decorateMeowSurface(menu);
+    menu.style.left = `${Math.max(8, Math.min(x, this.win.innerWidth - 272))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, this.win.innerHeight - 480))}px`;
+    const groups: [string, MultiActionId[]][] = [
+      ['Cặp', ['swap-geometry', 'swap-attributes', 'sync-source-target']],
+      ['Lọc', ['filter-only', 'filter-add', 'filter-restore']],
+      ['Hiển thị', ['hide', 'show']],
+      ['Theo gốc', ['pin-bottom', 'pin-bottom-forward', 'sync-size', 'sync-size-track']],
+      ['Khác', ['add-surroundings', 'set-source', 'clear']],
+    ];
+    for (const [name, ids] of groups) {
+      const actions = ids.flatMap((id) => {
+        if (id === 'set-source') {
+          if (targetID === null || targetID === active) return [];
+          const button = this.button('Đặt làm gốc', () => void this.invoke(id, targetID), false);
+          button.dataset.action = id;
+          button.title = 'Dùng vật thể dưới con trỏ làm gốc';
+          return [button];
+        }
+        const def = defs.find((item) => item.id === id);
+        return def ? [this.actionButton(id, def.label, false)] : [];
+      });
+      if (!actions.length) continue;
+      const group = this.doc.createElement('div');
+      group.className = 'meow-selection-group ant-dropdown-menu-item-group';
+      group.setAttribute('role', 'group');
+      group.setAttribute('aria-label', name);
+      const heading = this.doc.createElement('div');
+      heading.className = 'meow-selection-group-label';
+      heading.textContent = name;
+      group.append(heading, ...actions);
+      menu.appendChild(group);
+    }
     this.doc.body.appendChild(menu);
     this.menuEl = menu;
+    this.toolbarEl?.querySelector('[aria-haspopup="menu"]')?.setAttribute('aria-expanded', 'true');
+    menu.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
   }
 
-  private closeMenu(): void {
+  private closeMenu(restoreFocus = false): void {
     this.menuEl?.remove();
     this.menuEl = null;
+    this.toolbarEl?.querySelector('[aria-haspopup="menu"]')?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && this.menuReturnFocus?.isConnected) this.menuReturnFocus.focus();
+    this.menuReturnFocus = null;
   }
 
   private readonly repositionToolbar = (): void => {
@@ -669,10 +745,11 @@ export class CanvasSelectionController {
     }
     if (!this.toolbarEl) {
       const el = this.doc.createElement('div');
-      el.className = UI_CLASS;
-      el.style.cssText =
-        'position:fixed;z-index:2147482500;display:flex;flex-wrap:wrap;align-items:center;gap:4px;max-width:420px;' +
-        'padding:4px 6px;background:rgba(255,255,255,.95);border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.25);';
+      ensureMeowStyle(this.doc);
+      el.className = `${UI_CLASS} meow-selection-toolbar`;
+      el.setAttribute('role', 'toolbar');
+      el.setAttribute('aria-label', 'Vùng chọn');
+      decorateMeowSurface(el);
       this.doc.body.appendChild(el);
       this.toolbarEl = el;
     }
@@ -680,22 +757,32 @@ export class CanvasSelectionController {
     this.placeToolbar(el);
     const availability = this.availability();
     const label = this.doc.createElement('span');
-    label.textContent = this.busy ? 'Meow · đang xử lý…' : `Meow · ${this.selected.size} object`;
-    label.style.cssText = 'font:600 12px/18px system-ui,sans-serif;color:#1f1f1f;padding:0 4px;';
+    label.textContent = this.busy ? 'Đang xử lý…' : `${this.selected.size} chọn`;
+    label.className = 'meow-selection-count';
     const children: HTMLElement[] = [label];
     if (!this.busy) {
-      for (const def of availableActions(availability)) {
-        if (def.scope === 'pair' || def.id === 'filter-only' || def.id === 'hide')
-          children.push(this.button(def.label, () => void this.invoke(def.id), true));
+      for (const id of ['swap-geometry', 'filter-only', 'hide'] as const) {
+        const def = availableActions(availability).find((item) => item.id === id);
+        if (def) children.push(this.actionButton(id, def.label, true));
       }
-      children.push(this.button('Hành động ▾', () => this.openMenuFromToolbar(el), true));
-      children.push(this.button('✕', () => void this.invoke('clear'), true));
+      const more = this.button('Thêm thao tác', () => this.openMenuFromToolbar(el, more), true);
+      more.classList.add('meow-selection-icon-button');
+      more.title = 'Thêm thao tác';
+      more.setAttribute('aria-haspopup', 'menu');
+      more.setAttribute('aria-expanded', String(this.menuEl !== null));
+      more.setAttribute('aria-controls', 'meow-selection-menu');
+      setMeowIcon(more, 'more');
+      const close = this.button('Bỏ chọn', () => void this.invoke('clear'), true);
+      close.classList.add('meow-selection-icon-button');
+      close.title = 'Bỏ chọn (Esc)';
+      setMeowIcon(close, 'close');
+      children.push(more, close);
     }
     el.replaceChildren(...children);
   }
 
-  private openMenuFromToolbar(el: HTMLElement): void {
+  private openMenuFromToolbar(el: HTMLElement, trigger: HTMLButtonElement): void {
     const rect = el.getBoundingClientRect();
-    this.showMenu(rect.left, rect.bottom + 4, null);
+    this.showMenu(rect.left, rect.bottom + 4, null, trigger);
   }
 }

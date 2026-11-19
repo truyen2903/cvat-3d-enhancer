@@ -30,59 +30,78 @@ export function normalizeWorkspaceFeatureOptions(
   ) as Required<WorkspaceFeatureOptions>;
 }
 
+export const WORKSPACE_FEATURE_GROUPS = [
+  'Hiển thị',
+  'Chỉnh box',
+  'Điều hướng',
+  'Chọn nhiều',
+] as const;
+export type WorkspaceFeatureGroup = (typeof WORKSPACE_FEATURE_GROUPS)[number];
+
 export const WORKSPACE_FEATURE_CONTROLS = [
   {
     key: 'enableTrackGhosts',
-    title: 'Hold Alt+G: track ghosts in 3D',
-    description: 'Show local keyframe wireframes and direction path while Alt+G is held',
+    group: 'Hiển thị',
+    title: 'Bóng track · Alt+G',
+    description: 'Giữ Alt+G để xem khung keyframe và đường đi của track.',
   },
   {
     key: 'enableMouseFrameNavigation',
-    title: 'Mouse side buttons: previous / next frame',
-    description: 'Use Back and Forward side buttons to navigate CVAT frames in 3D jobs',
+    group: 'Điều hướng',
+    title: 'Chuyển frame bằng nút chuột',
+    description: 'Dùng nút hông Back / Forward để lùi / tiến frame.',
   },
   {
     key: 'enableCanvasMultiSelect',
-    title: 'Shift+click / Shift+drag: multi-select boxes on the 3D canvas',
-    description:
-      'Pick a second box or marquee-select a cluster (current frame only), then swap, sync, align, filter or hide from a Meow menu',
+    group: 'Chọn nhiều',
+    title: 'Chọn nhiều box · Shift',
+    description: 'Shift+click hoặc Shift+kéo để chọn nhiều box trong frame hiện tại.',
   },
   {
     key: 'showCuboidBaseGuide',
-    title: 'Show cuboid base guide (Tia căn đáy box)',
-    description:
-      'Thin red guide at the bottom of the active box in Side/Front, including small panels',
+    group: 'Hiển thị',
+    title: 'Tia căn đáy box',
+    description: 'Hiện tia đỏ dưới box đang chọn ở góc Side / Front.',
   },
   {
     key: 'disableSidebarQuickFilter',
-    title: 'Double-click focuses without Quick filter',
-    description: 'Keep CVAT object focus on double-click and skip the automatic Quick filter',
+    group: 'Điều hướng',
+    title: 'Nhấp đúp không lọc nhanh',
+    description: 'Nhấp đúp để lấy nét box, bỏ qua Quick filter tự động.',
   },
   {
     key: 'enableDimensionSync',
-    title: 'Show H/W/L dimension sync buttons',
-    description: 'Synchronize dimensions across matching track keyframes from the object sidebar',
+    group: 'Chỉnh box',
+    title: 'Đồng bộ H / W / L',
+    description: 'Hiện nút đồng bộ kích thước cho các keyframe cùng thuộc tính.',
   },
   {
     key: 'enableHeadingFlip',
-    title: 'Show track heading tools (180°, L↔W, Yaw)',
-    description:
-      'Click flips/swaps current frame; Shift+click edits all keyframes; Yaw interpolates yaw only',
+    group: 'Chỉnh box',
+    title: 'Công cụ hướng box',
+    description: 'Hiện nút xoay 180°, đổi L↔W và nội suy Yaw.',
   },
   {
     key: 'enableOrthoKeyboard',
-    title: 'Edit cuboids with W/A/S/D/Q/E',
-    description: 'Move or rotate the selected cuboid while hovering Top/Side/Front',
+    group: 'Chỉnh box',
+    title: 'Chỉnh bằng W / A / S / D / Q / E',
+    description: 'Di chuyển hoặc xoay box khi trỏ vào Top / Side / Front.',
   },
   {
     key: 'fasterOrthoKeyboard',
-    title: 'Double W/A/S/D/Q/E sensitivity',
-    description:
-      'Use 2.5 px movement and 0.4° rotation instead of 1.25 px and 0.2°; Shift remains 4×',
+    group: 'Chỉnh box',
+    title: 'Tăng độ nhạy phím ×2',
+    description: 'Bước 2,5 px / 0,4° thay cho 1,25 px / 0,2°; Shift vẫn tăng ×4.',
   },
   {
     key: 'immediateKeyboardCommit',
-    title: 'Save keyboard edits immediately on key release',
-    description: 'Preview on keydown and save on keyup; unchecked saves after 250 ms of idle time',
+    group: 'Chỉnh box',
+    title: 'Lưu ngay khi nhả phím',
+    description: 'Bỏ chọn để lưu sau 250 ms không thao tác.',
   },
-] as const;
+] as const satisfies readonly {
+  key: keyof WorkspaceFeatureOptions;
+  group: WorkspaceFeatureGroup;
+  title: string;
+  description: string;
+}[];
