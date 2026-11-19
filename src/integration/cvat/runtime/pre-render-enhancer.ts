@@ -133,7 +133,9 @@ export interface CvatObjectStateLike {
   points?: number[] | null;
   attributes?: Record<number | string, string>;
   label?: {
+    id?: number;
     name?: string;
+    color?: string;
     attributes?: readonly {
       id: number;
       name: string;
@@ -150,6 +152,9 @@ export interface CvatObjectStateLike {
     reset?: () => void;
     points?: boolean;
     attributes?: boolean;
+    keyframe?: boolean;
+    occluded?: boolean;
+    hidden?: boolean;
   };
   __internal?: {
     save?: (frame: number, data: CvatObjectStateLike) => CvatObjectStateLike;

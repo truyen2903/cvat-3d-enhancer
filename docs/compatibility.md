@@ -190,3 +190,29 @@ Ghosts are a non-interactive Canvas2D overlay projected using the native camera'
 All writes use CVAT's existing local ObjectState adapters and require normal CVAT **Save** to persist to the server. Snapshot reads assume `__internal.save(frame, state)` with reset update flags returns the native interpolated state without creating a keyframe; point-only writes assume it promotes interior frames to keyframes while preserving untouched state. Attribute writes use the existing native `ObjectState.save()` path. The adapter preflights every target snapshot before writes and requests refresh/redraw once per geometry action, not once per keyframe. Native write failures mid-batch do not have an automatic rollback.
 
 Automated fixtures exercise these contracts, lock refusal, shortest-angle interpolation, selective attributes, native-card actions and ghost lifecycle/reuse, including the 100k-object performance regression. These five additions have not been verified against a live authorized CVAT job in this session; custom ObjectState implementations, native undo grouping and camera/shortcut behavior require live validation.
+
+## 16. Canvas multi-select (current frame only)
+
+Workspace option **Shift+click / Shift+drag: multi-select boxes on the 3D canvas** (default on).
+
+Interactions: Shift+click picks a target (CVAT's active object stays the source); Shift+left-drag draws a DOM marquee and selects boxes whose projected centers fall inside; Shift+Alt+drag/click removes; right-click inside the selection opens the Meow menu; Esc, frame change or activating another object clears. Shift+click on the selected target deselects it (no role swap; use the menu's "Đặt làm gốc"). Perspective and Top views are supported. Listeners are registered on `window` in the capture phase and only intercept events while Shift is held or a selection exists, so native rotate/truck/click/context-menu behavior is otherwise untouched. A right-click that follows a right-button camera drag (>5 px) is not intercepted. Nothing runs per render frame or per Redux update while idle; projection and picking run once on mouse release.
+
+Verified in the CVAT sources copied for this work (`canvas3dView.ts`, `canvas3dModel.ts`, `filters-modal.tsx`):
+
+- The perspective `click` handler activates the clicked cuboid in IDLE mode, and `contextmenu` opens CVAT's object menu when an object is active; both are pre-empted in the capture phase only while Meow intercepts.
+- `GROUP`/`MERGE` color boxes with `drawnObjects[id].cuboid.setColor(...)` and restore with the view's private `receiveShapeColor(state)`. Meow reuses `cuboid.setColor` and calls `receiveShapeColor` on `annotation.canvas.instance.view` when present, falling back to the entry's label color. The grouping color constant is not readable at runtime, so Meow uses its own highlight color (`#ffd400`). Stored annotation colors are never modified.
+- The filter is `changeAnnotationsFilters(filters)` followed by `fetchAnnotationsAsync()`; `annotation.annotations.filters` is an array whose first item is a JSONLogic object (second item: keypoint logic, preserved). `objectID` is a filter field (`filters-modal.tsx`).
+
+Assumed (from cvat-ui/cvat-core knowledge, not visible in the copied sources) and requiring a live check:
+
+- `objectID` evaluates to the object's `clientID` in cvat-core's annotation filter.
+- Thunks cannot be dispatched from the page, so Meow dispatches the plain actions those thunks end with: `CHANGE_ANNOTATIONS_FILTERS`, then `FETCH_ANNOTATIONS_SUCCESS` with states from `job.annotations.get(frame, showAllInterpolationTracks, filters)`; after writes `UPDATE_ANNOTATIONS_SUCCESS` with `{states, history, minZ, maxZ}` where `history = await job.actions.get()`. Action names/payloads match cvat-ui's `AnnotationActionTypes` as remembered.
+- "Đặt làm gốc" dispatches `ACTIVATE_OBJECT` with `activatedStateID`.
+- `ObjectState.save()` delegates to the same cvat-core call as `__internal.save(frame, state)` and therefore records core action history. The previously missing piece for Undo was the Redux `history` snapshot that cvat-ui uses to enable Undo/Ctrl+Z; it is refreshed by `UPDATE_ANNOTATIONS_SUCCESS`.
+- Setting `state.keyframe = true` (+ unchanged `points`) and calling `save()` turns an interpolated neighbor frame into a keyframe with its current values; neighbor snapshots are read with `__internal.save(frame, state)` after `updateFlags.reset()` (the existing read idiom).
+- `state.hidden` + `save()` updates the sidebar eye state; hide/show is a UI flag and is not an undo entry.
+- `job.annotations.get(frame, allTracks, [])` is served from cvat-core's in-memory collection (no server request) and is the "unfiltered" source for "Thêm vật thể xung quanh"; without it Meow falls back to the drawn objects and says so.
+
+Limits: only frame f is written; each written object/frame is a separate cvat-core history entry (several Ctrl+Z presses per multi-object action); neighbor pinning assumes linear interpolation; locked and outside objects are skipped; selection is lost on frame change; Shift+drag in zoomed/maximized orthographic views and Side/Front views is not handled. During CVAT draw/group/merge/split modes (`annotation.canvas.activeControl` is not `cursor`) the Shift gestures are left to CVAT.
+
+Existing sidebar buttons (H/W/L, 180°, L↔W, Yaw, Attr, RS) keep their native `ObjectState`/`__internal.save` writes (the same cvat-core call as `ObjectState.save()`), and now also run the same Redux refresh after writing so CVAT's Undo/Redo state is current. The single-frame 180° and H/W/L paths still emit a `canvas.edited` event (cvat-ui's own `updateAnnotationsAsync`), which records one extra equal-valued history entry; replacing that event with the Redux refresh was left out to keep behavior and tests unchanged until verified on a live job.

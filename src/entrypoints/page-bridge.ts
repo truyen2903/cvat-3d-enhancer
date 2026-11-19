@@ -48,6 +48,15 @@ import {
   type FollowModelLike,
   type FollowViewLike,
 } from '../integration/cvat/runtime/camera-follow';
+import { CanvasSelectionController } from '../integration/cvat/runtime/canvas-selection';
+import type { ProjectionCamera } from '../integration/cvat/runtime/canvas-picking';
+import { MultiObjectRunner } from '../integration/cvat/runtime/multi-object-actions';
+import {
+  readCvatContext,
+  readUnfilteredFrameStates,
+  refreshCvatAnnotations,
+} from '../integration/cvat/runtime/cvat-annotation-write';
+import { showMeowToast } from '../integration/cvat/runtime/meow-toast';
 import type { OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
 import {
   OrthoCuboidEditor,
@@ -97,7 +106,7 @@ const MAX_TARGETED_SIDEBAR_CARDS = 128;
 
 const IGNORED_MUTATION_SELECTOR =
   `.cvat-appearance-block, .${BASE_GUIDE_CLASS}, ` +
-  '#meow-toast-stack, #cvat-3d-enhancer-workspace-settings-section, ' +
+  '#meow-toast-stack, .meow-selection-ui, #cvat-3d-enhancer-workspace-settings-section, ' +
   '[data-enhancer-workspace-settings], .ant-select-dropdown, .ant-tooltip, .ant-popover';
 
 const CAMERA_KEY_MAPPING: Record<
@@ -124,6 +133,7 @@ function isIgnoredMutationNode(node: Node): boolean {
   if (
     el.id === 'meow-toast-stack' ||
     el.id === 'meow-toast-style' ||
+    el.classList.contains('meow-selection-ui') ||
     el.id === 'cvat-3d-enhancer-workspace-settings-section' ||
     el.classList.contains(BASE_GUIDE_CLASS) ||
     el.classList.contains('cvat-appearance-block') ||
@@ -213,6 +223,7 @@ export class PageBridgeRuntimeHost {
     () => this.preRenderEnhancer.getOptionsReadonly().followActiveObject ?? true
   );
   private trackGhosts: TrackGhostOverlay | null = null;
+  private selection: CanvasSelectionController | null = null;
   private baseGuide: CuboidBaseGuide | null = null;
   private cachedInstance: CvatCanvas3dLike | null = null;
   private domSyncRafId: number | null = null;
@@ -314,6 +325,63 @@ export class PageBridgeRuntimeHost {
           : null;
       }
     ));
+    const multiRunner = new MultiObjectRunner({
+      getStore: () => this.reduxStore,
+      afterWrite: () => {
+        this.invalidateSceneObjectCaches();
+        this.preRenderEnhancer.requestViewsRedraw();
+      },
+      toast: (message, kind) => {
+        showMeowToast(this.doc, message, kind);
+      },
+    });
+    this.selection = new CanvasSelectionController(this.doc, this.win, {
+      isEnabled: () => this.preRenderEnhancer.getOptionsReadonly().enableCanvasMultiSelect ?? true,
+      isIdle: () => {
+        const control = readCvatContext(this.reduxStore).activeControl;
+        return control === null || control.toLowerCase() === 'cursor';
+      },
+      getFrame: () => readCvatContext(this.reduxStore).frame,
+      getActiveClientID: () => this.getActiveNumericClientId(),
+      getCamera: (canvas) =>
+        this.preRenderEnhancer.getLastRenderCameraForCanvas(canvas) as ProjectionCamera | null,
+      getDrawnObjects: () => this.getActiveCanvas3dInstance()?.view?.drawnObjects ?? null,
+      getDrawnEntry: (id) => this.getDrawnObjectEntryById(this.getActiveCanvas3dInstance(), id),
+      restoreColor: (entry) => this.restoreCuboidColor(entry),
+      listUnfilteredFrameObjects: async () => {
+        const states = await readUnfilteredFrameStates(this.reduxStore);
+        if (!states) return null;
+        const boxes: { id: number; points: number[] }[] = [];
+        for (const state of states) {
+          const points = state.points;
+          if (
+            typeof state.clientID === 'number' &&
+            !state.outside &&
+            Array.isArray(points) &&
+            points.length >= 9
+          )
+            boxes.push({ id: state.clientID, points });
+        }
+        return boxes;
+      },
+      filterHistorySize: () => multiRunner.filterHistory.size,
+      runAction: async (id, ids) => {
+        await multiRunner.run(id, ids, this.getActiveNumericClientId());
+      },
+      activate: (clientID) => {
+        this.reduxStore?.dispatch({
+          type: 'ACTIVATE_OBJECT',
+          payload: {
+            activatedStateID: clientID,
+            activatedElementID: null,
+            activatedAttributeID: null,
+          },
+        });
+      },
+      toast: (message, kind) => {
+        showMeowToast(this.doc, message, kind);
+      },
+    });
     this.syncKeyboardEnabledAttribute();
     this.preRenderEnhancer.setCanvasRenderListener((canvas, camera, scene) => {
       trackGhosts.render(canvas, camera as OrthoCameraLike);
@@ -453,6 +521,7 @@ export class PageBridgeRuntimeHost {
             hasRelevantMutation = true;
             if (rec.attributeName === 'data-frame-number') {
               this.trackGhosts?.clear();
+              this.selection?.clear();
               this.invalidateSceneObjectCaches();
               pendingChildListChange = true;
             }
@@ -671,6 +740,8 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.setCanvasRenderListener(null);
       trackGhosts.dispose();
       this.trackGhosts = null;
+      this.selection?.dispose();
+      this.selection = null;
       baseGuide.clear();
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
@@ -841,6 +912,7 @@ export class PageBridgeRuntimeHost {
         this.tryMountObjectItemDimensionSyncControls();
         this.baseGuide?.refresh();
         this.trackGhosts?.refreshEnabled();
+        this.selection?.refreshEnabled();
       }
     );
   }
@@ -874,10 +946,18 @@ export class PageBridgeRuntimeHost {
         : opts,
       {
         isAvailable: (id, card) => sidebarHasRideState(this.doc, id, card),
-        sync: (id) => syncSidebarRideState(this.doc, id),
+        sync: async (id) => {
+          const result = await syncSidebarRideState(this.doc, id);
+          if (result.updatedKeyframes > 0) await this.syncReduxAfterWrite();
+          return result;
+        },
         getYawRangeOptions: (id) => sidebarYawRangeOptions(this.doc, id),
         getAttributes: (id) => sidebarMutableAttributes(this.doc, id),
-        syncAttribute: (id, attr) => syncSidebarMutableAttribute(this.doc, id, attr),
+        syncAttribute: async (id, attr) => {
+          const result = await syncSidebarMutableAttribute(this.doc, id, attr);
+          if (result.updatedKeyframes > 0) await this.syncReduxAfterWrite();
+          return result;
+        },
       }
     );
   }
@@ -936,8 +1016,45 @@ export class PageBridgeRuntimeHost {
         }
       },
     });
-    if (result.syncedFrames > 0) await sidebar?.refresh?.();
+    if (result.syncedFrames > 0) {
+      // Same Redux sync cvat-ui's updateAnnotationsAsync performs, so CVAT's Undo/Ctrl+Z see the edit.
+      await this.syncReduxAfterWrite();
+      await sidebar?.refresh?.();
+    }
     return result;
+  }
+
+  private getActiveNumericClientId(): number | null {
+    const id = this.getActiveObjectClientId(this.getActiveCanvas3dInstance());
+    const numeric = id === null ? NaN : Number(id);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  /**
+   * Undo a Meow highlight the way CVAT's GROUP/MERGE modes do: ask the native view for the color
+   * (`receiveShapeColor`, private but reachable at runtime). Falls back to the label color.
+   */
+  private restoreCuboidColor(entry: CvatDrawnObjectEntry): void {
+    let color: string | undefined;
+    try {
+      const canvas = this.reduxStore?.getState().annotation as
+        { canvas?: { instance?: { view?: unknown } } } | undefined;
+      const view = canvas?.canvas?.instance?.view as
+        { receiveShapeColor?: (state: unknown) => unknown } | undefined;
+      if (typeof view?.receiveShapeColor === 'function') {
+        const value = view.receiveShapeColor(entry.state ?? entry.data);
+        if (typeof value === 'string') color = value;
+      }
+    } catch {
+      color = undefined;
+    }
+    color ??= entry.data.color ?? entry.data.labelColor ?? entry.state?.label?.color;
+    if (color) entry.cuboid.setColor?.(color);
+  }
+
+  /** Re-sync cvat-ui's Redux states + undo history after an extension-side write. */
+  private async syncReduxAfterWrite(): Promise<void> {
+    await refreshCvatAnnotations(this.reduxStore, 'update');
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
@@ -1193,6 +1310,7 @@ export class PageBridgeRuntimeHost {
         }
 
         this.trackGhosts?.contextChanged(nextFrame, nextActivatedId);
+        this.selection?.contextChanged(nextFrame, nextActivatedId);
         this.hasReduxSnapshot = true;
         this.lastReduxFrame = nextFrame;
         this.lastReduxActivatedId = nextActivatedId;
@@ -1265,6 +1383,7 @@ export class PageBridgeRuntimeHost {
     this.hookedSetupCanvases.add(canvas);
     canvas.addEventListener('canvas.setup', () => {
       this.trackGhosts?.clear();
+      this.selection?.onCanvasSetup();
       this.invalidateSceneObjectCaches();
       this.viewsMapDirty = true;
       this.preRenderEnhancer.markViewStructureChanged();

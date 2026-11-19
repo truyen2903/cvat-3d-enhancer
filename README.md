@@ -77,6 +77,38 @@ Chọn cuboid track rồi **giữ Alt+G** trong view 3D chính: Meow vẽ wirefr
 
 Overlay tự mất khi thả G hoặc Alt, mất focus, đổi object/frame, hoặc tắt **Hold Alt+G: track ghosts in 3D** trong Workspace (mặc định bật). Không nhận hotkey trong ô nhập liệu. Hình học và bộ đệm chiếu được tạo một lần khi nhấn, dùng lại khi camera render; không đọc track hay cấp phát hình học mỗi tick. Overlay nằm trên WebGL nên không bị point cloud che khuất. Alt+G không trùng các phím Meow hiện có; phím tắt CVAT tùy chỉnh/hệ điều hành vẫn cần kiểm tra trên máy thực tế.
 
+### Chọn nhiều box trên canvas 3D (chỉ frame hiện tại)
+
+Bật bằng **Shift+click / Shift+drag: multi-select boxes on the 3D canvas** trong Workspace (mặc định bật). Mọi thao tác chỉ ghi vào **frame đang mở**; Meow không đụng tới các frame khác.
+
+| Thao tác                                        | Kết quả                                                                                                                                        |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Click thường                                    | CVAT chọn **gốc** (object active, vẫn dùng highlight và thẻ sidebar của CVAT).                                                                 |
+| **Shift+click** box khác (Perspective hoặc Top) | Box đó thành **đích**, tô màu vàng. CVAT không chọn lại box này. Shift+click lần nữa để bỏ đích; Shift+click box khác sẽ thay đích (tối đa 2). |
+| **Shift+kéo chuột trái**                        | Vẽ khung chọn; khi thả, chọn các box có **tâm** chiếu nằm trong khung. Camera không xoay. Kéo tiếp để thêm.                                    |
+| **Shift+Alt+kéo** (hoặc Shift+Alt+click)        | Bỏ các box trong khung (hoặc box dưới con trỏ) khỏi vùng chọn.                                                                                 |
+| **Chuột phải** trong vùng chọn                  | Mở menu Meow thay cho menu của CVAT. Chuột phải ngoài vùng chọn, hoặc kéo camera bằng chuột phải, giữ nguyên hành vi CVAT.                     |
+| **Esc**, đổi frame, click thường object khác    | Xóa vùng chọn.                                                                                                                                 |
+
+Thanh công cụ nhỏ ở góc trên trái canvas chính hiển thị số object đã chọn, các nút nhanh và **Hành động ▾** (cùng menu với chuột phải).
+
+Menu khi có **gốc + 1 đích**:
+
+- **Tráo vị trí + kích thước**: đổi x, y, z, rx, ry, rz, L, W, H giữa hai box.
+- **Tráo cả attribute**: thêm các attribute **mutable** (theo frame) và occluded. Attribute immutable (cấp track) không bao giờ bị đổi. Nếu hai box khác label, Meow chỉ tráo hình học và báo trong toast.
+- **Đồng bộ gốc → đích**: đích nhận L/W/H, attribute mutable và occluded của gốc; **không** đổi vị trí hay yaw. Khác label thì chỉ đồng bộ kích thước + occluded.
+
+Menu khi có **cụm** (chọn bằng khung):
+
+- **Thêm cụm vào filter hiện tại** (`filter hiện tại OR objectID in cụm`), **Chỉ lọc cụm này**, **Trả về filter trước** (Meow giữ tối đa 10 filter trước đó).
+- **Ẩn cụm / Hiện lại cụm**: dùng cờ `hidden` của CVAT (biểu tượng con mắt ở sidebar).
+- **Ghim đáy theo gốc**: gốc là object đang active. Mỗi box khác giữ nguyên H và có `z = đáy_gốc + H/2`.
+- **Đồng bộ kích thước theo gốc**: box cùng label nhận L/W/H của gốc nhưng giữ đáy cũ (chỉnh z); box khác label bị bỏ qua và được đếm trong toast.
+- **Thêm vật thể xung quanh**: thêm các object (kể cả object đang bị filter ẩn) có tâm nằm quanh vùng chọn trên màn hình, đọc từ dữ liệu annotation đã có trong trình duyệt, không gọi server. Nếu không đọc được dữ liệu chưa lọc, Meow chỉ lấy các object đang hiển thị và nói rõ trong toast.
+- **Đặt làm gốc**: chuột phải đúng box đã chọn rồi chọn mục này để làm object active.
+
+Với track, ghi tại frame f biến f thành keyframe. Để các frame lân cận không bị lệch, Meow đặt **keyframe giữ nguyên giá trị** tại f−1 và f+1 nếu hai frame đó đang được nội suy (nằm trong track, không outside). Object bị khóa hoặc outside bị bỏ qua. Mỗi object/frame ghi một mục lịch sử của CVAT, nên **Ctrl+Z** hoàn tác từng bước; một thao tác cặp có thể cần vài lần Ctrl+Z. Sau khi ghi, Meow đồng bộ Redux của CVAT để nút Undo/Redo hoạt động. Dùng **Save** của CVAT để lưu lên server.
+
 ### Chỉnh cuboid bằng bàn phím
 
 Chọn object, đưa chuột vào vùng **Top**, **Side** hoặc **Front**, rồi sử dụng:
@@ -102,18 +134,19 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 
 Meow thêm các checkbox vào tab Workspace của CVAT. Tên dưới đây khớp với giao diện hiện tại:
 
-| Tùy chọn                                                | Công dụng                                                 |
-| ------------------------------------------------------- | --------------------------------------------------------- |
-| Keep active object fixed on screen when changing frames | Bám camera theo object đang chọn khi chuyển frame.        |
-| Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                            |
-| Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.    |
-| Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D. |
-| Show H/W/L dimension sync buttons                       | Hiện H/W/L và bộ chọn thuộc tính Attr.                    |
-| Show track heading tools (180°, L↔W, Yaw)               | Hiện nút lật, đổi L/W và nội suy yaw.                     |
-| Hold Alt+G: track ghosts in 3D                          | Bật ghost box và đường nối tâm khi giữ Alt+G.             |
-| Edit cuboids with W/A/S/D/Q/E                           | Bật chỉnh box bằng bàn phím trong Top/Side/Front.         |
-| Double W/A/S/D/Q/E sensitivity                          | Dùng bước di chuyển và xoay lớn gấp đôi.                  |
-| Save keyboard edits immediately on key release          | Lưu khi thả phím; khi tắt, chờ 250 ms không thao tác.     |
+| Tùy chọn                                                      | Công dụng                                                      |
+| ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Keep active object fixed on screen when changing frames       | Bám camera theo object đang chọn khi chuyển frame.             |
+| Show cuboid base guide                                        | Hiện tia căn đáy ở Side/Front.                                 |
+| Double-click focuses without Quick filter                     | Giữ focus và bỏ Quick filter tự động khi double-click.         |
+| Mouse side buttons: previous / next frame                     | Nút hông Back lùi frame, Forward tiến frame trong job 3D.      |
+| Show H/W/L dimension sync buttons                             | Hiện H/W/L và bộ chọn thuộc tính Attr.                         |
+| Show track heading tools (180°, L↔W, Yaw)                     | Hiện nút lật, đổi L/W và nội suy yaw.                          |
+| Hold Alt+G: track ghosts in 3D                                | Bật ghost box và đường nối tâm khi giữ Alt+G.                  |
+| Edit cuboids with W/A/S/D/Q/E                                 | Bật chỉnh box bằng bàn phím trong Top/Side/Front.              |
+| Shift+click / Shift+drag: multi-select boxes on the 3D canvas | Chọn cặp/cụm box trên canvas và mở menu Meow (frame hiện tại). |
+| Double W/A/S/D/Q/E sensitivity                                | Dùng bước di chuyển và xoay lớn gấp đôi.                       |
+| Save keyboard edits immediately on key release                | Lưu khi thả phím; khi tắt, chờ 250 ms không thao tác.          |
 
 Các tùy chọn được lưu trong cài đặt của CVAT trên trình duyệt và bản sao dự phòng của Meow. Các tính năng bổ sung gần đây mặc định bật để giữ hành vi hiện tại.
 

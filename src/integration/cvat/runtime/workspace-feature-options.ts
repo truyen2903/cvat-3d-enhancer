@@ -9,6 +9,7 @@ export const WORKSPACE_FEATURE_DEFAULTS = {
   fasterOrthoKeyboard: true,
   immediateKeyboardCommit: true,
   enableMouseFrameNavigation: true,
+  enableCanvasMultiSelect: true,
 } as const;
 
 export type WorkspaceFeatureOptions = {
@@ -39,6 +40,12 @@ export const WORKSPACE_FEATURE_CONTROLS = [
     key: 'enableMouseFrameNavigation',
     title: 'Mouse side buttons: previous / next frame',
     description: 'Use Back and Forward side buttons to navigate CVAT frames in 3D jobs',
+  },
+  {
+    key: 'enableCanvasMultiSelect',
+    title: 'Shift+click / Shift+drag: multi-select boxes on the 3D canvas',
+    description:
+      'Pick a second box or marquee-select a cluster (current frame only), then swap, sync, align, filter or hide from a Meow menu',
   },
   {
     key: 'showCuboidBaseGuide',
