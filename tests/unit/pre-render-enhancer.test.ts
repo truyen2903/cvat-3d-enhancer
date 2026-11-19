@@ -1,21 +1,11 @@
 import { WORKSPACE_FEATURE_DEFAULTS } from '../../src/integration/cvat/runtime/workspace-feature-options';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  type CvatInternalCanvas3dLike,
+  type Cvat3dWorkspaceRenderOptions,
   type CvatObjectStateLike,
-  type ThreeObject3DLike,
-  clearCuboidPointColorCache,
-  computeHueSeparationDegrees,
-  computePerceptualColorDistance,
-  computeWcagContrastRatio,
-  Cvat3dPreRenderEnhancer,
-  getDistinctCuboidColor,
-  getOriginalGeometryPositions,
   injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   optimizeOrthographicRaycastPlanes,
-  OVERLAP_RGB_WHITE_BG,
-  parseHexColorToNormalizedRgb,
   readRenderOptionsFromClientSettings,
   syncTrackCuboidDimension,
   writeRenderOptionsToClientSettings,
@@ -23,6 +13,7 @@ import {
 
 describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () => {
   it('persists options inside CVAT native localStorage["clientSettings"].workspace.cvat3dEnhancer without losing existing settings', () => {
+    window.localStorage.clear();
     window.localStorage.setItem(
       'clientSettings',
       JSON.stringify({
@@ -32,9 +23,8 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     );
 
     writeRenderOptionsToClientSettings({
-      whiteBackground: true,
-      enableScattering: true,
-      colorPointsByCuboid: false,
+      enableHeadingFlip: false,
+      followActiveObject: false,
     });
 
     const raw = JSON.parse(window.localStorage.getItem('clientSettings') ?? '{}') as Record<
@@ -47,23 +37,14 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     const readBack = readRenderOptionsFromClientSettings();
     expect(readBack).toEqual({
       ...WORKSPACE_FEATURE_DEFAULTS,
-      whiteBackground: true,
-      enableScattering: true,
-      colorPointsByCuboid: false,
-      hideGroundPoints: false,
-      fixedOrthoPointSize: true,
-      followActiveObject: true,
+      enableHeadingFlip: false,
+      followActiveObject: false,
     });
   });
 
   it('restores enhancer options even after CVAT SettingsModal overwrites clientSettings without cvat3dEnhancer', () => {
     window.localStorage.clear();
-    writeRenderOptionsToClientSettings({
-      whiteBackground: true,
-      enableScattering: false,
-      colorPointsByCuboid: true,
-      fixedOrthoPointSize: false,
-    });
+    writeRenderOptionsToClientSettings({ followActiveObject: false });
 
     // Simulate CVAT saving its own Redux settings snapshot (drops our key)
     window.localStorage.setItem(
@@ -72,524 +53,87 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     );
 
     const restored = readRenderOptionsFromClientSettings();
-    expect(restored).toEqual({
-      ...WORKSPACE_FEATURE_DEFAULTS,
-      whiteBackground: true,
-      enableScattering: false,
-      colorPointsByCuboid: true,
-      hideGroundPoints: false,
-      fixedOrthoPointSize: false,
-      followActiveObject: true,
-    });
+    expect(restored).toEqual({ ...WORKSPACE_FEATURE_DEFAULTS, followActiveObject: false });
 
     // clientSettings must be healed while keeping CVAT's own values
     const healed = JSON.parse(window.localStorage.getItem('clientSettings') ?? '{}') as {
       player?: { frameStep?: number };
-      workspace?: { autoSave?: boolean; cvat3dEnhancer?: { colorPointsByCuboid?: boolean } };
+      workspace?: { autoSave?: boolean; cvat3dEnhancer?: { followActiveObject?: boolean } };
     };
     expect(healed.player?.frameStep).toBe(5);
     expect(healed.workspace?.autoSave).toBe(false);
-    expect(healed.workspace?.cvat3dEnhancer?.colorPointsByCuboid).toBe(true);
+    expect(healed.workspace?.cvat3dEnhancer?.followActiveObject).toBe(false);
+  });
+
+  it('drops removed point cloud options from previously saved settings', () => {
+    window.localStorage.clear();
+    window.localStorage.setItem(
+      'cvat3dEnhancerSettings',
+      JSON.stringify({
+        whiteBackground: true,
+        enableScattering: true,
+        colorPointsByCuboid: true,
+        hideGroundPoints: true,
+        fixedOrthoPointSize: false,
+        enlargePerspectivePoints: false,
+        enableActiveObjectWarnings: true,
+        followActiveObject: false,
+      })
+    );
+
+    const restored = readRenderOptionsFromClientSettings();
+    expect(restored).toEqual({ ...WORKSPACE_FEATURE_DEFAULTS, followActiveObject: false });
+
+    writeRenderOptionsToClientSettings(restored);
+    const stored = JSON.parse(window.localStorage.getItem('clientSettings') ?? '{}') as {
+      workspace?: { cvat3dEnhancer?: Record<string, unknown> };
+    };
+    expect(Object.keys(stored.workspace?.cvat3dEnhancer ?? {}).sort()).toEqual(
+      Object.keys(restored).sort()
+    );
   });
 
   it('injects native checkboxes into .cvat-workspace-settings and triggers callback on tick (both via input change and label click)', () => {
     document.body.innerHTML = `<div class="cvat-workspace-settings"><div class="ant-row css-n0gjrg"></div></div>`;
-    let current = {
-      whiteBackground: false,
-      enableScattering: false,
-      colorPointsByCuboid: false,
-    };
-    const onChangeSpy = vi.fn((next) => {
+    let current: Cvat3dWorkspaceRenderOptions = { followActiveObject: true };
+    const onChangeSpy = vi.fn((next: Cvat3dWorkspaceRenderOptions) => {
       current = next;
     });
 
     const mounted = injectCvatWorkspaceSettingsControls(document, () => current, onChangeSpy);
     expect(mounted).toBe(true);
-
-    const boxCheckbox = document.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="colorPointsByCuboid"]'
-    );
-    expect(boxCheckbox).not.toBeNull();
-    expect(boxCheckbox!.style.position).toBe('absolute');
-    boxCheckbox!.checked = true;
-    boxCheckbox!.dispatchEvent(new Event('change'));
-
-    expect(onChangeSpy).toHaveBeenCalledWith({
-      whiteBackground: false,
-      enableScattering: false,
-      colorPointsByCuboid: true,
-    });
-
-    // Clicking on the label/inner span (not the raw input) must also toggle cleanly once
-    const bgInput = document.querySelector<HTMLInputElement>(
-      'input[data-enhancer-opt="whiteBackground"]'
-    );
-    const bgLabel = bgInput?.closest('label');
-    expect(bgLabel?.className).toContain('css-n0gjrg');
-    bgLabel?.click();
-    expect(bgInput?.checked).toBe(true);
-    expect(current.whiteBackground).toBe(true);
-  });
-
-  it('colors each cuboid distinctly, assigns a 3rd overlap color for overlapping boxes, uses 100% black/white when scattering is off, and freezes colors during box drag until frame change', () => {
-    // 4 points:
-    // - point 0 at (-2, 0, 0): inside Box #1 only
-    // - point 1 at (2, 0, 0): inside Box #2 only
-    // - point 2 at (0, 0, 0): inside BOTH Box #1 and Box #2 (overlap!)
-    // - point 3 at (50, 50, 50): outside all boxes
-    const positionArray = new Float32Array([-2, 0, 0, 2, 0, 0, 0, 0, 0, 50, 50, 50]);
-    const colorArray = new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-
-    const pointsObj = {
-      type: 'Points',
-      geometry: {
-        attributes: {
-          position: { array: positionArray, needsUpdate: false },
-          color: { array: colorArray, needsUpdate: false },
-        },
-      },
-      material: {
-        size: 0.05,
-        sizeAttenuation: true,
-        transparent: false,
-        opacity: 1,
-        color: { r: 1, g: 1, b: 1, set: vi.fn() },
-        needsUpdate: false,
-      },
-    };
-
-    const bgSetSpy = vi.fn();
-    const origRenderSpy = vi.fn();
-    const origNotifySpy = vi.fn();
-
-    const box1SetColorSpy = vi.fn();
-    const box2SetColorSpy = vi.fn();
-    const box1MatColorSetSpy = vi.fn();
-    const box2MatColorSetSpy = vi.fn();
-
-    const mockCanvas3d: CvatInternalCanvas3dLike = {
-      model: {
-        data: {
-          imageID: 1,
-          configuration: { colorBy: 'Label' },
-        },
-      },
-      view: {
-        views: {
-          perspective: {
-            scene: {
-              background: { r: 0, g: 0, b: 0, set: bgSetSpy },
-              children: [pointsObj],
-            },
-          },
-        },
-        drawnObjects: {
-          1: {
-            data: {
-              clientID: 1,
-              labelColor: '#ff0000',
-              // Box #1 centered at (-1, 0, 0), size (4, 4, 4) -> X in [-3, 1]
-              points: [-1, 0, 0, 0, 0, 0, 4, 4, 4],
-              hidden: false,
-              outside: false,
-            },
-            cuboid: {
-              setColor: box1SetColorSpy,
-              perspective: {
-                material: {
-                  color: { r: 1, g: 0, b: 0, set: box1MatColorSetSpy },
-                },
-              },
-            },
-          },
-          2: {
-            data: {
-              clientID: 2,
-              labelColor: '#ff0000',
-              // Box #2 centered at (1, 0, 0), size (4, 4, 4) -> X in [-1, 3]
-              points: [1, 0, 0, 0, 0, 0, 4, 4, 4],
-              hidden: false,
-              outside: false,
-            },
-            cuboid: {
-              setColor: box2SetColorSpy,
-              perspective: {
-                material: {
-                  color: { r: 1, g: 0, b: 0, set: box2MatColorSetSpy },
-                },
-              },
-            },
-          },
-        },
-        notify: origNotifySpy,
-        render: origRenderSpy,
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: true,
-      enableScattering: true,
-      colorPointsByCuboid: true,
-    });
-
-    enhancer.ensureHooked(mockCanvas3d);
-
-    const expectedBox1 = getDistinctCuboidColor(1, 0, true, '#ff0000');
-    const expectedBox2 = getDistinctCuboidColor(2, 1, true, '#ff0000');
-
-    // Cuboid boxes themselves must NOT be touched at all by enhancer (neither setColor nor material.color.set)
-    expect(box1SetColorSpy).not.toHaveBeenCalled();
-    expect(box2SetColorSpy).not.toHaveBeenCalled();
-    expect(box1MatColorSetSpy).not.toHaveBeenCalled();
-    expect(box2MatColorSetSpy).not.toHaveBeenCalled();
-
-    // Box #1 and Box #2 must have distinct colors even though both share the same labelColor
-    expect(expectedBox1).not.toEqual(expectedBox2);
-
-    // Point 0 (inside Box #1 only) -> Box #1 distinct color
-    expect(colorArray[0]).toBeCloseTo(expectedBox1[0], 3);
-    expect(colorArray[1]).toBeCloseTo(expectedBox1[1], 3);
-    expect(colorArray[2]).toBeCloseTo(expectedBox1[2], 3);
-
-    // Point 1 (inside Box #2 only) -> Box #2 distinct color
-    expect(colorArray[3]).toBeCloseTo(expectedBox2[0], 3);
-    expect(colorArray[4]).toBeCloseTo(expectedBox2[1], 3);
-    expect(colorArray[5]).toBeCloseTo(expectedBox2[2], 3);
-
-    // Point 2 (inside BOTH Box #1 and Box #2) -> 3rd overlap color (OVERLAP_RGB_WHITE_BG)
-    expect(colorArray[6]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[0], 3);
-    expect(colorArray[7]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[1], 3);
-    expect(colorArray[8]).toBeCloseTo(OVERLAP_RGB_WHITE_BG[2], 3);
-
-    // Point 3 (outside all boxes, solid B/W ON on white background) -> 100% pure Black (0, 0, 0)
-    expect(colorArray[9]).toBeCloseTo(0, 3);
-    expect(colorArray[10]).toBeCloseTo(0, 3);
-    expect(colorArray[11]).toBeCloseTo(0, 3);
-
-    // Simulate dragging Box #1 to wrap Point 3 (50, 50, 50) on the SAME frame (imageID = 1)
-    mockCanvas3d.view!.drawnObjects![1]!.data.points = [50, 50, 50, 0, 0, 0, 4, 4, 4];
-    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'objects_updated');
-    mockCanvas3d.view!.render!();
-    // Even if a DOM canvas/zoom structure change fires mid-drag (`markViewStructureChanged`),
-    // dragged box positions must still remain frozen until Next/Prev frame!
-    enhancer.markViewStructureChanged();
-    mockCanvas3d.view!.render!();
-
-    // Point 3 MUST NOT change color while dragging on the same frame
-    expect(colorArray[9]).toBeCloseTo(0, 3);
-    // Perspective retains native zoom attenuation and a non-compounding 20% size increase.
-    const perspScn = mockCanvas3d.view!.views!.perspective!.scene!;
-    (pointsObj as { onBeforeRender?: (...args: unknown[]) => void }).onBeforeRender?.(
-      {},
-      perspScn,
-      { isPerspectiveCamera: true, type: 'PerspectiveCamera' },
-      pointsObj.geometry,
-      pointsObj.material
-    );
-    expect(pointsObj.material.size).toBeCloseTo(0.06);
-    expect(pointsObj.material.sizeAttenuation).toBe(true);
-
-    // Now simulate Next Frame -> Prev Frame (image_changed + initial objects_updated)
-    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'image_changed');
-    mockCanvas3d.view!.notify!(mockCanvas3d.model, 'objects_updated');
-
-    // After frame reload, Point 3 (now inside Box #1) updates to Box #1's color
-    expect(colorArray[9]).toBeCloseTo(expectedBox1[0], 3);
-    expect(colorArray[10]).toBeCloseTo(expectedBox1[1], 3);
-    expect(colorArray[11]).toBeCloseTo(expectedBox1[2], 3);
-  });
-
-  it('keeps original LiDAR colors for unboxed points when solid B/W is OFF and restores them after toggling', () => {
-    const originals = [0.2, 0.4, 0.6, 0.9, 0.1, 0.3];
-    const colorArray = new Float32Array(originals);
-    const points = {
-      type: 'Points',
-      geometry: {
-        attributes: {
-          position: { array: new Float32Array([10, 10, 10, 20, 20, 20]) },
-          color: { array: colorArray, needsUpdate: false },
-        },
-      },
-      material: { size: 0.05, sizeAttenuation: true, color: { r: 1, g: 1, b: 1, set: vi.fn() } },
-    };
-    const canvas3d: CvatInternalCanvas3dLike = {
-      model: { data: { imageID: 3 } },
-      view: {
-        views: { perspective: { scene: { background: null, children: [points] } } },
-        drawnObjects: {},
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: true,
-      enableScattering: false,
-      colorPointsByCuboid: true,
-    });
-    enhancer.ensureHooked(canvas3d);
-    originals.forEach((v, i) => expect(colorArray[i]).toBeCloseTo(v, 5));
-
-    // Turn solid B/W ON -> pure black on white background
-    enhancer.setOptions(
-      { whiteBackground: true, enableScattering: true, colorPointsByCuboid: true },
-      canvas3d
-    );
-    colorArray.forEach((v) => expect(v).toBeCloseTo(0, 5));
-
-    // Turn it OFF again -> original LiDAR colors restored exactly
-    enhancer.setOptions(
-      { whiteBackground: true, enableScattering: false, colorPointsByCuboid: true },
-      canvas3d
-    );
-    originals.forEach((v, i) => expect(colorArray[i]).toBeCloseTo(v, 5));
-  });
-
-  it('applies white background immediately on frame 0 even before PCD point cloud finishes loading (zero black flash)', () => {
-    const bgSetSpy = vi.fn();
-    const setClearColorSpy = vi.fn();
-
-    const emptyFrame0Canvas3d: CvatInternalCanvas3dLike = {
-      model: {
-        data: {
-          imageID: 0,
-        },
-      },
-      view: {
-        views: {
-          perspective: {
-            scene: {
-              background: { r: 0, g: 0, b: 0, set: bgSetSpy },
-              children: [], // Point cloud not yet loaded (async PCD arrayBuffer pending)
-            },
-            renderer: {
-              setClearColor: setClearColorSpy,
-            },
-          },
-        },
-        drawnObjects: {},
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: true,
-      enableScattering: false,
-      colorPointsByCuboid: false,
-    });
-
-    enhancer.ensureHooked(emptyFrame0Canvas3d);
-
-    // Must set background to 0xffffff immediately before PCD finishes loading
-    expect(bgSetSpy).toHaveBeenCalledWith(0xffffff);
-    expect(setClearColorSpy).toHaveBeenCalledWith(0xffffff, 1);
-  });
-
-  it('defaults Top/Side/Front orthographic views to fixed 3.5px point size and reverts to CVAT 0.5px when unchecked', () => {
-    const perspPoints = {
-      type: 'Points',
-      geometry: {
-        attributes: {
-          position: { array: new Float32Array([0, 0, 0]) },
-          color: { array: new Float32Array([1, 1, 1]) },
-        },
-      },
-      material: {
-        size: 0.05,
-        sizeAttenuation: true,
-        color: { r: 1, g: 1, b: 1, set: vi.fn() },
-      },
-    };
-    const topPoints = {
-      type: 'Points',
-      geometry: {
-        attributes: {
-          position: { array: new Float32Array([0, 0, 0]) },
-          color: { array: new Float32Array([1, 1, 1]) },
-        },
-      },
-      material: {
-        size: 0.5,
-        sizeAttenuation: true,
-        color: { r: 1, g: 1, b: 1, set: vi.fn() },
-      },
-    };
-
-    const canvas3d: CvatInternalCanvas3dLike = {
-      view: {
-        views: {
-          perspective: {
-            scene: { background: null, children: [perspPoints] },
-          },
-          top: {
-            scene: { background: null, children: [topPoints] },
-          },
-        },
-        drawnObjects: {},
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer();
-    enhancer.ensureHooked(canvas3d);
-
-    // By default (fixedOrthoPointSize: true), orthographic view point size is fixed at 3.5px
-    expect(topPoints.material.size).toBe(3.5);
-    expect(topPoints.material.sizeAttenuation).toBe(false);
-    expect(perspPoints.material.size).toBeCloseTo(0.06);
-    expect(perspPoints.material.sizeAttenuation).toBe(true);
-
-    // When turned OFF (fixedOrthoPointSize: false), reverts to CVAT native 0.5px
-    enhancer.setOptions(
-      {
-        whiteBackground: false,
-        enableScattering: false,
-        colorPointsByCuboid: false,
-        fixedOrthoPointSize: false,
-      },
-      canvas3d
-    );
-    expect(topPoints.material.size).toBe(0.5);
-    expect(topPoints.material.sizeAttenuation).toBe(true);
-    expect(perspPoints.material.size).toBeCloseTo(0.06);
-    expect(perspPoints.material.sizeAttenuation).toBe(true);
-  });
-
-  it('keeps PointsMaterial opaque (transparent = false) and disables cuboid depthWrite when scattering is enabled so active boxes never hide internal points', () => {
-    const perspPoints = {
-      type: 'Points',
-      geometry: {
-        attributes: {
-          position: { array: new Float32Array([0, 0, 0]) },
-          color: { array: new Float32Array([1, 1, 1]) },
-        },
-      },
-      material: {
-        size: 0.05,
-        sizeAttenuation: true,
-        transparent: true,
-        opacity: 0.82,
-        color: { r: 1, g: 1, b: 1, set: vi.fn() },
-      },
-    };
-    const activeCuboidPerspectiveMat = { depthWrite: true };
-    const activeCuboidTopMat = { depthWrite: true };
-
-    const canvas3d: CvatInternalCanvas3dLike = {
-      view: {
-        views: {
-          perspective: {
-            scene: { background: null, children: [perspPoints] },
-          },
-        },
-        drawnObjects: {
-          1: {
-            data: {
-              clientID: 1,
-              points: [0, 0, 0, 0, 0, 0, 4, 4, 4],
-            },
-            cuboid: {
-              perspective: { material: activeCuboidPerspectiveMat },
-              top: { material: activeCuboidTopMat },
-            },
-          },
-        },
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: true,
-      enableScattering: true,
-      colorPointsByCuboid: true,
-    });
-    enhancer.ensureHooked(canvas3d);
-
-    expect(perspPoints.material.transparent).toBe(false);
-    expect(perspPoints.material.opacity).toBe(1.0);
-    expect(activeCuboidPerspectiveMat.depthWrite).toBe(false);
-    expect(activeCuboidTopMat.depthWrite).toBe(false);
-  });
-
-  it('applies 3.5px fixed point size to newly opened zoomed Top/Side/Front canvases (both via views and via THREE.Points.prototype.onBeforeRender)', () => {
-    class MockThreePoints {
-      public type = 'Points';
-      public geometry = {
-        attributes: {
-          position: { array: new Float32Array([0, 0, 0]) },
-          color: { array: new Float32Array([1, 1, 1]) },
-        },
-      };
-      public material = {
-        size: 0.5,
-        sizeAttenuation: true,
-        transparent: false,
-        opacity: 1,
-        color: { r: 1, g: 1, b: 1, set: vi.fn() },
-        clone() {
-          return { ...this };
-        },
-      };
-      public onBeforeRender(..._args: unknown[]): void {
-        void _args;
-      }
+    for (const removed of [
+      'whiteBackground',
+      'enableScattering',
+      'colorPointsByCuboid',
+      'hideGroundPoints',
+      'fixedOrthoPointSize',
+      'enlargePerspectivePoints',
+      'enableActiveObjectWarnings',
+    ]) {
+      expect(document.querySelector(`input[data-enhancer-opt="${removed}"]`)).toBeNull();
     }
 
-    const perspPoints = new MockThreePoints();
-    perspPoints.material.size = 0.05;
-    const perspCanvas = document.createElement('canvas');
-    const perspScene = { background: null, children: [perspPoints] };
-
-    const canvas3d: CvatInternalCanvas3dLike = {
-      model: { data: { imageID: 5 } },
-      view: {
-        views: {
-          perspective: {
-            scene: perspScene,
-            renderer: { domElement: perspCanvas },
-          },
-        },
-        drawnObjects: {},
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: true,
-      enableScattering: false,
-      colorPointsByCuboid: false,
-      fixedOrthoPointSize: true,
-      followActiveObject: true,
-    });
-    enhancer.ensureHooked(canvas3d);
-    expect(perspPoints.material.size).toBeCloseTo(0.06);
-    expect(perspPoints.material.sizeAttenuation).toBe(true);
-
-    // 1. Simulate pressing zoom key on Top/Side/Front which opens a new standalone zoom canvas
-    // with its own MockThreePoints instance (not even registered in view.views)
-    const zoomPointsStandalone = new MockThreePoints();
-    zoomPointsStandalone.material.size = 0.5;
-    const zoomCanvas = document.createElement('canvas');
-    const zoomScene = { background: null, children: [zoomPointsStandalone] };
-    const orthoCamera = { isOrthographicCamera: true, type: 'OrthographicCamera' };
-
-    // When WebGLRenderer renders zoomPointsStandalone, Three.js invokes onBeforeRender
-    zoomPointsStandalone.onBeforeRender(
-      { domElement: zoomCanvas },
-      zoomScene,
-      orthoCamera,
-      zoomPointsStandalone.geometry,
-      zoomPointsStandalone.material
+    const followCheckbox = document.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="followActiveObject"]'
     );
+    expect(followCheckbox).not.toBeNull();
+    expect(followCheckbox!.style.position).toBe('absolute');
+    followCheckbox!.checked = false;
+    followCheckbox!.dispatchEvent(new Event('change'));
 
-    expect(zoomPointsStandalone.material.size).toBe(3.5);
-    expect(zoomPointsStandalone.material.sizeAttenuation).toBe(false);
+    expect(onChangeSpy).toHaveBeenCalledWith({ followActiveObject: false });
 
-    // 2. Also simulate a zoom canvas mounted into view.views['ortho_zoom_0'] on the same frame
-    const zoomPointsInViews = new MockThreePoints();
-    zoomPointsInViews.material.size = 0.5;
-    canvas3d.view!.views!['ortho_zoom_0'] = {
-      scene: { background: null, children: [zoomPointsInViews] },
-      renderer: { domElement: zoomCanvas },
-    };
-    enhancer.ensureHooked(canvas3d);
-
-    expect(zoomPointsInViews.material.size).toBe(3.5);
-    expect(zoomPointsInViews.material.sizeAttenuation).toBe(false);
+    // Clicking on the label/inner span (not the raw input) must also toggle cleanly once
+    const flipInput = document.querySelector<HTMLInputElement>(
+      'input[data-enhancer-opt="enableHeadingFlip"]'
+    );
+    const flipLabel = flipInput?.closest('label');
+    expect(flipLabel?.className).toContain('css-n0gjrg');
+    expect(flipInput?.checked).toBe(true);
+    flipLabel?.click();
+    expect(flipInput?.checked).toBe(false);
+    expect(current.enableHeadingFlip).toBe(false);
   });
 
   it('injects H, W, L dimension sync icons into CVAT object item sidebar and syncs dimensions ONLY to frames with 100% identical attributes', async () => {
@@ -719,33 +263,6 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     expect(trackShapes[15]!.points[5]).toBeCloseTo(0, 4);
   });
 
-  it('guarantees high contrast against both background and cuboid labelColor for internal box points and caches color per clientID across frames', () => {
-    const labelColors = ['#0047c7', '#40ff73', '#ff0000', '#c794ff', '#ffd11a', '#008040'];
-
-    for (const whiteBackground of [true, false]) {
-      const bgRgb: readonly [number, number, number] = whiteBackground ? [1, 1, 1] : [0, 0, 0];
-      for (const labelHex of labelColors) {
-        clearCuboidPointColorCache();
-        const labelRgb = parseHexColorToNormalizedRgb(labelHex);
-        for (let id = 1; id <= 24; id += 1) {
-          const pointRgb = getDistinctCuboidColor(id, id, whiteBackground, labelHex);
-          const bgContrast = computeWcagContrastRatio(pointRgb, bgRgb);
-          const boxDist = computePerceptualColorDistance(pointRgb, labelRgb);
-          const hueDiff = computeHueSeparationDegrees(pointRgb, labelRgb);
-
-          expect(bgContrast).toBeGreaterThanOrEqual(4.2);
-          expect(boxDist).toBeGreaterThanOrEqual(0.5);
-          expect(hueDiff).toBeGreaterThanOrEqual(65);
-
-          // Subsequent lookups for the same clientID on later frames MUST return the exact cached color
-          // even if fallbackIndex or transient labelColorHex differs
-          const cachedOnNextFrame = getDistinctCuboidColor(id, id + 99, whiteBackground, undefined);
-          expect(cachedOnNextFrame).toEqual(pointRgb);
-        }
-      }
-    }
-  });
-
   it('simplifies subdivided orthographic raycast planes (sidePlane/topPlane/frontPlane) from 712x866 segments (1.23M triangles) to 1x1 segment (2 triangles)', () => {
     const disposeSpy = vi.fn();
     class MockPlaneGeometry {
@@ -794,99 +311,5 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
     // Subsequent calls on the same plane mesh are a fast no-op
     const count2 = optimizeOrthographicRaycastPlanes(sideScene, optimizedPlanes);
     expect(count2).toBe(0);
-  });
-
-  it('hides ground points only in Top while preserving main 3D, protected box points and elevated points', () => {
-    // 4 points:
-    // - Point 0: (0, 0, -1.6) -> Inside Box #1 centered at (0, 0, -1.5) with height 0.6. Even though z=-1.6 is near ground, it MUST BE KEPT!
-    // - Point 1: (10, 0, -1.6) -> Outside all boxes, at ground level (z=-1.6) -> MUST BE HIDDEN
-    // - Point 2: (10, 0, 0.5) -> Outside all boxes, but elevated (z=0.5m) -> MUST BE KEPT
-    // - Point 3: (12, 0, -1.62) -> Outside all boxes, at ground level (z=-1.62) -> MUST BE HIDDEN
-    const posArr = new Float32Array([0, 0, -1.6, 10, 0, -1.6, 10, 0, 0.5, 12, 0, -1.62]);
-    const colArr = new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-
-    const geom = {
-      attributes: {
-        position: { array: posArr, needsUpdate: false },
-        color: { array: colArr, needsUpdate: false },
-      },
-      drawRange: { start: 0, count: 4 },
-      setDrawRange(start: number, count: number) {
-        this.drawRange.start = start;
-        this.drawRange.count = count;
-      },
-    };
-
-    const mainPoints: ThreeObject3DLike = {
-      type: 'Points',
-      geometry: geom,
-      material: { size: 0.05, color: { r: 1, g: 1, b: 1, set: vi.fn() } },
-    };
-    const topPoints: ThreeObject3DLike = { ...mainPoints };
-    const canvas3d: CvatInternalCanvas3dLike = {
-      model: { data: { imageID: 10 } },
-      view: {
-        views: {
-          perspective: {
-            scene: {
-              background: null,
-              children: [mainPoints],
-            },
-          },
-          top: { scene: { background: null, children: [topPoints] } },
-        },
-        drawnObjects: {
-          1: {
-            data: {
-              clientID: 1,
-              points: [0, 0, -1.5, 0, 0, 0, 2, 2, 0.6], // wraps Point 0
-              hidden: false,
-              outside: false,
-            },
-            cuboid: {},
-          },
-        },
-      },
-    };
-
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      whiteBackground: false,
-      enableScattering: false,
-      colorPointsByCuboid: true,
-      hideGroundPoints: true,
-    });
-
-    enhancer.ensureHooked(canvas3d);
-
-    // Kept points: Point 0 (inside Box #1) and Point 2 (elevated point). Point 1 and Point 3 (ground) are hidden.
-    const topGeometry = topPoints.geometry!;
-    expect(topGeometry).not.toBe(geom);
-    expect(topGeometry.drawRange!.count).toBe(2);
-    expect(geom.drawRange.count).toBe(4);
-    expect(geom.attributes.position.array).toEqual(posArr);
-    expect(posArr[3]).toBe(10);
-
-    // Verify original positions can still be inspected by QA overlay via getOriginalGeometryPositions
-    const orig = getOriginalGeometryPositions(topGeometry);
-    expect(orig).not.toBeNull();
-    expect(orig!.length).toBe(12);
-    expect(orig![3]).toBeCloseTo(10, 3);
-    expect(orig![5]).toBeCloseTo(-1.6, 3); // Point 1 preserved in original cache
-
-    // Now toggle hideGroundPoints to false -> all 4 points must be restored
-    enhancer.setOptions(
-      {
-        whiteBackground: false,
-        enableScattering: false,
-        colorPointsByCuboid: true,
-        hideGroundPoints: false,
-      },
-      canvas3d
-    );
-
-    expect(topGeometry.drawRange!.count).toBe(4);
-    expect(geom.drawRange.count).toBe(4);
-    expect(posArr[3]).toBeCloseTo(10, 3);
-    expect(posArr[5]).toBeCloseTo(-1.6, 3);
   });
 });

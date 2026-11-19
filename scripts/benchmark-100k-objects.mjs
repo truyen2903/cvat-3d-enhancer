@@ -471,11 +471,7 @@ function measureNextFrameDefault() {
   for (let run = 0; run < 4; run += 1) {
     resetArrowHooks();
     const { canvas3d, perspScene } = createMockCanvas3d(false);
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
-      colorPointsByCuboid: false,
-      hideGroundPoints: false,
-    });
+    const enhancer = new Cvat3dPreRenderEnhancer(DEFAULT_CVAT_3D_RENDER_OPTIONS);
     enhancer.ensureHooked(canvas3d);
 
     const nextCloud = createPointsCloud(basePositions, baseColors);
@@ -508,11 +504,7 @@ function measureNextFrameDefault() {
 function measureFilterToggleDefault() {
   resetArrowHooks();
   const { canvas3d, perspScene } = createMockCanvas3d(false);
-  const enhancer = new Cvat3dPreRenderEnhancer({
-    ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
-    colorPointsByCuboid: false,
-    hideGroundPoints: false,
-  });
+  const enhancer = new Cvat3dPreRenderEnhancer(DEFAULT_CVAT_3D_RENDER_OPTIONS);
   enhancer.ensureHooked(canvas3d);
 
   const cloud = createPointsCloud(basePositions, baseColors);
@@ -549,66 +541,7 @@ function measureFilterToggleDefault() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. next-frame-colored-ground: colorPointsByCuboid + hideGroundPoints on Perspective + Top
-// ---------------------------------------------------------------------------
-function measureNextFrameColoredGround() {
-  // Lightweight JIT warmup on 200 cuboids + 6,000 points so V8 optimizes hot loops first
-  {
-    const { canvas3d, perspScene } = createMockCanvas3d(true);
-    const warmEnhancer = new Cvat3dPreRenderEnhancer({
-      ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
-      colorPointsByCuboid: true,
-      hideGroundPoints: true,
-    });
-    warmEnhancer.ensureHooked(canvas3d);
-    const warmCloud = createPointsCloud(
-      basePositions.subarray(0, 18_000),
-      baseColors.subarray(0, 18_000)
-    );
-    canvas3d.model.data.imageID = 1;
-    canvas3d.view.notify(canvas3d.model, 'image_changed');
-    perspScene.children = [warmCloud.perspPoints, ...meshList100k.slice(0, FILTERED_CUBOID_COUNT)];
-    canvas3d.view.onSceneImageLoaded(warmCloud);
-    canvas3d.view.drawnObjects = drawnObjects200;
-    canvas3d.view.notify(canvas3d.model, 'objects_updated');
-    canvas3d.view.render();
-  }
-
-  const samples = [];
-  for (let run = 0; run < 3; run += 1) {
-    resetArrowHooks();
-    const { canvas3d, perspScene } = createMockCanvas3d(true);
-    const enhancer = new Cvat3dPreRenderEnhancer({
-      ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
-      colorPointsByCuboid: true,
-      hideGroundPoints: true,
-    });
-    enhancer.ensureHooked(canvas3d);
-
-    const nextCloud = createPointsCloud(basePositions, baseColors);
-    const sceneChildren = new Array(CUBOID_COUNT + 1);
-    sceneChildren[0] = nextCloud.perspPoints;
-    for (let i = 0; i < CUBOID_COUNT; i += 1) {
-      sceneChildren[i + 1] = meshList100k[i];
-    }
-
-    const t0 = performance.now();
-    canvas3d.model.data.imageID = 1;
-    canvas3d.view.notify(canvas3d.model, 'image_changed');
-    perspScene.children = sceneChildren;
-    canvas3d.view.onSceneImageLoaded(nextCloud);
-    canvas3d.view.drawnObjects = drawnObjects100k;
-    canvas3d.view.notify(canvas3d.model, 'objects_updated');
-    canvas3d.view.render();
-    const elapsed = performance.now() - t0;
-
-    samples.push(elapsed);
-  }
-  return { medianMs: median(samples), runsMs: samples.map(roundMs) };
-}
-
-// ---------------------------------------------------------------------------
-// 4. steady-render-60-ticks: CameraFollower.tick + hover-locked Raycaster (30 active + 30 idle)
+// 3. steady-render-60-ticks: CameraFollower.tick + hover-locked Raycaster (30 active + 30 idle)
 // ---------------------------------------------------------------------------
 function measureSteadyRender60Ticks() {
   let activeId = '99999';
@@ -685,7 +618,7 @@ function measureSteadyRender60Ticks() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. state-lookup-100k: active ObjectState lookup on a 100k Redux states array
+// 4. state-lookup-100k: active ObjectState lookup on a 100k Redux states array
 // ---------------------------------------------------------------------------
 function measureStateLookup100k() {
   // Compare 60 state lookups (30 hits near tail `99999` + 30 misses `100005` for filtered object)
@@ -746,7 +679,6 @@ const results = {
   },
   'next-frame-default': measureNextFrameDefault(),
   'filter-toggle-default': measureFilterToggleDefault(),
-  'next-frame-colored-ground': measureNextFrameColoredGround(),
   'steady-render-60-ticks': measureSteadyRender60Ticks(),
   'state-lookup-100k': measureStateLookup100k(),
 };

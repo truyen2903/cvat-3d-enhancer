@@ -49,9 +49,6 @@ export const SYSTEM_DEFAULT_CONFIG: EnhancerConfig = Object.freeze({
     pointSizeValue: 0.05,
     gridVisible: true,
     axesVisible: true,
-    whiteBackground: false,
-    enableScattering: false,
-    colorPointsByCuboid: false,
   }),
   annotation: Object.freeze({
     colorBy: 'Label',
@@ -131,6 +128,12 @@ export const BUILT_IN_PRESETS: readonly PresetDefinition[] = Object.freeze([
   },
 ]);
 
+const REMOVED_VISUALIZATION_3D_KEYS = [
+  'whiteBackground',
+  'enableScattering',
+  'colorPointsByCuboid',
+] as const;
+
 /**
  * Migrates legacy configuration objects (e.g., schemaVersion 1 -> 2) before validation.
  */
@@ -154,6 +157,15 @@ export function migratePartialConfig(raw: unknown): PartialEnhancerConfig {
       delete (clone.appearance as Record<string, unknown>).backgroundColor;
     }
     clone.schemaVersion = CURRENT_SCHEMA_VERSION;
+  }
+
+  // Point cloud display options were removed; drop them so stored configs keep validating.
+  if (isPlainObject(clone.visualization3d)) {
+    const visualization3d: Record<string, unknown> = { ...clone.visualization3d };
+    for (const key of REMOVED_VISUALIZATION_3D_KEYS) {
+      delete visualization3d[key];
+    }
+    clone.visualization3d = visualization3d;
   }
 
   return PartialEnhancerConfigSchema.parse(clone);

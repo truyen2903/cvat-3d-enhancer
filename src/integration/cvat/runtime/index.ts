@@ -10,6 +10,7 @@ import type {
 import { PageBridge } from '../bridge';
 import { VersionDetector } from '../compatibility';
 import { CvatDomAdapter } from '../dom';
+import type { Cvat3dWorkspaceRenderOptions } from './pre-render-enhancer';
 
 export interface CanvasVisualConfigInput {
   readonly shapeOpacity?: number;
@@ -23,9 +24,6 @@ export interface CanvasVisualConfigInput {
   readonly canvasBackgroundColor?: string;
   readonly pointCloudCssBrightness?: number;
   readonly pointCloudCssContrast?: number;
-  readonly whiteBackground?: boolean;
-  readonly enableScattering?: boolean;
-  readonly colorPointsByCuboid?: boolean;
 }
 
 export interface PageRuntimeProbeResult {
@@ -35,11 +33,7 @@ export interface PageRuntimeProbeResult {
   readonly hasPerspectiveDom: boolean;
   readonly hasPerspectiveCanvas: boolean;
   readonly hasOrthographicViews: boolean;
-  readonly renderOptions?: {
-    readonly whiteBackground: boolean;
-    readonly enableScattering: boolean;
-    readonly colorPointsByCuboid: boolean;
-  };
+  readonly renderOptions?: Readonly<Cvat3dWorkspaceRenderOptions>;
 }
 
 export function createInitialCapabilityMap(): CapabilityMap {
@@ -310,18 +304,10 @@ export class CvatV2RuntimeAdapter implements Cvat3DRuntimeAdapter {
       config.orientationVisibility !== undefined ||
       config.colorBy !== undefined ||
       config.controlPointsSize !== undefined ||
-      config.focusedObjectPadding !== undefined ||
-      config.whiteBackground !== undefined ||
-      config.enableScattering !== undefined ||
-      config.colorPointsByCuboid !== undefined;
+      config.focusedObjectPadding !== undefined;
 
     if (needsBridge) {
-      if (
-        !this.capabilityRegistry.isSupported('cuboidAppearance') &&
-        config.whiteBackground === undefined &&
-        config.enableScattering === undefined &&
-        config.colorPointsByCuboid === undefined
-      ) {
+      if (!this.capabilityRegistry.isSupported('cuboidAppearance')) {
         throw new Error('Capability "cuboidAppearance" is not verified on the current runtime.');
       }
       await this.bridge.sendCommand('APPLY_CANVAS_VISUAL_CONFIG', config);

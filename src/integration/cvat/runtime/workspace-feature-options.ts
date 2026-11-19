@@ -7,7 +7,6 @@ export const WORKSPACE_FEATURE_DEFAULTS = {
   enableOrthoKeyboard: true,
   fasterOrthoKeyboard: true,
   immediateKeyboardCommit: true,
-  enlargePerspectivePoints: true,
   enableMouseFrameNavigation: true,
 } as const;
 
@@ -71,10 +70,5 @@ export const WORKSPACE_FEATURE_CONTROLS = [
     key: 'immediateKeyboardCommit',
     title: 'Save keyboard edits immediately on key release',
     description: 'Preview on keydown and save on keyup; unchecked saves after 250 ms of idle time',
-  },
-  {
-    key: 'enlargePerspectivePoints',
-    title: 'Enlarge main 3D points by 20%',
-    description: 'Keep native zoom scaling; Top/Side/Front point sizes are unaffected',
   },
 ] as const;

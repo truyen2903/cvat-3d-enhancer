@@ -70,7 +70,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     const internal = host as unknown as {
       preRenderEnhancer: Cvat3dPreRenderEnhancer;
       getActiveCanvas3dInstance: () => CvatInternalCanvas3dLike | null;
-      applyCanvasVisualConfig: (config: { whiteBackground: boolean }) => void;
+      applyCanvasVisualConfig: (config: { shapeOpacity: number }) => void;
     };
     vi.spyOn(internal, 'getActiveCanvas3dInstance').mockReturnValue(null);
     internal.preRenderEnhancer.setOptions({
@@ -80,17 +80,14 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       showCuboidBaseGuide: false,
       enableDimensionSync: false,
       enableOrthoKeyboard: false,
-      hideGroundPoints: true,
     });
-    internal.applyCanvasVisualConfig({ whiteBackground: true });
+    internal.applyCanvasVisualConfig({ shapeOpacity: 30 });
     expect(internal.preRenderEnhancer.getOptions()).toMatchObject({
-      whiteBackground: true,
       followActiveObject: false,
       disableSidebarQuickFilter: false,
       showCuboidBaseGuide: false,
       enableDimensionSync: false,
       enableOrthoKeyboard: false,
-      hideGroundPoints: true,
     });
   });
 

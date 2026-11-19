@@ -97,27 +97,28 @@ access); Q/E rotates by 0.4 degrees. Shift multiplies either step by four. Mesh 
 redraw run synchronously on keydown without rescanning point-cloud colors. Keyup commits
 the pending edit immediately; the idle debounce remains as a fallback for missing keyup.
 
-## 8. Main 3D point size
+## 8. Native point cloud display
 
-The main perspective point cloud keeps native distance/zoom attenuation and uses a size
-of 0.06 (CVAT native 0.05 × 1.2), making points 20% larger at the same zoom level. The
-multiplier does not compound on subsequent renders. Top, Side, Front and their zoomed
-views retain their existing fixed 3.5 px size.
-The orthographic size toggle affects only those views; it does not change the main 3D size.
+Meow no longer changes point cloud rendering. Point colors, point sizes (main 3D, Top, Side,
+Front and their zoomed views), size attenuation and viewport backgrounds stay exactly as CVAT
+draws them. The removed options (white background, solid black/white points, coloring points
+by cuboid, Top-only ground hiding, fixed 3.5 px orthographic points and 20% larger main
+points) are dropped from saved settings the next time they are read.
 
 ## 9. Workspace controls for recent enhancements
 
-Settings → Workspace includes eight independent checkboxes: cuboid base guide, native
-focus without automatic Quick filter, H/W/L sync buttons, heading flip button, W/A/S/D/Q/E
-editing, double keyboard sensitivity, immediate key-release commit, and 20% larger main
-3D points. Existing installations default to enabled to preserve their current behavior.
-Turning off a control applies immediately. Disabling the keyboard restores native CVAT
-shortcuts; disabling the filter override restores native double-click behavior.
+Settings → Workspace includes nine independent checkboxes: frame follow for the active
+object, mouse side-button navigation, cuboid base guide, native focus without automatic
+Quick filter, H/W/L sync buttons, heading flip button, W/A/S/D/Q/E editing, double keyboard
+sensitivity, and immediate key-release commit. Existing installations default to enabled
+to preserve their current behavior. Turning off a control applies immediately. Disabling the
+keyboard restores native CVAT shortcuts; disabling the filter override restores native
+double-click behavior.
 
 Values persist under `clientSettings.workspace.cvat3dEnhancer` and the standalone backup
 `cvat3dEnhancerSettings`. Closing CVAT Settings cannot overwrite them with stale Redux
-settings. The main point-size option preserves zoom scaling in both states; the keyboard
-sensitivity option switches between 1.25/2.5 px and 0.2/0.4 degrees per key press.
+settings. The keyboard sensitivity option switches between 1.25/2.5 px and 0.2/0.4 degrees
+per key press.
 
 ## 10. Focus and frame-transition stability
 
@@ -132,16 +133,12 @@ all Workspace flags rather than reverting them to defaults.
 Regression tests simulate delayed snapshots, rapid frame jumps, object changes, loading
 controls, focus transitions, and detached views. No live point-cloud buffers are inspected.
 
-## 11. Ground hiding is restricted to Top
+## 11. Removed QA overlay
 
-The existing `hideGroundPoints` Workspace option now hides ground only in the Top view.
-Main 3D, Side and Front retain all ground points. Top receives a private geometry copy so
-compacting shared point buffers cannot affect the other views. Disabling the option
-restores all Top points. Known Top canvases and Top camera references retain this behavior
-when expanded; unidentified views conservatively keep ground visible.
-
-Regression tests use synthetic point buffers and native Three.js geometry clones to check
-view isolation, toggling, newly mounted Top/Side canvases, and processing-cache stability.
+The active-object QA overlay (dimension, sync, height, heading, jump, distance and
+point-cloud fit warnings) has been removed together with its Workspace checkbox. Meow no
+longer scans the point cloud around the selected object; the canvas shows only native CVAT
+content plus the cuboid base guide when enabled.
 
 ## 12. Mouse side buttons in 3D jobs
 
@@ -156,19 +153,14 @@ Device configuration software may remap or consume the buttons before Chrome see
 ## 13. Native frame loading and filter refresh
 
 Frame navigation continues through CVAT's native player controls. The enhancer waits for
-native image/annotation notifications to finish before processing the point cloud, including
-nested notifications and synchronous renders. An asynchronous image change does not recolor
-the previous cloud while the next image loads. The shared `canvas.setup` listener owns point
-processing.
+native image/annotation notifications to finish, including nested notifications and
+synchronous renders, before initializing newly drawn cuboids (deferred hidden-mesh and
+orientation-arrow updates). It never reads or rewrites point cloud buffers, so filter
+changes and frame loads do not trigger point processing.
 
-Empty annotation results complete the processing pass. Changes to the visible object IDs
-refresh cuboid color snapshots when applying or clearing filters on the same frame. Repeated
-notifications with the same IDs and canvas structure updates reuse those snapshots; moving
-an existing cuboid still keeps point colors frozen until a frame reload or option change.
-
-Regression tests use synthetic scenes for synchronous and asynchronous loads, nested renders,
-and repeated empty-filter/clear cycles. Live CVAT job performance still needs verification
-with the affected dataset; automated tests do not establish a frame-time improvement.
+Regression tests use synthetic scenes for nested notifications and steady renders. Live CVAT
+job performance still needs verification with the affected dataset; automated tests do not
+establish a frame-time improvement.
 
 ## 14. Track-wide ride_state and loading-aware camera follow
 

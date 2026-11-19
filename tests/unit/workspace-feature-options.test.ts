@@ -82,7 +82,9 @@ describe('recent Workspace feature options', () => {
     document.body.innerHTML =
       '<div class="cvat-workspace-settings"><div data-enhancer-workspace-settings="true"><input data-enhancer-opt="whiteBackground"></div></div>';
     injectCvatWorkspaceSettingsControls(document, () => DEFAULT_CVAT_3D_RENDER_OPTIONS, vi.fn());
-    expect(document.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(15);
+    expect(document.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(
+      WORKSPACE_FEATURE_KEYS.length + 1
+    );
   });
 
   it('independently removes and restores dimension sync and heading flip controls', () => {
@@ -126,14 +128,14 @@ describe('recent Workspace feature options', () => {
     }
   });
 
-  it('toggles the 20% main point increase without affecting orthographic point size or zoom attenuation', () => {
+  it('keeps native point sizes in every view and ignores removed point options', () => {
     const material = () => ({
       size: 0.05,
       sizeAttenuation: true,
       color: { r: 1, g: 1, b: 1, set: vi.fn() },
     });
     const main = { type: 'Points', material: material() },
-      top = { type: 'Points', material: material() };
+      top = { type: 'Points', material: { ...material(), size: 0.5, sizeAttenuation: false } };
     const canvas = {
       view: {
         views: {
@@ -143,13 +145,16 @@ describe('recent Workspace feature options', () => {
         drawnObjects: {},
       },
     };
-    const enhancer = new Cvat3dPreRenderEnhancer();
+    const enhancer = new Cvat3dPreRenderEnhancer({
+      ...DEFAULT_CVAT_3D_RENDER_OPTIONS,
+      enlargePerspectivePoints: true,
+      fixedOrthoPointSize: true,
+    } as typeof DEFAULT_CVAT_3D_RENDER_OPTIONS);
     enhancer.ensureHooked(canvas);
-    expect(main.material.size).toBeCloseTo(0.06);
-    enhancer.setOptions({ ...enhancer.getOptions(), enlargePerspectivePoints: false }, canvas);
-    expect(main.material.size).toBe(0.05);
-    expect(main.material.sizeAttenuation).toBe(true);
-    expect(top.material.size).toBe(3.5);
+    expect(enhancer.getOptions()).not.toHaveProperty('enlargePerspectivePoints');
+    expect(enhancer.getOptions()).not.toHaveProperty('fixedOrthoPointSize');
+    expect(main.material).toMatchObject({ size: 0.05, sizeAttenuation: true });
+    expect(top.material).toMatchObject({ size: 0.5, sizeAttenuation: false });
   });
 
   it('hides and restores the base guide without removing its render hooks', () => {

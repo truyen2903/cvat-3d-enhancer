@@ -39,7 +39,7 @@ function fixture() {
 }
 
 describe('render overhead', () => {
-  it('does not rewrite background or upload point buffers during 300 steady camera renders', () => {
+  it('leaves native background, point material and point buffers untouched during 300 renders', () => {
     const { scene, renderer, camera, canvas } = fixture();
     const position = scene.children[0]!.geometry!.attributes!.position!;
     const color = scene.children[0]!.geometry!.attributes!.color!;
@@ -47,6 +47,7 @@ describe('render overhead', () => {
     Object.defineProperty(position, 'needsUpdate', { set: upload });
     Object.defineProperty(color, 'needsUpdate', { set: upload });
     const colors = color.array.slice();
+    const material = scene.children[0]!.material!;
     const setColor = scene.background!.set;
     vi.mocked(setColor).mockClear();
     renderer.setClearColor.mockClear();
@@ -59,6 +60,8 @@ describe('render overhead', () => {
     expect(renderer.setClearColor).not.toHaveBeenCalled();
     expect(upload).not.toHaveBeenCalled();
     expect(color.array).toEqual(colors);
+    expect(material.size).toBe(0.05);
+    expect(material.sizeAttenuation).toBe(true);
   });
 
   it('redraws native scenes once while retaining redraw for standalone zoom scenes', () => {
@@ -74,13 +77,27 @@ describe('render overhead', () => {
     expect(zoomRenderer.render).toHaveBeenCalledTimes(1);
   });
 
-  it('updates cached background when toggled or replaced by a newly loaded frame', () => {
-    const { scene, renderer, camera, enhancer, canvas } = fixture();
-    enhancer.setOptions({ ...enhancer.getOptions(), whiteBackground: true }, canvas);
-    expect(scene.background!.set).toHaveBeenLastCalledWith(0xffffff);
-    const replacement = { r: 0, g: 0, b: 0, set: vi.fn() };
-    scene.background = replacement;
-    scene.onBeforeRender?.(renderer, scene, camera);
-    expect(replacement.set).toHaveBeenCalledExactlyOnceWith(0xffffff);
+  it('initializes cuboids drawn during nested native notifications after the outermost call', () => {
+    const material = { depthWrite: true };
+    let depthWriteDuringNativeNotify: boolean | undefined;
+    const view: NonNullable<CvatInternalCanvas3dLike['view']> = {
+      views: { perspective: { scene: { background: null, children: [] } } },
+      drawnObjects: {},
+    };
+    view.notify = (_model: unknown, reason: string): void => {
+      if (reason !== 'image_changed') return;
+      view.drawnObjects = {
+        5: { data: { clientID: 5, points: [] }, cuboid: { perspective: { material } } },
+      };
+      view.notify?.(null, 'objects_updated');
+      depthWriteDuringNativeNotify = material.depthWrite;
+    };
+    const enhancer = new Cvat3dPreRenderEnhancer();
+    enhancer.ensureHooked({ view });
+
+    view.notify(null, 'image_changed');
+
+    expect(depthWriteDuringNativeNotify).toBe(true);
+    expect(material.depthWrite).toBe(false);
   });
 });

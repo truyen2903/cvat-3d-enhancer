@@ -20,7 +20,6 @@ import {
   injectCvatObjectDimensionSyncControls,
   injectCvatWorkspaceSettingsControls,
   readRenderOptionsFromClientSettings,
-  syncEarlyViewportBackgroundDom,
   syncTrackCuboidDimension,
   type ThreeSceneLike,
   writeRenderOptionsToClientSettings,
@@ -248,7 +247,6 @@ export class PageBridgeRuntimeHost {
     this.doc = doc;
     const savedOptions = readRenderOptionsFromClientSettings(this.win.localStorage);
     this.preRenderEnhancer = new Cvat3dPreRenderEnhancer(savedOptions);
-    syncEarlyViewportBackgroundDom(this.doc, savedOptions.whiteBackground);
     this.tryHookCvatUIPlugin();
   }
 
@@ -376,10 +374,6 @@ export class PageBridgeRuntimeHost {
         dirtySidebarCards.clear();
 
         if (hadChildList) {
-          syncEarlyViewportBackgroundDom(
-            this.doc,
-            this.preRenderEnhancer.getOptionsReadonly().whiteBackground
-          );
           this.tryMountWorkspaceSettingsCheckboxes();
           const mountedCanvases = this.checkForNewlyMountedCanvases();
           if (mountedCanvases) {
@@ -627,10 +621,6 @@ export class PageBridgeRuntimeHost {
       });
     }
 
-    syncEarlyViewportBackgroundDom(
-      this.doc,
-      this.preRenderEnhancer.getOptionsReadonly().whiteBackground
-    );
     this.tryMountWorkspaceSettingsCheckboxes();
     this.tryMountObjectItemDimensionSyncControls();
     this.initialCanvasScanDone = true;
@@ -808,7 +798,6 @@ export class PageBridgeRuntimeHost {
       () => this.preRenderEnhancer.getOptionsReadonly(),
       (next: Cvat3dWorkspaceRenderOptions) => {
         const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
-        syncEarlyViewportBackgroundDom(this.doc, persisted.whiteBackground);
         const canvasInstance = this.getActiveCanvas3dInstance();
         if (canvasInstance) {
           this.preRenderEnhancer.ensureHooked(canvasInstance);
@@ -1493,25 +1482,6 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.ensureHooked(canvasInstance);
     }
 
-    if (
-      config.whiteBackground !== undefined ||
-      config.enableScattering !== undefined ||
-      config.colorPointsByCuboid !== undefined
-    ) {
-      const current = this.preRenderEnhancer.getOptionsReadonly();
-      const next: Cvat3dWorkspaceRenderOptions = {
-        ...current,
-        whiteBackground: config.whiteBackground ?? current.whiteBackground,
-        enableScattering: config.enableScattering ?? current.enableScattering,
-        colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
-        fixedOrthoPointSize: current.fixedOrthoPointSize ?? true,
-        followActiveObject: current.followActiveObject ?? true,
-      };
-      writeRenderOptionsToClientSettings(next, this.win.localStorage);
-      this.preRenderEnhancer.setOptions(next, canvasInstance);
-      this.tryMountWorkspaceSettingsCheckboxes();
-    }
-
     if (this.reduxStore) {
       let shapesState: Record<string, unknown> | undefined;
       let workspaceState: Record<string, unknown> | undefined;
@@ -1673,9 +1643,6 @@ export class PageBridgeRuntimeHost {
       colorBy: 'Label',
       controlPointsSize: 5,
       focusedObjectPadding: 50,
-      whiteBackground: false,
-      enableScattering: false,
-      colorPointsByCuboid: false,
     });
     const canvasInstance = this.getActiveCanvas3dInstance();
     if (canvasInstance?.fit) {

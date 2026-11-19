@@ -2,7 +2,7 @@
 
 ![Biểu tượng Meow](public/assets/meow-128.png)
 
-Meow là tiện ích trình duyệt Manifest V3 hỗ trợ thao tác và kiểm tra nhãn 3D trong CVAT. Công cụ bổ sung các điều khiển cho cuboid, tùy chọn hiển thị point cloud ngay trong workspace CVAT.
+Meow là tiện ích trình duyệt Manifest V3 hỗ trợ thao tác và kiểm tra nhãn 3D trong CVAT. Công cụ bổ sung các điều khiển cho cuboid ngay trong workspace CVAT; point cloud được giữ nguyên hiển thị gốc của CVAT.
 
 - **Trình duyệt:** Chrome hoặc Brave hỗ trợ Manifest V3; manifest yêu cầu Chrome 114 trở lên.
 - **Môi trường:** job annotation 3D trên CVAT. Các bản CVAT tự tùy chỉnh có thể khác về giao diện và API nội bộ.
@@ -83,41 +83,29 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 - **Tia đỏ căn đáy** xuất hiện trong Side/Front tại lát thấp nhất của cuboid đang chọn, kể cả ô nhỏ. Tia là lớp hiển thị, không chỉnh hình học annotation.
 - **Giữ object trên màn hình khi chuyển frame**: camera được dịch theo thay đổi vị trí của object đang chọn, khi runtime cung cấp thông tin camera và frame phù hợp. Việc chỉnh box trong cùng frame không chủ động kéo camera theo box.
 
-### Point cloud
-
-- Tùy chọn **ẩn đất** chỉ lọc điểm mặt đất trong **Top**; 3D chính, Side và Front giữ đầy đủ điểm đất. Tắt tùy chọn để khôi phục điểm trong Top.
-- Point ở khung 3D chính có thể được tăng **20%** so với kích thước gốc, vẫn thay đổi theo zoom. Tùy chọn riêng giữ point Top/Side/Front ở **3,5 px**.
-- Có thể dùng nền trắng, chuyển các điểm ngoài box sang màu đen/trắng, hoặc tô màu điểm trong cuboid.
-
 ## Các tùy chọn trong Settings → Workspace
 
 Meow thêm các checkbox vào tab Workspace của CVAT. Tên dưới đây khớp với giao diện hiện tại:
 
-| Tùy chọn                                                | Công dụng                                                       |
-| ------------------------------------------------------- | --------------------------------------------------------------- |
-| White 3D canvas background                              | Dùng nền trắng cho viewport 3D.                                 |
-| Solid black/white 3D points                             | Dùng màu đen/trắng cho điểm ngoài box thay vì màu cường độ gốc. |
-| Color 3D points by bounding box                         | Tô điểm nằm trong cuboid.                                       |
-| Hide ground points in Top view only                     | Chỉ ẩn điểm đất ở Top.                                          |
-| Fixed 3.5px point size in Top/Side/Front views          | Giữ kích thước point cố định trong các góc nhìn trực giao.      |
-| Keep active object fixed on screen when changing frames | Bám camera theo object đang chọn khi chuyển frame.              |
-| Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                                  |
-| Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.          |
-| Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D.       |
-| Show H/W/L dimension sync buttons                       | Hiện nút đồng bộ kích thước.                                    |
-| Show 180° heading flip button                           | Hiện nút đảo hướng.                                             |
-| Edit cuboids with W/A/S/D/Q/E                           | Bật chỉnh box bằng bàn phím trong Top/Side/Front.               |
-| Double W/A/S/D/Q/E sensitivity                          | Dùng bước di chuyển và xoay lớn gấp đôi.                        |
-| Save keyboard edits immediately on key release          | Lưu khi thả phím; khi tắt, chờ 250 ms không thao tác.           |
-| Enlarge main 3D points by 20%                           | Tăng kích thước point của 3D chính, giữ tỷ lệ zoom.             |
+| Tùy chọn                                                | Công dụng                                                 |
+| ------------------------------------------------------- | --------------------------------------------------------- |
+| Keep active object fixed on screen when changing frames | Bám camera theo object đang chọn khi chuyển frame.        |
+| Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                            |
+| Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.    |
+| Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D. |
+| Show H/W/L dimension sync buttons                       | Hiện nút đồng bộ kích thước.                              |
+| Show 180° heading flip button                           | Hiện nút đảo hướng.                                       |
+| Edit cuboids with W/A/S/D/Q/E                           | Bật chỉnh box bằng bàn phím trong Top/Side/Front.         |
+| Double W/A/S/D/Q/E sensitivity                          | Dùng bước di chuyển và xoay lớn gấp đôi.                  |
+| Save keyboard edits immediately on key release          | Lưu khi thả phím; khi tắt, chờ 250 ms không thao tác.     |
 
-Các tùy chọn được lưu trong cài đặt của CVAT trên trình duyệt và bản sao dự phòng của Meow. Các tính năng bổ sung gần đây mặc định bật để giữ hành vi hiện tại; nền trắng, tô màu point và ẩn đất mặc định tắt.
+Các tùy chọn được lưu trong cài đặt của CVAT trên trình duyệt và bản sao dự phòng của Meow. Các tính năng bổ sung gần đây mặc định bật để giữ hành vi hiện tại.
 
 ## Tương thích và giới hạn
 
 Meow được phát triển dựa trên CVAT 3D và đã có tài liệu đối chiếu với CVAT **v2.81.0**. Kiểm tra phiên bản qua API không đảm bảo mọi bản CVAT tùy chỉnh hoạt động giống nhau: các tính năng sidebar, camera và đồng bộ track phụ thuộc các cấu trúc hoặc API runtime mà bản CVAT cung cấp.
 
-Một số khả năng không có điều khiển chung được hỗ trợ trong Capability Registry, gồm chọn kích thước point tùy ý qua API công khai, shader màu theo độ cao/cường độ, lưới mặt đất 3D và bật/tắt trục tọa độ 3D. Các điều chỉnh point cố định/tăng 20% nêu trên là cơ chế tích hợp runtime riêng, không đồng nghĩa có bộ điều khiển kích thước tùy ý cho mọi bản CVAT.
+Một số khả năng không có điều khiển chung được hỗ trợ trong Capability Registry, gồm chọn kích thước point tùy ý qua API công khai, shader màu theo độ cao/cường độ, lưới mặt đất 3D và bật/tắt trục tọa độ 3D.
 
 Xem [tương thích và giới hạn](docs/compatibility.md) để biết cách hoạt động, các giả định và phạm vi kiểm tra.
 
@@ -130,7 +118,6 @@ Xem [tương thích và giới hạn](docs/compatibility.md) để biết cách 
 | Không thấy nút H/W/L            | Bật tùy chọn trong Workspace; kiểm tra object là cuboid track và sidebar đã tải xong.                                                  |
 | Bấm nút không thấy thay đổi     | Kiểm tra object không bị khóa, tooltip của nút và trạng thái/keyframe phù hợp; bản CVAT tùy chỉnh phải cung cấp API track tương thích. |
 | Phím WASD/QE không phản hồi     | Bật tùy chọn bàn phím, chọn cuboid và đưa chuột vào Top/Side/Front; kiểm tra con trỏ không đang ở ô nhập.                              |
-| Điểm đất vẫn hiện               | Kiểm tra tùy chọn ẩn đất đã bật và đang xem khung Top. Các khung còn lại được giữ nguyên.                                              |
 | Bản mới chưa xuất hiện          | Thay đúng thư mục đã nạp, bấm **Reload** trên trang Extensions rồi tải lại tab CVAT.                                                   |
 
 ## Dành cho người phát triển

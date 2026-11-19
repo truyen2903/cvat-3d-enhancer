@@ -66,6 +66,27 @@ describe('Hierarchical Configuration System', () => {
     expect(migrated.appearance.canvasBackgroundColor).toBe('#112233');
   });
 
+  it('drops removed point cloud display keys from stored configs instead of rejecting them', async () => {
+    const storage = new InMemoryStorageAdapter();
+    const manager = new ConfigurationManager(storage);
+
+    const legacyJson = JSON.stringify({
+      schemaVersion: 2,
+      visualization3d: {
+        cuboidOpacity: 30,
+        whiteBackground: true,
+        enableScattering: true,
+        colorPointsByCuboid: true,
+      },
+    });
+
+    const imported = await manager.importJson(legacyJson, 'global');
+    expect(imported.visualization3d.cuboidOpacity).toBe(30);
+    expect(imported.visualization3d).not.toHaveProperty('whiteBackground');
+    expect(imported.visualization3d).not.toHaveProperty('enableScattering');
+    expect(imported.visualization3d).not.toHaveProperty('colorPointsByCuboid');
+  });
+
   it('supports built-in and custom presets', async () => {
     const storage = new InMemoryStorageAdapter();
     const manager = new ConfigurationManager(storage);

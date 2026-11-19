@@ -41,7 +41,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-C5b5q3Gh.js"
+        "assets/content.ts-loader-CN_4zNpE.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -68,13 +68,13 @@
         "http://*/*"
       ],
       "resources": [
-        "assets/index-B4I2heBL.js",
+        "assets/index-D-fE3yjt.js",
         "assets/index-YF8g75cw.js",
         "assets/schemas-njzct5Su.js",
-        "assets/index-50c5XEHu.js",
+        "assets/index-D5_ZH5vf.js",
         "assets/origin-validator--cNPonwa.js",
-        "assets/ortho-cuboid-editor-Qh_CJ-Hv.js",
-        "assets/content.ts-DR9ePnTq.js"
+        "assets/ortho-cuboid-editor-CTiUxoRP.js",
+        "assets/content.ts-CY2SvRBz.js"
       ],
       "use_dynamic_url": false
     }

@@ -66,9 +66,6 @@ export const Visualization3DConfigSchema = z
     pointSizeValue: z.number().min(0.01).max(2.0),
     gridVisible: z.boolean(),
     axesVisible: z.boolean(),
-    whiteBackground: z.boolean().optional(),
-    enableScattering: z.boolean().optional(),
-    colorPointsByCuboid: z.boolean().optional(),
   })
   .strict();
 
@@ -171,9 +168,6 @@ export const ApplyCanvasVisualConfigPayloadSchema = z
     canvasBackgroundColor: HexColorSchema.optional(),
     pointCloudCssBrightness: z.number().int().min(50).max(180).optional(),
     pointCloudCssContrast: z.number().int().min(50).max(180).optional(),
-    whiteBackground: z.boolean().optional(),
-    enableScattering: z.boolean().optional(),
-    colorPointsByCuboid: z.boolean().optional(),
   })
   .strict();
 
