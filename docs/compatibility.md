@@ -159,7 +159,7 @@ Frame navigation continues through CVAT's native player controls. The enhancer w
 native image/annotation notifications to finish before processing the point cloud, including
 nested notifications and synchronous renders. An asynchronous image change does not recolor
 the previous cloud while the next image loads. The shared `canvas.setup` listener owns point
-processing; the perspective listener only refreshes QA.
+processing.
 
 Empty annotation results complete the processing pass. Changes to the visible object IDs
 refresh cuboid color snapshots when applying or clearing filters on the same frame. Repeated

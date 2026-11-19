@@ -53,7 +53,6 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       hideGroundPoints: false,
       fixedOrthoPointSize: true,
       followActiveObject: true,
-      enableActiveObjectWarnings: true,
     });
   });
 
@@ -81,7 +80,6 @@ describe('Cvat3dPreRenderEnhancer & Native Workspace Settings Integration', () =
       hideGroundPoints: false,
       fixedOrthoPointSize: false,
       followActiveObject: true,
-      enableActiveObjectWarnings: true,
     });
 
     // clientSettings must be healed while keeping CVAT's own values

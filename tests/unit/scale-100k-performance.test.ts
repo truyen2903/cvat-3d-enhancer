@@ -340,7 +340,6 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
     );
     const internal = host as unknown as {
       preRenderEnhancer: Cvat3dPreRenderEnhancer;
-      syncActiveObjectQaOverlay: (force?: boolean) => void;
       handleGlobalStateUpdate: () => void;
       resolveActiveCuboid: (allowReduxFallback?: boolean) => {
         clientID: number;
@@ -351,12 +350,6 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
 
     // Before start(), verify 60 frames of Ortho rendering (`resolveActiveCuboid(false)`) read 0 Redux getters
     const setListenerSpy = vi.spyOn(internal.preRenderEnhancer, 'setCanvasRenderListener');
-
-    // Temporarily disable QA warnings during start() so we can measure the exact first QA miss cleanly
-    internal.preRenderEnhancer.setOptions({
-      ...internal.preRenderEnhancer.getOptions(),
-      enableActiveObjectWarnings: false,
-    });
 
     const stop = host.start();
     try {
@@ -372,23 +365,18 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
       // Hot render path MUST read 0 Redux Proxy getters!
       expect(clientIdGetterReads).toBe(0);
 
-      // Re-enable QA warnings and measure first miss vs 50 subsequent events
-      internal.preRenderEnhancer.setOptions({
-        ...internal.preRenderEnhancer.getOptions(),
-        enableActiveObjectWarnings: true,
-      });
-
+      // Measure the first Redux-fallback miss vs 50 subsequent events
       clientIdGetterReads = 0;
-      internal.syncActiveObjectQaOverlay(false);
+      internal.resolveActiveCuboid(true);
       // First miss builds WeakMap<states, Map> once (<= 17 binary search + 99,980 items <= 100,000)
       expect(clientIdGetterReads).toBeGreaterThan(0);
       expect(clientIdGetterReads).toBeLessThanOrEqual(100_000);
 
-      // Next 50 events (canvas.setup, syncActiveObjectQaOverlay, globalStateDidUpdate) MUST read 0 getters!
+      // Next 50 events (canvas.setup, active cuboid lookup, globalStateDidUpdate) MUST read 0 getters!
       clientIdGetterReads = 0;
       for (let ev = 0; ev < 50; ev += 1) {
         perspCanvas.dispatchEvent(new CustomEvent('canvas.setup'));
-        internal.syncActiveObjectQaOverlay(false);
+        internal.resolveActiveCuboid(true);
         internal.handleGlobalStateUpdate();
       }
       expect(clientIdGetterReads).toBe(0);
@@ -437,7 +425,6 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
       document
     );
     const internal = host as unknown as {
-      syncActiveObjectQaOverlay: (force?: boolean) => void;
       tryMountObjectItemDimensionSyncControls: (cards?: Iterable<HTMLElement> | null) => void;
     };
 
@@ -446,7 +433,6 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
       await flushRaf();
       expect(frames).toHaveLength(0);
 
-      const qaSpy = vi.spyOn(internal, 'syncActiveObjectQaOverlay');
       const mountControlsSpy = vi.spyOn(internal, 'tryMountObjectItemDimensionSyncControls');
       sidebarCanvasQueryReads = 0;
 
@@ -469,7 +455,6 @@ describe('100,000 IDs/frame scale & O(1)/O(log N) complexity invariants', () => 
 
       await flushRaf();
 
-      expect(qaSpy).not.toHaveBeenCalled();
       expect(mountControlsSpy).not.toHaveBeenCalled();
       expect(sidebarCanvasQueryReads).toBe(0);
       expect(frames).toHaveLength(0);

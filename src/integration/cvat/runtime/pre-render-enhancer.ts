@@ -34,7 +34,6 @@ export interface Cvat3dWorkspaceRenderOptions extends WorkspaceFeatureOptions {
   readonly hideGroundPoints?: boolean;
   readonly fixedOrthoPointSize?: boolean;
   readonly followActiveObject?: boolean;
-  readonly enableActiveObjectWarnings?: boolean;
 }
 
 export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Object.freeze({
@@ -45,7 +44,6 @@ export const DEFAULT_CVAT_3D_RENDER_OPTIONS: Cvat3dWorkspaceRenderOptions = Obje
   hideGroundPoints: false,
   fixedOrthoPointSize: true,
   followActiveObject: true,
-  enableActiveObjectWarnings: true,
 });
 
 export const CLIENT_SETTINGS_STORAGE_KEY = 'clientSettings' as const;
@@ -232,8 +230,6 @@ function normalizeRenderOptionsRecord(obj: Record<string, unknown>): Cvat3dWorks
     fixedOrthoPointSize:
       typeof obj.fixedOrthoPointSize === 'boolean' ? obj.fixedOrthoPointSize : true,
     followActiveObject: typeof obj.followActiveObject === 'boolean' ? obj.followActiveObject : true,
-    enableActiveObjectWarnings:
-      typeof obj.enableActiveObjectWarnings === 'boolean' ? obj.enableActiveObjectWarnings : true,
   };
 }
 
@@ -301,9 +297,7 @@ export function readRenderOptionsFromClientSettings(
         (clientSettingsOptions.fixedOrthoPointSize ?? true) !==
           (standaloneOptions.fixedOrthoPointSize ?? true) ||
         (clientSettingsOptions.followActiveObject ?? true) !==
-          (standaloneOptions.followActiveObject ?? true) ||
-        (clientSettingsOptions.enableActiveObjectWarnings ?? true) !==
-          (standaloneOptions.enableActiveObjectWarnings ?? true))
+          (standaloneOptions.followActiveObject ?? true))
     ) {
       try {
         writeRenderOptionsToClientSettings(
@@ -366,7 +360,6 @@ export function writeRenderOptionsToClientSettings(
     hideGroundPoints: Boolean(options.hideGroundPoints),
     fixedOrthoPointSize: options.fixedOrthoPointSize ?? true,
     followActiveObject: options.followActiveObject ?? true,
-    enableActiveObjectWarnings: options.enableActiveObjectWarnings ?? true,
   };
 
   root.workspace = {
@@ -2616,7 +2609,6 @@ export class Cvat3dPreRenderEnhancer {
       hideGroundPoints: Boolean(initialOptions.hideGroundPoints),
       fixedOrthoPointSize: initialOptions.fixedOrthoPointSize ?? true,
       followActiveObject: initialOptions.followActiveObject ?? true,
-      enableActiveObjectWarnings: initialOptions.enableActiveObjectWarnings ?? true,
     };
   }
 
@@ -2650,7 +2642,6 @@ export class Cvat3dPreRenderEnhancer {
       hideGroundPoints: nextHideGround,
       fixedOrthoPointSize: nextOrthoFixed,
       followActiveObject: next.followActiveObject ?? true,
-      enableActiveObjectWarnings: next.enableActiveObjectWarnings ?? true,
     };
     if (changed) {
       this.dirty = true;
@@ -3847,7 +3838,6 @@ function computeOptionsSignature(opts: Cvat3dWorkspaceRenderOptions): string {
     opts.hideGroundPoints ? 1 : 0,
     (opts.fixedOrthoPointSize ?? true) ? 1 : 0,
     (opts.followActiveObject ?? true) ? 1 : 0,
-    (opts.enableActiveObjectWarnings ?? true) ? 1 : 0,
   ].join(':');
 }
 
@@ -3928,13 +3918,6 @@ export function injectCvatWorkspaceSettingsControls(
       title: 'Keep active object fixed on screen when changing frames',
       description:
         'Move the 3D perspective camera with the active object so it stays at the same screen position on Next/Previous frame',
-    },
-    {
-      key: 'enableActiveObjectWarnings',
-      rowClass: 'cvat-workspace-settings-3d-active-object-warnings',
-      title: 'Show QA warnings on 3D canvas for active object',
-      description:
-        'Validate attribute dimension thresholds (K), dimension sync (S), height (Z), heading (H), jump (J), and LiDAR fit (T, P, F, D, M) on the 3D canvas',
     },
   ];
 

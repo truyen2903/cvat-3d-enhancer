@@ -6,7 +6,6 @@ import {
   syncSidebarRideState,
 } from '../integration/cvat/runtime/sidebar-enhancements';
 import { BASE_GUIDE_CLASS, CuboidBaseGuide } from '../integration/cvat/runtime/cuboid-base-guide';
-import { collectQaPointNeighborhood } from '../integration/cvat/runtime/qa-point-neighborhood';
 import { MessageProtocol } from '../integration/cvat/bridge';
 import type { CanvasVisualConfigInput, PageRuntimeProbeResult } from '../integration/cvat/runtime';
 import {
@@ -46,14 +45,6 @@ import {
   type FollowModelLike,
   type FollowViewLike,
 } from '../integration/cvat/runtime/camera-follow';
-import {
-  evaluateActiveObjectQaReport,
-  extractSidebarDomLabelAndAttributes,
-  getPerspectivePointCloudPositions,
-  QA_OVERLAY_ELEMENT_ID,
-  renderActiveObjectQaOverlayDom,
-  renderActiveObjectQaOverlayLoadingDom,
-} from '../integration/cvat/runtime/active-object-qa-overlay';
 import type { OrthoViewName } from '../integration/cvat/runtime/ortho-view-maximizer';
 import {
   OrthoCuboidEditor,
@@ -102,15 +93,9 @@ const SIDEBAR_CARD_SELECTOR =
 const MAX_TARGETED_SIDEBAR_CARDS = 128;
 
 const IGNORED_MUTATION_SELECTOR =
-  `#${QA_OVERLAY_ELEMENT_ID}, .cvat-appearance-block, .${BASE_GUIDE_CLASS}, ` +
+  `.cvat-appearance-block, .${BASE_GUIDE_CLASS}, ` +
   '#meow-toast-stack, #cvat-3d-enhancer-workspace-settings-section, ' +
   '[data-enhancer-workspace-settings], .ant-select-dropdown, .ant-tooltip, .ant-popover';
-
-const INTERACTIVE_IGNORE_SELECTOR =
-  '.cvat-workspace-settings, #cvat-3d-enhancer-workspace-settings, ' +
-  '#cvat-3d-enhancer-workspace-settings-section, [data-enhancer-workspace-settings], ' +
-  '.cvat-annotations-filters-input, .ant-select-dropdown, ' +
-  '.cvat-player-buttons, .cvat-player-frame-selector';
 
 const CAMERA_KEY_MAPPING: Record<
   CameraPresetAction,
@@ -134,7 +119,6 @@ function isIgnoredMutationNode(node: Node): boolean {
   }
   const el = node as Element;
   if (
-    el.id === QA_OVERLAY_ELEMENT_ID ||
     el.id === 'meow-toast-stack' ||
     el.id === 'meow-toast-style' ||
     el.id === 'cvat-3d-enhancer-workspace-settings-section' ||
@@ -227,10 +211,6 @@ export class PageBridgeRuntimeHost {
   );
   private baseGuide: CuboidBaseGuide | null = null;
   private cachedInstance: CvatCanvas3dLike | null = null;
-  private qaRequestVersion = 0;
-  private canvasInteracting = false;
-  private lastQaSignature = '';
-  private qaEvalTimer: ReturnType<typeof setTimeout> | null = null;
   private domSyncRafId: number | null = null;
   private globalStateUpdateRafId: number | null = null;
   private cachedPerspCanvas: PerspDomCanvasElement | null = null;
@@ -368,47 +348,6 @@ export class PageBridgeRuntimeHost {
     );
     const uninstallOrthoEditor = orthoEditor.install();
 
-    const onCanvasPointerDown = (event: PointerEvent): void => {
-      const target = event.target as Element | null;
-      if (!target?.closest?.('.cvat-canvas3d-perspective, .cvat-canvas3d-orthographic-view'))
-        return;
-      this.canvasInteracting = true;
-      this.clearQaEvalTimer();
-      // Retry a report interrupted by camera/object interaction.
-      this.lastQaSignature = '';
-    };
-    const onCanvasPointerEnd = (): void => {
-      if (!this.canvasInteracting) return;
-      this.canvasInteracting = false;
-      this.syncActiveObjectQaOverlay();
-    };
-    this.win.addEventListener('pointerdown', onCanvasPointerDown, true);
-    this.win.addEventListener('pointerup', onCanvasPointerEnd, true);
-    this.win.addEventListener('pointercancel', onCanvasPointerEnd, true);
-    this.win.addEventListener('blur', onCanvasPointerEnd);
-
-    const onInteractiveChange = (event: Event): void => {
-      const targetEl = event.target as Element | null;
-      if (targetEl && typeof targetEl.closest === 'function') {
-        if (targetEl.closest(INTERACTIVE_IGNORE_SELECTOR)) {
-          return;
-        }
-        if (
-          event.type === 'keyup' &&
-          (targetEl.tagName === 'INPUT' ||
-            targetEl.tagName === 'TEXTAREA' ||
-            (targetEl as HTMLElement).isContentEditable === true) &&
-          !targetEl.closest('.cvat-objects-sidebar-state-active-item')
-        ) {
-          return;
-        }
-      }
-      this.syncActiveObjectQaOverlay(event.type === 'change');
-    };
-    this.doc.addEventListener('change', onInteractiveChange, true);
-    this.doc.addEventListener('pointerup', onInteractiveChange, true);
-    this.doc.addEventListener('keyup', onInteractiveChange, true);
-
     // Observe DOM for CVAT Settings -> Workspace modal opening and 3D canvas initialization
     if (this.doc.documentElement) {
       let pendingChildListChange = false;
@@ -460,7 +399,6 @@ export class PageBridgeRuntimeHost {
             this.tryMountObjectItemDimensionSyncControls(cardsSnapshot);
           }
         }
-        this.syncActiveObjectQaOverlay();
         this.settingsObserver?.takeRecords();
       };
 
@@ -473,10 +411,7 @@ export class PageBridgeRuntimeHost {
           if (!targetNode) {
             continue;
           }
-          if (
-            targetNode.id === QA_OVERLAY_ELEMENT_ID ||
-            targetNode.closest?.(IGNORED_MUTATION_SELECTOR)
-          ) {
+          if (targetNode.closest?.(IGNORED_MUTATION_SELECTOR)) {
             continue;
           }
           if (targetNode.closest?.('.cvat-3d-enhancer-dim-sync-row')) {
@@ -706,20 +641,11 @@ export class PageBridgeRuntimeHost {
       this.ensureActiveObjectHoverLock(initialInstance);
       this.preRenderEnhancer.requestViewsRedraw();
     }
-    this.syncActiveObjectQaOverlay(true);
     this.settingsObserver?.takeRecords();
 
     return () => {
       this.doc.removeEventListener('plugins.ready', onPluginReady);
       this.win.removeEventListener('message', this.handleMessage);
-      this.doc.removeEventListener('change', onInteractiveChange, true);
-      this.doc.removeEventListener('pointerup', onInteractiveChange, true);
-      this.doc.removeEventListener('keyup', onInteractiveChange, true);
-      this.win.removeEventListener('pointerdown', onCanvasPointerDown, true);
-      this.win.removeEventListener('pointerup', onCanvasPointerEnd, true);
-      this.win.removeEventListener('pointercancel', onCanvasPointerEnd, true);
-      this.win.removeEventListener('blur', onCanvasPointerEnd);
-      this.canvasInteracting = false;
       uninstallOrthoEditor();
       this.preRenderEnhancer.setCanvasRenderListener(null);
       baseGuide.clear();
@@ -731,7 +657,6 @@ export class PageBridgeRuntimeHost {
         this.win.cancelAnimationFrame?.(this.domSyncRafId);
         this.domSyncRafId = null;
       }
-      this.clearQaEvalTimer();
       this.settingsObserver?.disconnect();
       this.settingsObserver = null;
     };
@@ -877,178 +802,6 @@ export class PageBridgeRuntimeHost {
     return null;
   }
 
-  private clearQaEvalTimer(): void {
-    this.qaRequestVersion += 1;
-    if (this.qaEvalTimer !== null) {
-      clearTimeout(this.qaEvalTimer);
-      this.qaEvalTimer = null;
-    }
-  }
-
-  private syncActiveObjectQaOverlay(force = false): void {
-    // Point-cloud QA scans must not compete with native camera/object drags.
-    if (this.canvasInteracting) return;
-    const enabled = this.preRenderEnhancer.getOptionsReadonly().enableActiveObjectWarnings ?? true;
-    if (!enabled) {
-      this.clearQaEvalTimer();
-      if (this.lastQaSignature !== 'disabled') {
-        this.lastQaSignature = 'disabled';
-        renderActiveObjectQaOverlayDom(this.doc, null, false);
-      }
-      return;
-    }
-
-    const instance = this.getActiveCanvas3dInstance();
-    const activeIdStr = this.getActiveObjectClientId(instance);
-    if (!activeIdStr || !instance?.view) {
-      this.clearQaEvalTimer();
-      if (this.lastQaSignature !== 'none') {
-        this.lastQaSignature = 'none';
-        renderActiveObjectQaOverlayDom(this.doc, null, true);
-      }
-      return;
-    }
-
-    const clientID = Number(activeIdStr);
-    if (!Number.isFinite(clientID)) {
-      this.clearQaEvalTimer();
-      renderActiveObjectQaOverlayDom(this.doc, null, true);
-      return;
-    }
-
-    const drawnEntry = this.getDrawnObjectEntryById(instance, clientID);
-    let stateOnCurrentFrame: CvatObjectStateLike | null = drawnEntry?.state ?? null;
-
-    if (!stateOnCurrentFrame) {
-      const modelObjects = (instance.model as { objects?: CvatObjectStateLike[] } | undefined)
-        ?.objects;
-      if (Array.isArray(modelObjects)) {
-        stateOnCurrentFrame = findObjectStateByClientId(modelObjects, clientID);
-      }
-    }
-
-    if (!stateOnCurrentFrame && this.reduxStore) {
-      try {
-        const state = this.reduxStore.getState();
-        const annotation = state.annotation as Record<string, unknown> | undefined;
-        const annotations = annotation?.annotations as Record<string, unknown> | undefined;
-        const states = annotations?.states as CvatObjectStateLike[] | undefined;
-        if (Array.isArray(states)) {
-          stateOnCurrentFrame = findObjectStateByClientId(states, clientID);
-        }
-      } catch {
-        // Ignore fallback lookup errors
-      }
-    }
-
-    const liveDataPts = drawnEntry?.data?.points;
-    const pts =
-      Array.isArray(liveDataPts) && liveDataPts.length >= 9
-        ? liveDataPts
-        : (stateOnCurrentFrame?.points ?? liveDataPts ?? []);
-    const domFrameAttr =
-      instance.view.views?.perspective?.renderer?.domElement?.getAttribute?.('data-frame-number') ??
-      null;
-    const frame = Number(
-      stateOnCurrentFrame?.frame ?? instance.model?.data?.imageID ?? domFrameAttr ?? 0
-    );
-
-    const {
-      labelName: domLabelName,
-      domAttributes,
-      isOutsideInDom,
-      domPos,
-    } = extractSidebarDomLabelAndAttributes(this.doc, clientID, {
-      skipHudPos: pts.length >= 3,
-    });
-    const isOutside =
-      isOutsideInDom ||
-      Boolean(stateOnCurrentFrame?.outside) ||
-      Boolean(drawnEntry?.data?.outside) ||
-      Boolean(drawnEntry?.state?.outside);
-
-    if (isOutside) {
-      this.clearQaEvalTimer();
-      const outsideSig = `${clientID}@${frame}::outside`;
-      if (force || this.lastQaSignature !== outsideSig) {
-        this.lastQaSignature = outsideSig;
-        renderActiveObjectQaOverlayDom(this.doc, null, true);
-      }
-      return;
-    }
-
-    const attrSig = JSON.stringify({
-      s: stateOnCurrentFrame?.attributes ?? {},
-      d: domAttributes,
-      l: domLabelName ?? '',
-      pos: domPos ?? null,
-    });
-    const ptsSig = pts
-      .slice(0, 9)
-      .map((n) => Number(n).toFixed(3))
-      .join(',');
-    const posArray = getPerspectivePointCloudPositions(instance.view);
-    const sig = `${clientID}@${frame}::${ptsSig}::${attrSig}::p${posArray?.length ?? 0}`;
-
-    if (!force && sig === this.lastQaSignature) {
-      return;
-    }
-    this.lastQaSignature = sig;
-    this.clearQaEvalTimer();
-
-    const previewLabel =
-      (stateOnCurrentFrame as { label?: { name?: string } } | null)?.label?.name ?? domLabelName;
-
-    // Show spinning loading indicator while scanning so we never flash "Không có lỗi" prematurely
-    renderActiveObjectQaOverlayLoadingDom(this.doc, { clientID, labelName: previewLabel }, true);
-
-    const delayMs = !posArray || posArray.length === 0 ? 220 : 120;
-    const requestVersion = this.qaRequestVersion;
-    const modelFrameAtRequest = instance.model?.data?.imageID;
-    this.qaEvalTimer = setTimeout(() => {
-      this.qaEvalTimer = null;
-      void (async () => {
-        const latestPosArray = getPerspectivePointCloudPositions(instance.view) ?? posArray;
-        const isCurrent = (): boolean =>
-          requestVersion === this.qaRequestVersion &&
-          !this.canvasInteracting &&
-          this.getActiveObjectClientId(instance) === activeIdStr &&
-          instance.model?.data?.imageID === modelFrameAtRequest;
-        const canFilter = Boolean(
-          latestPosArray &&
-          latestPosArray.length >= 3 &&
-          pts.length >= 9 &&
-          pts.slice(0, 9).every(Number.isFinite)
-        );
-        const nearby = canFilter
-          ? await collectQaPointNeighborhood(latestPosArray!, pts, isCurrent)
-          : latestPosArray;
-        if (!isCurrent() || (canFilter && nearby === null)) {
-          if (requestVersion === this.qaRequestVersion) this.lastQaSignature = '';
-          return;
-        }
-        const latestDrawnEntry = this.getDrawnObjectEntryById(instance, clientID) ?? drawnEntry;
-        const fullDrawnObjects = instance.view?.drawnObjects ?? {};
-        const report = evaluateActiveObjectQaReport({
-          clientID,
-          frame: Number.isFinite(frame) ? frame : 0,
-          drawnEntry: latestDrawnEntry,
-          stateOnCurrentFrame,
-          drawnObjects: fullDrawnObjects,
-          positionArray: nearby,
-          fallbackLabelName: domLabelName,
-          domAttributes,
-          isOutsideOnCurrentFrame: isOutside,
-          fallbackPos: domPos,
-        });
-
-        if (isCurrent()) renderActiveObjectQaOverlayDom(this.doc, report, true);
-      })().catch(() => {
-        if (requestVersion === this.qaRequestVersion) this.lastQaSignature = '';
-      });
-    }, delayMs);
-  }
-
   private tryMountWorkspaceSettingsCheckboxes(): void {
     injectCvatWorkspaceSettingsControls(
       this.doc,
@@ -1065,7 +818,6 @@ export class PageBridgeRuntimeHost {
         this.syncKeyboardEnabledAttribute();
         this.tryMountObjectItemDimensionSyncControls();
         this.baseGuide?.refresh();
-        this.syncActiveObjectQaOverlay(true);
       }
     );
   }
@@ -1094,14 +846,7 @@ export class PageBridgeRuntimeHost {
         : opts,
       {
         isAvailable: (id, card) => sidebarHasRideState(this.doc, id, card),
-        sync: async (id) => {
-          const result = await syncSidebarRideState(this.doc, id);
-          // ride_state feeds the QA overlay; show the applied value without waiting for
-          // the next unrelated DOM mutation or frame change.
-          this.lastQaSignature = '';
-          this.syncActiveObjectQaOverlay(true);
-          return result;
-        },
+        sync: (id) => syncSidebarRideState(this.doc, id),
       }
     );
   }
@@ -1154,7 +899,6 @@ export class PageBridgeRuntimeHost {
           this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
           this.preRenderEnhancer.requestViewsRedraw();
         }
-        this.syncActiveObjectQaOverlay(true);
       },
     });
     if (result.syncedFrames > 0) await sidebar?.refresh?.();
@@ -1330,7 +1074,6 @@ export class PageBridgeRuntimeHost {
     // and recompiles/recolors all 100k cuboids + full LiDAR buffer mid-edit).
     this.invalidateSceneObjectCaches();
     this.preRenderEnhancer.requestViewsRedraw();
-    this.syncActiveObjectQaOverlay(true);
   }
 
   private tryHookCvatUIPlugin(): void {
@@ -1429,7 +1172,6 @@ export class PageBridgeRuntimeHost {
       this.preRenderEnhancer.ensureHooked(activeInstance);
       this.ensureActiveObjectHoverLock(activeInstance);
     }
-    this.syncActiveObjectQaOverlay();
   }
 
   private getActiveCanvas3dInstance(): CvatCanvas3dLike | null {
@@ -1480,7 +1222,7 @@ export class PageBridgeRuntimeHost {
     return this.resolveDomBackedCanvas3dInstance();
   }
 
-  private attachCanvasSetupListener(canvas: HTMLCanvasElement, isPerspective: boolean): void {
+  private attachCanvasSetupListener(canvas: HTMLCanvasElement): void {
     if (this.hookedSetupCanvases.has(canvas)) {
       return;
     }
@@ -1492,13 +1234,6 @@ export class PageBridgeRuntimeHost {
       const inst = this.getActiveCanvas3dInstance();
       if (inst?.view) {
         this.preRenderEnhancer.applyOnceIfNeeded(inst.view, inst.model);
-      }
-      if (
-        isPerspective ||
-        canvas === this.cachedPerspCanvas ||
-        Boolean(canvas.closest?.('.cvat-canvas3d-perspective'))
-      ) {
-        this.syncActiveObjectQaOverlay(false);
       }
     });
   }
@@ -1544,11 +1279,10 @@ export class PageBridgeRuntimeHost {
     const allCanvases = this.doc.querySelectorAll<SceneDomCanvasElement>('canvas');
     let foundNew = false;
     for (const c of allCanvases) {
-      const isPersp = c === p || Boolean(c.closest?.('.cvat-canvas3d-perspective'));
       if (!this.knownDomCanvases.has(c)) {
         this.knownDomCanvases.add(c);
         foundNew = true;
-        this.attachCanvasSetupListener(c, isPersp);
+        this.attachCanvasSetupListener(c);
       }
       if (c !== p && c !== t && c !== s && c !== f && !this.extraSceneCanvases.has(c)) {
         this.extraSceneCanvases.add(c);
@@ -1577,15 +1311,11 @@ export class PageBridgeRuntimeHost {
     if (!this.hookedPerspectiveCanvases.has(perspCanvas)) {
       this.hookedPerspectiveCanvases.add(perspCanvas);
       this.knownDomCanvases.add(perspCanvas);
-      this.attachCanvasSetupListener(perspCanvas, true);
-      perspCanvas.addEventListener('canvas.edited', () => {
-        this.invalidateSceneObjectCaches();
-        this.syncActiveObjectQaOverlay(true);
-      });
+      this.attachCanvasSetupListener(perspCanvas);
       const onCanvasObjectsMutated = (): void => {
         this.invalidateSceneObjectCaches();
-        this.syncActiveObjectQaOverlay(false);
       };
+      perspCanvas.addEventListener('canvas.edited', onCanvasObjectsMutated);
       perspCanvas.addEventListener('canvas.drawn', onCanvasObjectsMutated);
       perspCanvas.addEventListener('canvas.deleted', onCanvasObjectsMutated);
       perspCanvas.addEventListener('canvas.canceled', onCanvasObjectsMutated);
@@ -1776,7 +1506,6 @@ export class PageBridgeRuntimeHost {
         colorPointsByCuboid: config.colorPointsByCuboid ?? current.colorPointsByCuboid,
         fixedOrthoPointSize: current.fixedOrthoPointSize ?? true,
         followActiveObject: current.followActiveObject ?? true,
-        enableActiveObjectWarnings: current.enableActiveObjectWarnings ?? true,
       };
       writeRenderOptionsToClientSettings(next, this.win.localStorage);
       this.preRenderEnhancer.setOptions(next, canvasInstance);

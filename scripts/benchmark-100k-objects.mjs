@@ -67,8 +67,6 @@ const { ActiveObjectCameraFollower } =
   await import('../src/integration/cvat/runtime/camera-follow.ts');
 const { lockRaycasterHoverToActiveObject } =
   await import('../src/integration/cvat/runtime/hover-lock.ts');
-const { evaluateSpatialAndPointCloudWarnings } =
-  await import('../src/integration/cvat/runtime/active-object-qa-overlay.ts');
 
 let findObjectStateByClientId = null;
 const stateLookupPath = resolve(REPO_ROOT, 'src/integration/cvat/runtime/state-lookup.ts');
@@ -235,10 +233,10 @@ const sharedOrthoMeshStub = {
   material: { color: createMockColor(), depthWrite: true },
 };
 
-const QA_TARGET_ID = 50_000;
-const QA_TARGET_X = 24.0;
-const QA_TARGET_Y = 2.0;
-const QA_TARGET_Z = 0.35;
+const TARGET_ID = 50_000;
+const TARGET_X = 24.0;
+const TARGET_Y = 2.0;
+const TARGET_Z = 0.35;
 
 const states100k = new Array(CUBOID_COUNT);
 const meshList100k = new Array(CUBOID_COUNT);
@@ -257,19 +255,19 @@ for (let i = 0; i < CUBOID_COUNT; i += 1) {
   let W = 1.7 + rand() * 0.35;
   let H = 1.5 + rand() * 0.35;
 
-  if (i === QA_TARGET_ID) {
-    x = QA_TARGET_X;
-    y = QA_TARGET_Y;
-    z = QA_TARGET_Z;
+  if (i === TARGET_ID) {
+    x = TARGET_X;
+    y = TARGET_Y;
+    z = TARGET_Z;
     rz = 0.1;
     L = 4.4;
     W = 1.9;
     H = 1.6;
   } else if (i === CUBOID_COUNT - 2) {
-    // Late overlapping duplicate to force full-table [F] scan when unindexed
-    x = QA_TARGET_X + 0.25;
-    y = QA_TARGET_Y - 0.15;
-    z = QA_TARGET_Z;
+    // Late overlapping duplicate near the target box
+    x = TARGET_X + 0.25;
+    y = TARGET_Y - 0.15;
+    z = TARGET_Z;
     rz = 0.12;
     L = 4.4;
     W = 1.9;
@@ -289,14 +287,14 @@ for (let i = 0; i < CUBOID_COUNT; i += 1) {
     // 80% along the [-80..80]m x [-15..15]m road corridor
     x = (rand() - 0.5) * 160;
     y = (rand() - 0.5) * 30;
-    if (Math.hypot(x - QA_TARGET_X, y - QA_TARGET_Y) < 3.5) {
+    if (Math.hypot(x - TARGET_X, y - TARGET_Y) < 3.5) {
       x += 6.0;
     }
   } else {
     // 20% widely dispersed
     x = (rand() - 0.5) * 480;
     y = (rand() - 0.5) * 360;
-    if (Math.hypot(x - QA_TARGET_X, y - QA_TARGET_Y) < 3.5) {
+    if (Math.hypot(x - TARGET_X, y - TARGET_Y) < 3.5) {
       x -= 6.0;
     }
   }
@@ -687,44 +685,9 @@ function measureSteadyRender60Ticks() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. qa-spatial-100k: evaluateSpatialAndPointCloudWarnings ([F] + fallback [Z]) + state lookup
+// 5. state-lookup-100k: active ObjectState lookup on a 100k Redux states array
 // ---------------------------------------------------------------------------
-function measureQaSpatial100k() {
-  const targetEntry = drawnObjects100k[QA_TARGET_ID];
-  const targetPoints = targetEntry.data.points;
-  // 8 internal mid-body points inside box #50000 with NO ground ring / under-box points
-  // -> exercises full [F] overlap scan AND full [Z] neighbor fallback scan!
-  const localBodyPoints = new Float32Array(8 * 3);
-  for (let k = 0; k < 8; k += 1) {
-    localBodyPoints[k * 3] = QA_TARGET_X + (k % 2 === 0 ? -0.6 : 0.6);
-    localBodyPoints[k * 3 + 1] = QA_TARGET_Y + (k < 4 ? -0.35 : 0.35);
-    localBodyPoints[k * 3 + 2] = QA_TARGET_Z + (k % 4) * 0.12 - 0.65;
-  }
-
-  // Warmup
-  const warmQa = evaluateSpatialAndPointCloudWarnings({
-    clientID: QA_TARGET_ID,
-    currentPoints: targetPoints,
-    occluded: false,
-    outside: false,
-    drawnObjects: drawnObjects100k,
-    positionArray: localBodyPoints,
-  });
-
-  const qaSamples = [];
-  for (let run = 0; run < 5; run += 1) {
-    const t0 = performance.now();
-    evaluateSpatialAndPointCloudWarnings({
-      clientID: QA_TARGET_ID,
-      currentPoints: targetPoints,
-      occluded: false,
-      outside: false,
-      drawnObjects: drawnObjects100k,
-      positionArray: localBodyPoints,
-    });
-    qaSamples.push(performance.now() - t0);
-  }
-
+function measureStateLookup100k() {
   // Compare 60 state lookups (30 hits near tail `99999` + 30 misses `100005` for filtered object)
   const statesFindSamples = [];
   for (let run = 0; run < 5; run += 1) {
@@ -766,12 +729,9 @@ function measureQaSpatial100k() {
   }
 
   return {
-    medianMs: median(qaSamples),
-    qaWarningsTriggered: warmQa.warnings.map((w) => w.code),
     statesFind60CallsMedianMs: median(statesFindSamples),
     stateLookup60CallsMedianMs,
     stateLookupCached60CallsMedianMs,
-    runsMs: qaSamples.map(roundMs),
   };
 }
 
@@ -788,7 +748,7 @@ const results = {
   'filter-toggle-default': measureFilterToggleDefault(),
   'next-frame-colored-ground': measureNextFrameColoredGround(),
   'steady-render-60-ticks': measureSteadyRender60Ticks(),
-  'qa-spatial-100k': measureQaSpatial100k(),
+  'state-lookup-100k': measureStateLookup100k(),
 };
 results.meta.totalBenchmarkMs = roundMs(performance.now() - totalStart);
 

@@ -2,7 +2,7 @@
 
 ![Biểu tượng Meow](public/assets/meow-128.png)
 
-Meow là tiện ích trình duyệt Manifest V3 hỗ trợ thao tác và kiểm tra nhãn 3D trong CVAT. Công cụ bổ sung các điều khiển cho cuboid, tùy chọn hiển thị point cloud và cảnh báo QA ngay trong workspace CVAT.
+Meow là tiện ích trình duyệt Manifest V3 hỗ trợ thao tác và kiểm tra nhãn 3D trong CVAT. Công cụ bổ sung các điều khiển cho cuboid, tùy chọn hiển thị point cloud ngay trong workspace CVAT.
 
 - **Trình duyệt:** Chrome hoặc Brave hỗ trợ Manifest V3; manifest yêu cầu Chrome 114 trở lên.
 - **Môi trường:** job annotation 3D trên CVAT. Các bản CVAT tự tùy chỉnh có thể khác về giao diện và API nội bộ.
@@ -83,12 +83,11 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 - **Tia đỏ căn đáy** xuất hiện trong Side/Front tại lát thấp nhất của cuboid đang chọn, kể cả ô nhỏ. Tia là lớp hiển thị, không chỉnh hình học annotation.
 - **Giữ object trên màn hình khi chuyển frame**: camera được dịch theo thay đổi vị trí của object đang chọn, khi runtime cung cấp thông tin camera và frame phù hợp. Việc chỉnh box trong cùng frame không chủ động kéo camera theo box.
 
-### Point cloud và QA
+### Point cloud
 
 - Tùy chọn **ẩn đất** chỉ lọc điểm mặt đất trong **Top**; 3D chính, Side và Front giữ đầy đủ điểm đất. Tắt tùy chọn để khôi phục điểm trong Top.
 - Point ở khung 3D chính có thể được tăng **20%** so với kích thước gốc, vẫn thay đổi theo zoom. Tùy chọn riêng giữ point Top/Side/Front ở **3,5 px**.
 - Có thể dùng nền trắng, chuyển các điểm ngoài box sang màu đen/trắng, hoặc tô màu điểm trong cuboid.
-- Cảnh báo QA cho object đang chọn có thể hiển thị các nhóm kiểm tra kích thước, đồng bộ, độ cao, hướng, bước nhảy và độ khớp point cloud. Cảnh báo là thông tin hỗ trợ; cần kiểm tra lại trên dữ liệu và quy trình của dự án.
 
 ## Các tùy chọn trong Settings → Workspace
 
@@ -102,7 +101,6 @@ Meow thêm các checkbox vào tab Workspace của CVAT. Tên dưới đây khớ
 | Hide ground points in Top view only                     | Chỉ ẩn điểm đất ở Top.                                          |
 | Fixed 3.5px point size in Top/Side/Front views          | Giữ kích thước point cố định trong các góc nhìn trực giao.      |
 | Keep active object fixed on screen when changing frames | Bám camera theo object đang chọn khi chuyển frame.              |
-| Show QA warnings on 3D canvas for active object         | Bật cảnh báo QA cho object đang chọn.                           |
 | Show cuboid base guide                                  | Hiện tia căn đáy ở Side/Front.                                  |
 | Double-click focuses without Quick filter               | Giữ focus và bỏ Quick filter tự động khi double-click.          |
 | Mouse side buttons: previous / next frame               | Nút hông Back lùi frame, Forward tiến frame trong job 3D.       |

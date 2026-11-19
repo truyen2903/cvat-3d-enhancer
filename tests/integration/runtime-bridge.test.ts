@@ -127,45 +127,6 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     expect(dirty).not.toHaveBeenCalled();
   });
 
-  it('defers QA scans during canvas drags and resumes on release without leaking listeners', () => {
-    vi.useFakeTimers();
-    const host = new PageBridgeRuntimeHost(
-      'perf_test_bridge_session_token_999999',
-      window as never,
-      document
-    );
-    const internal = host as unknown as {
-      syncActiveObjectQaOverlay: (force?: boolean) => void;
-      getActiveCanvas3dInstance: () => null;
-      qaEvalTimer: number | null;
-      lastQaSignature: string;
-    };
-    const lookup = vi.spyOn(internal, 'getActiveCanvas3dInstance').mockReturnValue(null);
-    const stop = host.start();
-    try {
-      const scan = vi.fn();
-      internal.qaEvalTimer = setTimeout(scan, 120);
-      internal.lastQaSignature = 'pending-report';
-      document
-        .querySelector('canvas')!
-        .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      lookup.mockClear();
-      internal.syncActiveObjectQaOverlay(true);
-      vi.advanceTimersByTime(200);
-      expect(scan).not.toHaveBeenCalled();
-      expect(lookup).not.toHaveBeenCalled();
-      window.dispatchEvent(new MouseEvent('pointerup'));
-      expect(lookup).toHaveBeenCalled();
-      stop();
-      lookup.mockClear();
-      window.dispatchEvent(new MouseEvent('pointerup'));
-      expect(lookup).not.toHaveBeenCalled();
-    } finally {
-      stop();
-      vi.useRealTimers();
-    }
-  });
-
   it('updates base guides from the renderer and removes them on deselection and shutdown', () => {
     const host = new PageBridgeRuntimeHost(
       'base_guide_session_token_999999',
@@ -281,7 +242,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     }
   });
 
-  it('ignores Appearance and QA animation mutations while retaining sidebar control updates', async () => {
+  it('ignores Appearance animation mutations while retaining sidebar control updates', async () => {
     const frames: FrameRequestCallback[] = [];
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
       frames.push(callback);
@@ -473,7 +434,6 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
         entry: null;
         state: CvatObjectStateLike;
       } | null;
-      syncActiveObjectQaOverlay: (force?: boolean) => void;
       commitCuboidPoints: (clientID: number, points: number[]) => Promise<void>;
     };
 
@@ -486,15 +446,12 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     const redrawSpy = vi
       .spyOn(internal.preRenderEnhancer, 'requestViewsRedraw')
       .mockImplementation(() => {});
-    const qaSpy = vi.spyOn(internal, 'syncActiveObjectQaOverlay').mockImplementation(() => {});
-
     const nextPts = [1.5, 2.2, 0, 0, 0, 0.1, 4.2, 1.8, 1.5];
     await internal.commitCuboidPoints(7, nextPts);
 
     expect(updatePositionSpy).toHaveBeenCalledWith(stateObj, nextPts);
     expect(markDirtySpy).not.toHaveBeenCalled();
     expect(redrawSpy).toHaveBeenCalledOnce();
-    expect(qaSpy).toHaveBeenCalledWith(true);
   });
 
   it('short-circuits redundant Redux globalStateDidUpdate notifications and skips matching shape dispatches', () => {
@@ -566,25 +523,25 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     );
     const internal = host as unknown as {
       handleGlobalStateUpdate: () => void;
-      syncActiveObjectQaOverlay: (force?: boolean) => void;
+      getActiveCanvas3dInstance: () => unknown;
       applyCanvasVisualConfig: (cfg: Record<string, unknown>) => void;
     };
-    const qaSpy = vi.spyOn(internal, 'syncActiveObjectQaOverlay').mockImplementation(() => {});
+    const syncSpy = vi.spyOn(internal, 'getActiveCanvas3dInstance');
 
     internal.handleGlobalStateUpdate();
-    expect(qaSpy).toHaveBeenCalledTimes(1);
+    expect(syncSpy).toHaveBeenCalledTimes(1);
 
     // Unrelated Redux dispatches keeping (frame, activatedStateID, statesRef, canvasInstance) identical
     for (let i = 0; i < 10; i += 1) {
       internal.handleGlobalStateUpdate();
     }
-    expect(qaSpy).toHaveBeenCalledTimes(1);
+    expect(syncSpy).toHaveBeenCalledTimes(1);
 
     // Changing frame or states reference runs the sync again
     currentFrame = 11;
     currentStates = [...currentStates];
     internal.handleGlobalStateUpdate();
-    expect(qaSpy).toHaveBeenCalledTimes(2);
+    expect(syncSpy).toHaveBeenCalledTimes(2);
 
     // Matching settings.shapes & model.data.configuration skip redundant dispatch/configure
     internal.applyCanvasVisualConfig({
