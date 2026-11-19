@@ -6,12 +6,15 @@ import {
   availableActions,
   composeAddFilter,
   composeOnlyFilter,
+  forwardPinFrames,
   objectIdLogic,
+  pinBottomPoints,
   planBottomAlign,
   planSizeSync,
   planSourceSync,
   planSwap,
   resolvePair,
+  syncSizePoints,
 } from '../../src/integration/cvat/runtime/multi-object-actions';
 import {
   collectNeighborPins,
@@ -122,7 +125,9 @@ describe('filter composition', () => {
   it('adds the cluster with OR to a non-empty filter and keeps the keypoint filter', () => {
     const current = [{ '==': [{ var: 'label' }, 'car'] }, { kp: 1 }];
     const next = composeAddFilter(current, [7, 3, 7]);
-    expect(next[0]).toEqual({ or: [current[0], { in: [{ var: 'objectID' }, [3, 7]] }] });
+    expect(next[0]).toEqual({
+      or: [current[0], { '==': [{ var: 'objectID' }, 3] }, { '==': [{ var: 'objectID' }, 7] }],
+    });
     expect(next[1]).toEqual({ kp: 1 });
   });
   it('uses just the id filter when nothing is active and keeps string filters as strings', () => {
@@ -132,7 +137,9 @@ describe('filter composition', () => {
     expect(JSON.parse(next[0] as string).or).toHaveLength(2);
   });
   it('only-filter replaces everything and history restores previous filters LIFO', () => {
-    expect(composeOnlyFilter([5, 4])).toEqual([{ in: [{ var: 'objectID' }, [4, 5]] }]);
+    expect(composeOnlyFilter([5, 4])).toEqual([
+      { or: [{ '==': [{ var: 'objectID' }, 4] }, { '==': [{ var: 'objectID' }, 5] }] },
+    ]);
     const history = new FilterHistory(2);
     history.push([1]);
     history.push([2]);
@@ -141,6 +148,33 @@ describe('filter composition', () => {
     expect(history.pop()).toEqual([3]);
     expect(history.pop()).toEqual([2]);
     expect(history.pop()).toBeUndefined();
+  });
+});
+
+describe('CVAT filter builder compatibility', () => {
+  it('writes ObjectID rules as one flat OR group and appends to an existing OR group', () => {
+    const first = composeOnlyFilter([2]);
+    expect(first).toEqual([{ or: [{ '==': [{ var: 'objectID' }, 2] }] }]);
+    const added = composeAddFilter(first, [3, 2]);
+    expect(added).toEqual([
+      { or: [{ '==': [{ var: 'objectID' }, 2] }, { '==': [{ var: 'objectID' }, 3] }] },
+    ]);
+    expect(JSON.stringify(added)).not.toContain('"in"');
+  });
+});
+
+describe('multi-frame planners', () => {
+  it('forward pin frames are this frame plus later keyframes of either track', () => {
+    expect(forwardPinFrames(5, [0, 4, 10], [6, 3, 12])).toEqual([5, 6, 10, 12]);
+  });
+  it('pins a box onto the source bottom and syncs size keeping the bottom', () => {
+    const pinned = pinBottomPoints([1, 2, 0, 0, 0, 0, 4, 2, 2], [9, 9, 3, 0, 0, 0, 1, 1, 1]);
+    expect(pinned![2]! - pinned![8]! / 2).toBeCloseTo(2.5);
+    expect(pinned!.slice(0, 2)).toEqual([1, 2]);
+    const synced = syncSizePoints([1, 2, 1, 0, 0, 0.3, 4, 2, 2], [3, 1, 1]);
+    expect(synced!.slice(6, 9)).toEqual([3, 1, 1]);
+    expect(synced![2]! - synced![8]! / 2).toBeCloseTo(0);
+    expect(synced![5]).toBe(0.3);
   });
 });
 
@@ -364,7 +398,10 @@ class FakeState {
   public readonly clientID: number;
   public readonly label = LABEL;
   public readonly outside = false;
-  public readonly __internal: { save: (frame: number, state: FakeState) => FakeState };
+  public readonly __internal: {
+    save: (frame: number, state: FakeState) => FakeState;
+    export: () => { shapes: { frame: number; outside: boolean }[] };
+  };
   private data: {
     points: number[];
     attributes: Record<string, string>;
@@ -389,7 +426,12 @@ class FakeState {
       },
     });
     this.updateFlags = flags as FakeState['updateFlags'];
-    this.__internal = { save: (f, s) => model.save(f, s) };
+    this.__internal = {
+      save: (f, s) => model.save(f, s),
+      export: () => ({
+        shapes: Object.keys(model.shapes).map((key) => ({ frame: Number(key), outside: false })),
+      }),
+    };
   }
   public get points(): number[] {
     return this.data.points;
@@ -787,6 +829,41 @@ describe('older CVAT without job.annotations.saveStates', () => {
   });
 });
 
+describe('multi-frame cluster actions', () => {
+  it('syncs size on every keyframe of same-label tracks keeping each bottom', async () => {
+    const w = createWorld();
+    await w.load();
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('sync-size-track', [1, 2], 1)).toBe(true);
+    for (const f of [4, 5, 6]) {
+      const p = w.t2.shapes[f]!.points;
+      expect(p.slice(6, 9)).toEqual([4, 2, 2]);
+      expect(p[2]! - p[8]! / 2).toBeCloseTo(-0.6);
+      expect(p[0]).toBe(f);
+      expect(p[5]).toBe(0.5);
+    }
+    expect(Object.keys(w.t2.shapes)).toEqual(['4', '5', '6']);
+    expect(String(toast.mock.calls.at(-1)![0])).toContain('Ctrl+Z 3');
+    for (let i = 0; i < 3; i += 1) await w.nativeStep('undo');
+    expect(w.t2.shapes[5]!.points.slice(6, 9)).toEqual([3, 1.8, 1.2]);
+  });
+
+  it('pins the bottom to the source from this frame to the end, keeping earlier frames', async () => {
+    const w = createWorld();
+    await w.load();
+    const before2 = w.t1.snapshot(2).points.slice(0, 9);
+    const { runner } = makeRunner(w.store);
+    expect(await runner.run('pin-bottom-forward', [2, 1], 2)).toBe(true);
+    // source t2 bottom = 0 - 1.2 / 2 = -0.6; target t1 H = 2 -> z = 0.4 on frames 5, 6, 10
+    for (const f of [5, 6, 10]) expect(w.t1.shapes[f]!.points[2]).toBeCloseTo(0.4);
+    // frame 4 pinned at its interpolated value, frame 0 and frames before 4 untouched
+    expect(w.t1.shapes[4]!.points.slice(0, 3)).toEqual([4, 0, 0]);
+    expect(w.t1.shapes[0]!.points[2]).toBe(0);
+    expect(w.t1.snapshot(2).points.slice(0, 9)).toEqual(before2);
+    expect(w.t1.snapshot(8).points[2]).toBeCloseTo(0.4);
+  });
+});
+
 describe('filters', () => {
   it('adds to / replaces the CVAT filter, keeps history and restores it', async () => {
     const w = createWorld();
@@ -797,14 +874,14 @@ describe('filters', () => {
     await runner.run('filter-add', [4, 5], 1);
     expect(w.dispatched[0]).toEqual({
       type: 'CHANGE_ANNOTATIONS_FILTERS',
-      payload: { filters: [{ or: [base, objectIdLogic([4, 5])] }] },
+      payload: { filters: [{ or: [base, ...(objectIdLogic([4, 5]).or as unknown[])] }] },
     });
     expect(w.dispatched[1]!.type).toBe('FETCH_ANNOTATIONS_SUCCESS');
     await runner.run('filter-only', [9], 1);
     expect(w.dispatched[2]!.payload).toEqual({ filters: [objectIdLogic([9])] });
     await runner.run('filter-restore', [9], 1);
     expect(w.dispatched[4]!.payload).toEqual({
-      filters: [{ or: [base, objectIdLogic([4, 5])] }],
+      filters: [{ or: [base, ...(objectIdLogic([4, 5]).or as unknown[])] }],
     });
     expect(runner.filterHistory.size).toBe(1);
   });

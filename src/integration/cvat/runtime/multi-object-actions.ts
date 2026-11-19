@@ -3,9 +3,11 @@
  * executes them through CVAT's official write path. Cuboid points: [x, y, z, rx, ry, rz, L, W, H].
  */
 import type { CvatObjectStateLike } from './pre-render-enhancer';
+import { trackKeyframes } from './track-editing';
 import {
   applyCvatFilters,
   readCvatContext,
+  readFrameStates,
   readUnfilteredFrameStates,
   refreshCvatAnnotations,
   writeStatesAtFrame,
@@ -26,7 +28,9 @@ export type MultiActionId =
   | 'hide'
   | 'show'
   | 'pin-bottom'
+  | 'pin-bottom-forward'
   | 'sync-size'
+  | 'sync-size-track'
   | 'add-surroundings'
   | 'set-source'
   | 'clear';
@@ -46,8 +50,14 @@ export const MULTI_ACTIONS: readonly MultiActionDef[] = [
   { id: 'filter-restore', label: 'Trả về filter trước', scope: 'cluster' },
   { id: 'hide', label: 'Ẩn cụm', scope: 'cluster' },
   { id: 'show', label: 'Hiện lại cụm', scope: 'cluster' },
-  { id: 'pin-bottom', label: 'Ghim đáy theo gốc', scope: 'cluster' },
-  { id: 'sync-size', label: 'Đồng bộ kích thước theo gốc', scope: 'cluster' },
+  { id: 'pin-bottom', label: 'Ghim đáy theo gốc (frame này)', scope: 'cluster' },
+  {
+    id: 'pin-bottom-forward',
+    label: 'Ghim đáy theo gốc (frame này → cuối track)',
+    scope: 'cluster',
+  },
+  { id: 'sync-size', label: 'Đồng bộ kích thước theo gốc (frame này)', scope: 'cluster' },
+  { id: 'sync-size-track', label: 'Đồng bộ kích thước theo gốc (mọi frame)', scope: 'cluster' },
   { id: 'add-surroundings', label: 'Thêm vật thể xung quanh', scope: 'selection' },
   { id: 'set-source', label: 'Đặt làm gốc', scope: 'selection' },
   { id: 'clear', label: 'Bỏ chọn', scope: 'selection' },
@@ -196,6 +206,51 @@ export function planSizeSync(
   return { writes, attributesBlocked: false, skipped };
 }
 
+/* ---------------------------------------------------------------- multi-frame planning */
+
+/** Upper bound on frames one multi-frame action may touch (each frame is one native undo step). */
+export const MAX_MULTI_FRAME_WRITES = 2000;
+
+/**
+ * Frames at which a target track must hold a keyframe so its bottom follows the source from
+ * `frame` on: `frame` plus every later keyframe of either track. Between those frames both boxes
+ * interpolate linearly, so `z - H/2` of the target stays on the source's bottom plane.
+ */
+export function forwardPinFrames(
+  frame: number,
+  targetKeyframes: readonly number[],
+  sourceKeyframes: readonly number[]
+): number[] {
+  const frames = new Set<number>([frame]);
+  for (const k of [...targetKeyframes, ...sourceKeyframes]) if (k > frame) frames.add(k);
+  return [...frames].sort((a, b) => a - b);
+}
+
+/** Target box at one frame standing on the source's bottom plane, keeping its own H. */
+export function pinBottomPoints(
+  target: readonly number[],
+  source: readonly number[]
+): number[] | null {
+  if (target.length < 9 || source.length < 9) return null;
+  const next = [...target];
+  next[2] = source[2]! - source[8]! / 2 + target[8]! / 2;
+  return next;
+}
+
+/** Target box at one frame taking the source's L/W/H while keeping its own bottom plane. */
+export function syncSizePoints(
+  target: readonly number[],
+  size: readonly [number, number, number]
+): number[] | null {
+  if (target.length < 9) return null;
+  const next = [...target];
+  next[2] = target[2]! - target[8]! / 2 + size[2] / 2;
+  next[6] = size[0];
+  next[7] = size[1];
+  next[8] = size[2];
+  return next;
+}
+
 /* ---------------------------------------------------------------- filters (JSONLogic) */
 
 export type JsonLogic = Record<string, unknown>;
@@ -204,9 +259,23 @@ function sortedUnique(ids: Iterable<number>): number[] {
   return [...new Set(ids)].sort((x, y) => x - y);
 }
 
-/** CVAT's `objectID` filter field is the object's clientID (the id shown in the sidebar). */
+/** One `ObjectID == id` rule, exactly as CVAT's filter builder writes it. */
+function objectIdRule(id: number): JsonLogic {
+  return { '==': [{ var: 'objectID' }, id] };
+}
+
+/**
+ * CVAT's `objectID` filter field is the object's clientID (the id shown in the sidebar). The
+ * filter is an OR group of `ObjectID == id` rules: that is what CVAT's own Filter dialog produces
+ * and can load back (`QbUtils.loadFromJsonLogic`), so the result shows up and stays editable in
+ * CVAT's Filter UI instead of an opaque Meow-only expression.
+ */
 export function objectIdLogic(ids: Iterable<number>): JsonLogic {
-  return { in: [{ var: 'objectID' }, sortedUnique(ids)] };
+  return { or: sortedUnique(ids).map(objectIdRule) };
+}
+
+function ruleKey(rule: unknown): string {
+  return JSON.stringify(rule);
 }
 
 function parseLogic(entry: unknown): { logic: JsonLogic | null; asString: boolean } {
@@ -230,15 +299,29 @@ function hasLogic(logic: JsonLogic | null): logic is JsonLogic {
   return logic !== null && Object.keys(logic).length > 0;
 }
 
-/** `current OR (objectID in ids)`; the optional keypoint filter (index 1) is preserved. */
+/**
+ * `current OR ObjectID == id ...`; the optional keypoint filter (index 1) is preserved. When the
+ * current filter already is an OR group the new rules are appended to it (no nesting, no
+ * duplicates), so repeated "add" keeps one flat group in CVAT's Filter dialog.
+ */
 export function composeAddFilter(current: readonly unknown[], ids: Iterable<number>): unknown[] {
   const { logic, asString } = parseLogic(current[0]);
-  const idLogic = objectIdLogic(ids);
-  const merged = hasLogic(logic) ? { or: [logic, idLogic] } : idLogic;
+  const rules = objectIdLogic(ids).or as JsonLogic[];
+  let merged: JsonLogic;
+  if (!hasLogic(logic)) {
+    merged = { or: rules };
+  } else {
+    const keys = Object.keys(logic);
+    const existing: unknown[] =
+      keys.length === 1 && keys[0] === 'or' && Array.isArray(logic.or) ? [...logic.or] : [logic];
+    const seen = new Set(existing.map(ruleKey));
+    for (const rule of rules) if (!seen.has(ruleKey(rule))) existing.push(rule);
+    merged = { or: existing };
+  }
   return [asString ? JSON.stringify(merged) : merged, ...current.slice(1)];
 }
 
-/** Replace the object filter with `objectID in ids`. */
+/** Replace the object filter with `ObjectID == id` rules for the selection. */
 export function composeOnlyFilter(ids: Iterable<number>): unknown[] {
   return [objectIdLogic(ids)];
 }
@@ -275,7 +358,13 @@ export function availableActions(ctx: ActionAvailability): MultiActionDef[] {
   return MULTI_ACTIONS.filter((def) => {
     if (def.scope === 'pair') return ctx.pair && (def.id !== 'sync-source-target' || ctx.hasSource);
     if (def.id === 'filter-restore') return ctx.filterHistorySize > 0;
-    if (def.id === 'pin-bottom' || def.id === 'sync-size') return ctx.hasSource;
+    if (
+      def.id === 'pin-bottom' ||
+      def.id === 'pin-bottom-forward' ||
+      def.id === 'sync-size' ||
+      def.id === 'sync-size-track'
+    )
+      return ctx.hasSource;
     if (def.id === 'set-source') return false; // offered by the menu only when a target is under the cursor
     return ctx.selectionSize > 0;
   });
@@ -456,6 +545,9 @@ export class MultiObjectRunner {
       case 'pin-bottom':
       case 'sync-size':
         return this.runCluster(id, selection, activeID);
+      case 'pin-bottom-forward':
+      case 'sync-size-track':
+        return this.runClusterFrames(id, selection, activeID);
       default:
         return false;
     }
@@ -560,6 +652,204 @@ export class MultiObjectRunner {
       notes
     );
     return summary.written > 0;
+  }
+
+  /**
+   * Cluster edits over many frames. Each frame is written through the same official path
+   * (`saveStates`), so every written frame is one native undo step; the toast says how many.
+   * - `sync-size-track`: every keyframe of each same-label target track takes the source's L/W/H
+   *   (from the current frame) and keeps its own bottom. Only existing keyframes are written, so
+   *   interpolated frames follow without new keyframes. Shapes are written on this frame only.
+   * - `pin-bottom-forward`: from this frame to the end, each target stands on the source's bottom
+   *   at this frame and at every later keyframe of either track (see `forwardPinFrames`); frame
+   *   f-1 is pinned first when interpolated so earlier frames do not move.
+   */
+  private async runClusterFrames(
+    id: 'pin-bottom-forward' | 'sync-size-track',
+    selection: readonly number[],
+    activeID: number | null
+  ): Promise<boolean> {
+    if (activeID === null) {
+      this.host.toast(
+        'Chưa có object gốc: click thường vào một object (hoặc chuột phải → Đặt làm gốc)',
+        'error'
+      );
+      return false;
+    }
+    const scope = this.scope!;
+    const others = selection.filter((x) => x !== activeID);
+    const resolved = await this.resolveStates([activeID, ...others]);
+    if (!resolved) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+    const source = resolved.states.get(activeID);
+    const sourcePoints = source?.points;
+    if (!source || !sourcePoints || sourcePoints.length < 9 || source.outside) {
+      this.host.toast('Object gốc không có hộp 3D hợp lệ trên frame hiện tại', 'error');
+      return false;
+    }
+    const keyframesOf = (state: CvatObjectStateLike): number[] | null => {
+      if (state.objectType !== 'track') return null;
+      try {
+        return trackKeyframes(state);
+      } catch {
+        return null;
+      }
+    };
+    const sourceKeyframes = keyframesOf(source) ?? [];
+    const size: [number, number, number] = [sourcePoints[6]!, sourcePoints[7]!, sourcePoints[8]!];
+
+    // frame -> clientIDs to write there, plus f-1 pins for the forward pin
+    const plan = new Map<number, Set<number>>();
+    const pinPrevious = new Set<number>();
+    const add = (frame: number, clientID: number): void => {
+      if (frame < 0 || (scope.job.stopFrame !== undefined && frame > scope.job.stopFrame)) return;
+      let ids = plan.get(frame);
+      if (!ids) plan.set(frame, (ids = new Set()));
+      ids.add(clientID);
+    };
+    let skippedLabel = 0;
+    let onlyThisFrame = 0;
+    for (const otherID of others) {
+      const target = resolved.states.get(otherID);
+      if (!target) continue;
+      if (id === 'sync-size-track' && !sameLabel(source, target)) {
+        skippedLabel += 1;
+        continue;
+      }
+      const keyframes = keyframesOf(target);
+      if (!keyframes) {
+        add(scope.frame, otherID);
+        if (target.objectType === 'track') onlyThisFrame += 1;
+        continue;
+      }
+      if (id === 'sync-size-track') {
+        add(scope.frame, otherID);
+        for (const k of keyframes) add(k, otherID);
+      } else {
+        for (const k of forwardPinFrames(scope.frame, keyframes, sourceKeyframes)) add(k, otherID);
+        if (!keyframes.includes(scope.frame - 1)) pinPrevious.add(otherID);
+      }
+    }
+    const frames = [...plan.keys()].sort((a, b) => a - b);
+    if (!frames.length) {
+      this.host.toast(
+        skippedLabel
+          ? `Không có object cùng label (bỏ qua ${skippedLabel})`
+          : 'Chưa chọn object đích',
+        'error'
+      );
+      return false;
+    }
+    if (frames.length + (pinPrevious.size ? 1 : 0) > MAX_MULTI_FRAME_WRITES) {
+      this.host.toast(
+        `Quá nhiều frame (${frames.length}); giới hạn ${MAX_MULTI_FRAME_WRITES} frame mỗi thao tác`,
+        'error'
+      );
+      return false;
+    }
+    if (!this.isCurrent()) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+
+    const ctx = readCvatContext(this.host.getStore());
+    const total: WriteSummary = {
+      written: 0,
+      pinnedNeighbors: 0,
+      skippedLocked: 0,
+      skippedOutside: 0,
+      failed: 0,
+      refused: false,
+      historyMode: 'none',
+      undoSteps: 0,
+    };
+    const touched = new Set<number>();
+    let sourceMissing = 0;
+    const writeFrame = async (frame: number, writes: StateWrite[]): Promise<void> => {
+      if (!writes.length) return;
+      const summary = await writeStatesAtFrame(writes, frame, {
+        job: scope.job,
+        lastFrame: ctx.lastFrame,
+        pinNeighbors: false,
+      });
+      total.written += summary.written;
+      total.skippedLocked += summary.skippedLocked;
+      total.skippedOutside += summary.skippedOutside;
+      total.failed += summary.failed;
+      total.undoSteps += summary.undoSteps;
+      if (summary.historyMode !== 'none') total.historyMode = summary.historyMode;
+      if (summary.written > 0) for (const w of writes) touched.add(w.state.clientID as number);
+    };
+
+    // Pin frame f-1 to its current (interpolated) values so earlier frames keep their geometry.
+    if (pinPrevious.size && scope.frame - 1 >= 0) {
+      const prevStates = await readFrameStates(scope.job, scope.frame - 1);
+      const pins: StateWrite[] = [];
+      for (const state of prevStates ?? []) {
+        if (typeof state.clientID !== 'number' || !pinPrevious.has(state.clientID)) continue;
+        if (state.outside || state.keyframe || !state.points || state.points.length < 9) continue;
+        pins.push({ state, points: [...state.points] });
+      }
+      const before = total.written;
+      await writeFrame(scope.frame - 1, pins);
+      total.pinnedNeighbors += total.written - before;
+      total.written = before;
+    }
+
+    for (const frame of frames) {
+      const states = await readFrameStates(scope.job, frame);
+      if (!states) {
+        total.failed += plan.get(frame)!.size;
+        continue;
+      }
+      const byId = new Map<number, CvatObjectStateLike>();
+      for (const state of states)
+        if (typeof state.clientID === 'number') byId.set(state.clientID, state);
+      const sourceAt = byId.get(activeID);
+      const writes: StateWrite[] = [];
+      for (const clientID of plan.get(frame)!) {
+        const target = byId.get(clientID);
+        if (!target?.points || target.outside) continue;
+        let next: number[] | null;
+        if (id === 'sync-size-track') {
+          next = syncSizePoints(target.points, size);
+        } else {
+          if (!sourceAt?.points || sourceAt.outside) {
+            sourceMissing += 1;
+            continue;
+          }
+          next = pinBottomPoints(target.points, sourceAt.points);
+        }
+        if (next) writes.push({ state: target, points: next });
+      }
+      await writeFrame(frame, writes);
+    }
+
+    if (total.written > 0 || total.pinnedNeighbors > 0) {
+      if (this.isCurrent()) {
+        await refreshCvatAnnotations(
+          this.host.getStore(),
+          { frame: scope.frame, job: scope.job },
+          ctx.groundTruthShown ? 'update' : 'fetch'
+        );
+      }
+      this.host.afterWrite();
+    }
+    const notes: string[] = [];
+    if (skippedLabel) notes.push(`bỏ qua ${skippedLabel} object khác label`);
+    if (onlyThisFrame)
+      notes.push(`${onlyThisFrame} track không đọc được keyframe nên chỉ sửa frame này`);
+    if (sourceMissing) notes.push(`${sourceMissing} lần gốc outside nên giữ nguyên`);
+    if (total.undoSteps > 1)
+      notes.push(`hoàn tác cần Ctrl+Z ${total.undoSteps} lần (mỗi frame một bước)`);
+    this.report(
+      total,
+      `${id === 'pin-bottom-forward' ? 'Đã ghim đáy' : 'Đã đồng bộ kích thước'} ${touched.size} object trên ${frames.length} frame`,
+      notes
+    );
+    return total.written > 0;
   }
 
   private async runHidden(hide: boolean, selection: readonly number[]): Promise<boolean> {

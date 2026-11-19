@@ -81,14 +81,14 @@ Overlay tự mất khi thả G hoặc Alt, mất focus, đổi object/frame, ho�
 
 Bật bằng **Shift+click / Shift+drag: multi-select boxes on the 3D canvas** trong Workspace (mặc định bật). Mọi thao tác chỉ ghi vào **frame đang mở**; Meow không đụng tới các frame khác. Chỉ hoạt động trong **view 3D Perspective chính**: ở Top, Side, Front và các view ortho đang phóng to/maximize, Shift+click/kéo hoàn toàn thuộc về CVAT (Meow không can thiệp).
 
-| Thao tác                                           | Kết quả                                                                                                                                        |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Click thường                                       | CVAT chọn **gốc** (object active, vẫn dùng highlight và thẻ sidebar của CVAT).                                                                 |
-| **Shift+click** box khác (chỉ view 3D Perspective) | Box đó thành **đích**, tô màu vàng. CVAT không chọn lại box này. Shift+click lần nữa để bỏ đích; Shift+click box khác sẽ thay đích (tối đa 2). |
-| **Shift+kéo chuột trái**                           | Vẽ khung chọn; khi thả, chọn các box có **tâm** chiếu nằm trong khung. Camera không xoay. Kéo tiếp để thêm.                                    |
-| **Shift+Alt+kéo** (hoặc Shift+Alt+click)           | Bỏ các box trong khung (hoặc box dưới con trỏ) khỏi vùng chọn.                                                                                 |
-| **Chuột phải** trong vùng chọn                     | Mở menu Meow thay cho menu của CVAT. Chuột phải ngoài vùng chọn, hoặc kéo camera bằng chuột phải, giữ nguyên hành vi CVAT.                     |
-| **Esc**, đổi frame, click thường object khác       | Xóa vùng chọn.                                                                                                                                 |
+| Thao tác                                           | Kết quả                                                                                                                                                                |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Click thường                                       | CVAT chọn **gốc** (object active, vẫn dùng highlight và thẻ sidebar của CVAT).                                                                                         |
+| **Shift+click** box khác (chỉ view 3D Perspective) | Box đó thành **đích**, tô màu vàng. CVAT không chọn lại box này. Shift+click lần nữa để bỏ đích; Shift+click box khác sẽ thay đích (tối đa 2).                         |
+| **Shift+kéo chuột trái**                           | Vẽ khung chọn; khi thả, chọn **mọi object** có **tâm** nằm trong khung, kể cả object **outside** và object đang **bị filter ẩn**. Camera không xoay. Kéo tiếp để thêm. |
+| **Shift+Alt+kéo** (hoặc Shift+Alt+click)           | Bỏ các box trong khung (hoặc box dưới con trỏ) khỏi vùng chọn.                                                                                                         |
+| **Chuột phải** trong vùng chọn                     | Mở menu Meow thay cho menu của CVAT. Chuột phải ngoài vùng chọn, hoặc kéo camera bằng chuột phải, giữ nguyên hành vi CVAT.                                             |
+| **Esc**, đổi frame, click thường object khác       | Xóa vùng chọn.                                                                                                                                                         |
 
 Thanh công cụ nhỏ ở góc trên trái canvas chính hiển thị số object đã chọn, các nút nhanh và **Hành động ▾** (cùng menu với chuột phải).
 
@@ -100,10 +100,13 @@ Menu khi có **gốc + 1 đích**:
 
 Menu khi có **cụm** (chọn bằng khung):
 
-- **Thêm cụm vào filter hiện tại** (`filter hiện tại OR objectID in cụm`), **Chỉ lọc cụm này**, **Trả về filter trước** (Meow giữ tối đa 10 filter trước đó).
+- **Thêm cụm vào filter hiện tại**, **Chỉ lọc cụm này**: ghi thẳng vào **filter thật của CVAT** dưới dạng nhóm `ObjectID == …` nối bằng OR, đúng định dạng hộp thoại Filter của CVAT tạo ra, nên mở **Filter** của CVAT sẽ thấy và sửa được. Thêm nhiều lần vẫn gộp vào một nhóm OR, không trùng ID. Cụm gồm cả object outside / đang bị lọc nên lọc theo cụm giữ được cả các xe đang ẩn. **Trả về filter trước** khôi phục filter CVAT trước đó (tối đa 10 bước).
 - **Ẩn cụm / Hiện lại cụm**: dùng cờ `hidden` của CVAT (biểu tượng con mắt ở sidebar).
-- **Ghim đáy theo gốc**: gốc là object đang active. Mỗi box khác giữ nguyên H và có `z = đáy_gốc + H/2`.
-- **Đồng bộ kích thước theo gốc**: box cùng label nhận L/W/H của gốc nhưng giữ đáy cũ (chỉnh z); box khác label bị bỏ qua và được đếm trong toast.
+- **Ghim đáy theo gốc (frame này)**: gốc là object đang active. Mỗi box khác giữ nguyên H và có `z = đáy_gốc + H/2`.
+- **Ghim đáy theo gốc (frame này → cuối track)**: ghim như trên tại frame hiện tại và tại **mọi keyframe sau đó** của gốc hoặc của box (đáy gốc đọc đúng tại từng frame), nên các frame nội suy ở giữa cũng nằm trên đáy gốc. Frame f−1 được giữ nguyên để các frame trước không đổi. Frame nào gốc outside thì giữ nguyên.
+- **Đồng bộ kích thước theo gốc (frame này)**: box cùng label nhận L/W/H của gốc nhưng giữ đáy cũ (chỉnh z); box khác label bị bỏ qua và được đếm trong toast.
+- **Đồng bộ kích thước theo gốc (mọi frame)**: như trên nhưng áp cho **mọi keyframe** của track (kích thước lấy từ gốc ở frame hiện tại, mỗi keyframe giữ đáy của chính nó). Không tạo keyframe mới.
+- Hai thao tác nhiều frame ghi mỗi frame là **một bước Ctrl+Z**; toast cho biết cần bấm bao nhiêu lần. Giới hạn 2.000 frame mỗi thao tác.
 - **Thêm vật thể xung quanh**: thêm các object (kể cả object đang bị filter ẩn) có tâm nằm quanh vùng chọn trên màn hình, đọc từ dữ liệu annotation đã có trong trình duyệt, không gọi server. Nếu không đọc được dữ liệu chưa lọc, Meow chỉ lấy các object đang hiển thị và nói rõ trong toast.
 - **Đặt làm gốc**: chuột phải đúng box đã chọn rồi chọn mục này để làm object active.
 

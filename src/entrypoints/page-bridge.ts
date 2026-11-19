@@ -373,12 +373,7 @@ export class PageBridgeRuntimeHost {
         const boxes: { id: number; points: number[] }[] = [];
         for (const state of states) {
           const points = state.points;
-          if (
-            typeof state.clientID === 'number' &&
-            !state.outside &&
-            Array.isArray(points) &&
-            points.length >= 9
-          )
+          if (typeof state.clientID === 'number' && Array.isArray(points) && points.length >= 9)
             boxes.push({ id: state.clientID, points });
         }
         return boxes;

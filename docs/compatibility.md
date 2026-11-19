@@ -201,6 +201,25 @@ Scope: **only the main 3D perspective canvas** (`.cvat-canvas3d-perspective`). I
 
 Robustness rules: gestures start only when `annotation.canvas.activeControl` is `cursor` (draw/group/merge/split/etc. are left to CVAT) and are re-checked on mouse release and before every menu action; a marquee is dropped if the frame or mode changed mid-drag or the button was released outside the window (next `mousemove` without button 1 cancels it); hidden and outside objects are never selected by the marquee; dispose removes every listener, the marquee, toolbar and menu.
 
+### Marquee scope, CVAT filter format and multi-frame actions
+
+- The marquee applies drawn boxes immediately, then adds every other object of the frame whose
+  center falls in the rectangle, read with `job.annotations.get(frame, allTracks = true, [])`
+  (`annotations-collection.ts:465-484`: `allTracks` keeps outside tracks; empty filters keep
+  objects hidden by the current filter). Selected objects CVAT does not draw keep their 3D box
+  for the context-menu hit area.
+- Filter actions write CVAT's real annotation filter as `{or: [{"==": [{var: "objectID"}, id]}, …]}`,
+  the shape CVAT's Filter dialog produces and restores with `QbUtils.loadFromJsonLogic`
+  (`filters-modal.tsx:322-339`). The previous `{"in": …}` form could not be loaded by the dialog,
+  which then showed an empty filter. "Add" appends to an existing top-level OR group without
+  duplicates.
+- `sync-size-track` writes only the target track's existing keyframes (size from the source at the
+  current frame, each keyframe keeps its bottom). `pin-bottom-forward` writes the current frame and
+  every later keyframe of the target or the source (source bottom read at each frame), after
+  pinning frame f-1 when interpolated. Each frame is one `saveStates` transaction, i.e. one native
+  undo step per frame (cvat-core transactions are single-frame). Frames are read with
+  `annotations.get(frame, true, [])`; at most 2000 frames per action.
+
 ### Single undo step per Meow action
 
 Every Meow write (swap, sync, align, hide/show) is one native undo step, reachable with CVAT's Ctrl+Z / Ctrl+Shift+Z and the toolbar Undo/Redo buttons:

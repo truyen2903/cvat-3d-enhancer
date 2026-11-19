@@ -21,7 +21,9 @@ import {
   projectedBounds,
   selectCentersInBox,
   type PickableBox,
+  type ClientRect,
   type ProjectionCamera,
+  type ScreenBox,
 } from './canvas-picking';
 import {
   availableActions,
@@ -69,6 +71,8 @@ interface DragState {
 export class CanvasSelectionController {
   private readonly selected = new Set<number>();
   private selectionFrame: number | null = null;
+  /** 3D boxes of selected objects CVAT does not draw (outside or hidden by the filter). */
+  private readonly knownBoxes = new Map<number, ArrayLike<number>>();
   private lastActive: number | null = null;
   private expectedActive: number | null | undefined;
   private drag: DragState | null = null;
@@ -124,6 +128,7 @@ export class CanvasSelectionController {
     if (this.selected.size === 0) return;
     for (const id of this.selected) this.unhighlight(id);
     this.selected.clear();
+    this.knownBoxes.clear();
     this.selectionFrame = null;
     this.expectedActive = undefined;
     this.renderToolbar();
@@ -190,6 +195,7 @@ export class CanvasSelectionController {
       this.selectionFrame = null;
       this.expectedActive = undefined;
     }
+    for (const id of this.knownBoxes.keys()) if (!next.has(id)) this.knownBoxes.delete(id);
     this.reapplyHighlight();
     this.renderToolbar();
   }
@@ -225,7 +231,7 @@ export class CanvasSelectionController {
   private selectedBoxes(): PickableBox[] {
     const boxes: PickableBox[] = [];
     for (const id of this.selected) {
-      const points = this.host.getDrawnEntry(id)?.data.points;
+      const points = this.host.getDrawnEntry(id)?.data.points ?? this.knownBoxes.get(id);
       if (points && points.length >= 9) boxes.push({ id, points });
     }
     return boxes;
@@ -379,27 +385,76 @@ export class CanvasSelectionController {
     }
     const rect = drag.canvas.getBoundingClientRect();
     if (drag.marquee) {
-      const ids = selectCentersInBox(
+      this.finishMarquee(
+        drag.frame,
         camera,
         rect,
-        this.drawnBoxes(),
-        normalizeBox(drag.startX, drag.startY, event.clientX, event.clientY)
-      );
-      const next = new Set(this.selected);
-      for (const id of ids) {
-        if (drag.remove) next.delete(id);
-        else next.add(id);
-      }
-      this.setSelected(next);
-      this.host.toast(
-        `${drag.remove ? 'Đã bỏ' : 'Đã chọn'} ${ids.length} object (đang chọn ${next.size})`,
-        'info'
+        normalizeBox(drag.startX, drag.startY, event.clientX, event.clientY),
+        drag.remove
       );
       return;
     }
     const picked = pickNearestBox(camera, rect, event.clientX, event.clientY, this.drawnBoxes());
     if (picked === null) return;
     this.pick(picked, drag.remove);
+  }
+
+  /**
+   * Marquee selects every object whose center projects into the rectangle. Drawn boxes are applied
+   * immediately; the frame's unfiltered objects from cvat-core (outside tracks and objects hidden
+   * by the filter) are added right after, once that in-memory read resolves.
+   */
+  private finishMarquee(
+    frame: number | null,
+    camera: ProjectionCamera,
+    rect: ClientRect,
+    box: ScreenBox,
+    remove: boolean
+  ): void {
+    const drawn = this.drawnBoxes();
+    const ids = selectCentersInBox(camera, rect, drawn, box);
+    const next = new Set(this.selected);
+    for (const id of ids) {
+      if (remove) next.delete(id);
+      else next.add(id);
+    }
+    this.setSelected(next);
+    this.host.toast(
+      `${remove ? 'Đã bỏ' : 'Đã chọn'} ${ids.length} object (đang chọn ${next.size})`,
+      'info'
+    );
+    void this.addUndrawnInBox(frame, camera, rect, box, remove, drawn);
+  }
+
+  private async addUndrawnInBox(
+    frame: number | null,
+    camera: ProjectionCamera,
+    rect: ClientRect,
+    box: ScreenBox,
+    remove: boolean,
+    drawn: readonly PickableBox[]
+  ): Promise<void> {
+    const all = await this.host.listUnfilteredFrameObjects();
+    if (!all || this.disposed || this.host.getFrame() !== frame) return;
+    const drawnIds = new Set(drawn.map((item) => item.id));
+    const undrawn = all.filter((item) => !drawnIds.has(item.id));
+    const ids = selectCentersInBox(camera, rect, undrawn, box);
+    if (!ids.length) return;
+    const byId = new Map(undrawn.map((item) => [item.id, item.points] as const));
+    const next = new Set(this.selected);
+    for (const id of ids) {
+      if (remove) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        this.knownBoxes.set(id, byId.get(id)!);
+      }
+    }
+    this.setSelected(next);
+    this.host.toast(
+      `${remove ? 'Bỏ thêm' : 'Thêm'} ${ids.length} object outside/đang bị lọc trong vùng (đang chọn ${next.size})`,
+      'info'
+    );
   }
 
   /** Shift+click: pair-mode keeps at most one target besides the active source. */
@@ -543,10 +598,13 @@ export class CanvasSelectionController {
     const ids = selectCentersInBox(camera, rect, boxes, area);
     const next = new Set(this.selected);
     let added = 0;
+    const drawnIds = new Set(this.drawnBoxes().map((item) => item.id));
     for (const id of ids)
       if (!next.has(id)) {
         next.add(id);
         added += 1;
+        const known = boxes.find((item) => item.id === id);
+        if (known && !drawnIds.has(id)) this.knownBoxes.set(id, known.points);
       }
     this.setSelected(next);
     this.host.toast(

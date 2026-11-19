@@ -175,6 +175,21 @@ describe('CanvasSelectionController', () => {
     controller.dispose();
   });
 
+  it('marquee also takes outside / filtered-out objects of the frame inside the rectangle', async () => {
+    const t = setup();
+    t.host.listUnfilteredFrameObjects.mockResolvedValueOnce([
+      { id: 2, points: [0.5, 0, 0, 0, 0, 0, 0.2, 0.2, 0.2] },
+      { id: 50, points: [0.6, -0.2, 0, 0, 0, 0, 0.2, 0.2, 0.2] },
+      { id: 51, points: [-0.9, -0.9, 0, 0, 0, 0, 0.2, 0.2, 0.2] },
+    ]);
+    t.shiftDrag([130, 70], [199, 199]);
+    expect(t.controller.has(2)).toBe(true);
+    expect(t.controller.has(4)).toBe(true);
+    await vi.waitFor(() => expect(t.controller.has(50)).toBe(true));
+    expect(t.controller.has(51)).toBe(false);
+    t.controller.dispose();
+  });
+
   it('marquee adds, then Shift+Alt removes, and never rotates the camera (events blocked)', () => {
     const { controller, shiftDrag, native, entries } = setup();
     shiftDrag([120, 80], [190, 190]); // box 2 (150,100) and 4 (180,180)

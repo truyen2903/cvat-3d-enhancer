@@ -98,24 +98,32 @@ export function readCvatContext(store: CvatStoreLike | null): CvatAnnotationCont
   };
 }
 
-/** Annotation reads below never touch the server: cvat-core serves them from its in-memory collection. */
-export async function readUnfilteredFrameStates(
-  store: CvatStoreLike | null
+/**
+ * Every object of `frame` without filters, including tracks that are outside on that frame
+ * (cvat-core `AnnotationsCollection.get(frame, allTracks = true, [])`). Served from cvat-core's
+ * in-memory collection; never touches the server.
+ */
+export async function readFrameStates(
+  job: CvatJobLike | null,
+  frame: number
 ): Promise<CvatObjectStateLike[] | null> {
-  const ctx = readCvatContext(store);
-  const get = ctx.job?.annotations?.get;
-  if (!ctx.job || typeof get !== 'function' || ctx.frame === null) return null;
+  const get = job?.annotations?.get;
+  if (!job || typeof get !== 'function') return null;
   try {
-    const states = await get.call(
-      ctx.job.annotations,
-      ctx.frame,
-      ctx.showAllInterpolationTracks,
-      []
-    );
+    const states = await get.call(job.annotations, frame, true, []);
     return Array.isArray(states) ? states : null;
   } catch {
     return null;
   }
+}
+
+/** All objects of the current frame, unfiltered and including outside tracks. */
+export async function readUnfilteredFrameStates(
+  store: CvatStoreLike | null
+): Promise<CvatObjectStateLike[] | null> {
+  const ctx = readCvatContext(store);
+  if (ctx.frame === null) return null;
+  return readFrameStates(ctx.job, ctx.frame);
 }
 
 function zRange(states: readonly CvatObjectStateLike[]): [number, number] {
@@ -273,6 +281,11 @@ export interface WriteOptions {
    * geometry.
    */
   readonly strict?: boolean;
+  /**
+   * Pin interpolated neighbors f-1 / f+1 before editing a track at f (default). Multi-frame
+   * actions that only write existing keyframes, or pin explicitly, turn this off.
+   */
+  readonly pinNeighbors?: boolean;
 }
 
 interface Before {
@@ -350,7 +363,7 @@ export async function writeStatesAtFrame(
   frame: number,
   options: WriteOptions = {}
 ): Promise<WriteSummary> {
-  const { job, lastFrame, strict = false } = options;
+  const { job, lastFrame, strict = false, pinNeighbors = true } = options;
   const summary = emptySummary();
   const todo: StateWrite[] = [];
   for (const write of writes) {
@@ -372,7 +385,7 @@ export async function writeStatesAtFrame(
   for (const write of todo) {
     const changesShape =
       write.points !== undefined || write.attributes !== undefined || write.occluded !== undefined;
-    if (changesShape && write.state.objectType === 'track') {
+    if (pinNeighbors && changesShape && write.state.objectType === 'track') {
       try {
         pins.push(...collectNeighborPins(write.state, frame, lastFrame));
       } catch {
