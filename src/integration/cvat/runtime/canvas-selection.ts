@@ -1,5 +1,8 @@
 /**
- * Shift-based multi-selection on CVAT's 3D canvas (current frame only).
+ * Shift-based multi-selection on CVAT's main 3D perspective canvas (current frame only).
+ *
+ * Only the perspective view is handled. In Top / Side / Front (and zoomed ortho canvases) every
+ * Shift gesture is left untouched for CVAT and Meow's own ortho editor.
  *
  * - Shift+click picks a target box; the source stays CVAT's own active object.
  * - Shift+left-drag draws a marquee (DOM overlay); Shift+Alt removes from the selection.
@@ -32,7 +35,7 @@ import type { MeowToastKind } from './meow-toast';
 export const SELECTION_HIGHLIGHT_COLOR = '#ffd400';
 const DRAG_THRESHOLD_PX = 4;
 const UI_CLASS = 'meow-selection-ui';
-const CANVAS_SELECTOR = '.cvat-canvas3d-perspective, .cvat-canvas3d-topview';
+const CANVAS_SELECTOR = '.cvat-canvas3d-perspective';
 
 export interface CanvasSelectionHost {
   isEnabled: () => boolean;
@@ -56,6 +59,7 @@ interface DragState {
   readonly canvas: HTMLCanvasElement;
   readonly startX: number;
   readonly startY: number;
+  readonly frame: number | null;
   curX: number;
   curY: number;
   marquee: boolean;
@@ -304,6 +308,7 @@ export class CanvasSelectionController {
       canvas,
       startX: event.clientX,
       startY: event.clientY,
+      frame: this.host.getFrame(),
       curX: event.clientX,
       curY: event.clientY,
       marquee: false,
@@ -313,6 +318,11 @@ export class CanvasSelectionController {
 
   private onMouseMove(event: MouseEvent): void {
     const drag = this.drag!;
+    // The button was released outside the window (no mouseup reached us): abandon the drag.
+    if (event.buttons !== undefined && (event.buttons & 1) === 0) {
+      this.cancelTransient();
+      return;
+    }
     drag.curX = event.clientX;
     drag.curY = event.clientY;
     if (
@@ -353,6 +363,15 @@ export class CanvasSelectionController {
       this.suppressClick = false;
       this.suppressTimer = null;
     }, 100);
+    // Mode or frame changed mid-gesture (CVAT entered draw/merge/..., frame stepped): do nothing.
+    if (
+      this.disposed ||
+      !this.host.isEnabled() ||
+      !this.host.isIdle() ||
+      this.host.getFrame() !== drag.frame ||
+      !drag.canvas.isConnected
+    )
+      return;
     const camera = this.host.getCamera(drag.canvas);
     if (!camera) {
       this.host.toast('Chưa có camera render để chiếu; hãy thử lại sau khi canvas vẽ xong', 'info');
@@ -401,6 +420,7 @@ export class CanvasSelectionController {
     const down = this.rightDown;
     this.rightDown = null;
     if (this.disposed || this.selected.size === 0 || !this.host.isEnabled()) return;
+    if (!this.host.isIdle()) return; // CVAT's draw / group / merge / split own the right click
     const canvas = this.resolveCanvas(event.target);
     if (!canvas) return;
     if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) return;
@@ -480,7 +500,11 @@ export class CanvasSelectionController {
       }
       return;
     }
-    if (this.busy) return;
+    if (this.busy || this.disposed) return;
+    if (!this.host.isEnabled() || !this.host.isIdle()) {
+      this.host.toast('Hãy thoát chế độ vẽ/gộp/tách/nhóm của CVAT trước khi dùng Meow', 'error');
+      return;
+    }
     this.busy = true;
     this.renderToolbar();
     try {

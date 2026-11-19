@@ -1,13 +1,24 @@
 /**
- * Official CVAT write path for Meow edits.
+ * Official CVAT write path for Meow edits. Every API used here was checked against the cvat-ai/cvat
+ * `develop` sources; see the "verified API" table in docs/compatibility.md (section 16).
  *
- * Writes go through `ObjectState.save()` (the same call cvat-ui's `updateAnnotationsAsync` makes),
- * so cvat-core records them in its action history. cvat-ui only enables Undo/Redo (button and
- * Ctrl+Z) from the `history` snapshot held in Redux, which is refreshed by the
- * `UPDATE_ANNOTATIONS_SUCCESS` action; `refreshCvatAnnotations` mirrors that thunk's tail
- * (`job.actions.get()` + `job.annotations.get(...)` + the same action) because the thunk itself is
- * not reachable from the page. Filters follow `filters-modal.tsx`: `CHANGE_ANNOTATIONS_FILTERS`
- * followed by a re-fetch of the current frame (`FETCH_ANNOTATIONS_SUCCESS`).
+ * Undo model (one Ctrl+Z per Meow action):
+ * - `job.annotations.saveStates(states)` is cvat-core's batch save. It wraps every per-object
+ *   change in ONE `AnnotationHistory` transaction (annotations-collection.ts, `saveStates`), which is
+ *   exactly what cvat-ui's `updateAnnotationsBatchAsync` (multi-selection move) relies on. The
+ *   resulting history entry undoes / redoes all objects together through the native Ctrl+Z.
+ * - A transaction can only hold actions of ONE frame (annotations-history.ts, `HistoryTransaction.add`).
+ *   Neighbor-frame keyframe pins therefore run first with history frozen (`job.actions.freeze`), so
+ *   they never create separate undo steps. Undoing the action restores the edited frame; the pins are
+ *   extra keyframes on the exact interpolated values, so the track geometry is unchanged.
+ * - CVAT builds without `saveStates` fall back to per-object `ObjectState.save()` (one history entry
+ *   per object) and the caller is told how many Ctrl+Z presses are needed. The history instance is
+ *   private to cvat-core, so Meow cannot register its own grouped entry from the page.
+ *
+ * Redux refresh follows cvat-ui's own thunks: `fetchAnnotationsAsync` dispatches
+ * `FETCH_ANNOTATIONS_SUCCESS {states, intervals, history}` and `updateAnnotationsAsync` dispatches
+ * `UPDATE_ANNOTATIONS_SUCCESS {states, history}`. `history` (from `job.actions.get()`) is what enables
+ * the toolbar Undo/Redo buttons.
  */
 import type { CvatObjectStateLike } from './pre-render-enhancer';
 
@@ -20,8 +31,12 @@ export interface CvatJobLike {
       allTracks: boolean,
       filters: readonly unknown[]
     ) => Promise<CvatObjectStateLike[]> | CvatObjectStateLike[];
+    saveStates?: (states: CvatObjectStateLike[]) => Promise<unknown> | unknown;
   };
-  readonly actions?: { get?: () => Promise<unknown> | unknown };
+  readonly actions?: {
+    get?: () => Promise<unknown> | unknown;
+    freeze?: (frozen: boolean) => Promise<unknown> | unknown;
+  };
 }
 
 export interface CvatStoreLike {
@@ -38,6 +53,10 @@ export interface CvatAnnotationContext {
   readonly states: readonly CvatObjectStateLike[];
   readonly activatedStateID: number | null;
   readonly activeControl: string | null;
+  /** `annotation.workspace` (cvat-ui `Workspace` enum value, e.g. "Standard 3D" or "Review"). */
+  readonly workspace: string | null;
+  /** Ground-truth objects are merged into Redux states by cvat-ui; a full replace would drop them. */
+  readonly groundTruthShown: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -51,13 +70,16 @@ export function readCvatContext(store: CvatStoreLike | null): CvatAnnotationCont
   const annotation = record(root?.annotation);
   const annotations = record(annotation?.annotations);
   const player = record(record(annotation?.player)?.frame);
-  const job = record(annotation?.job)?.instance as CvatJobLike | undefined;
-  const workspace = record(record(root?.settings)?.workspace);
+  const jobRecord = record(annotation?.job);
+  const job = jobRecord?.instance as CvatJobLike | undefined;
+  const settings = record(root?.settings);
+  const workspace = record(settings?.workspace);
   const frame = player?.number;
   const filters = annotations?.filters;
   const states = annotations?.states;
   const activated = annotations?.activatedStateID;
   const control = record(annotation?.canvas)?.activeControl;
+  const gtInstance = record(jobRecord?.groundTruthInfo)?.groundTruthInstance;
   return {
     job: job ?? null,
     frame: typeof frame === 'number' && Number.isSafeInteger(frame) ? frame : null,
@@ -71,6 +93,8 @@ export function readCvatContext(store: CvatStoreLike | null): CvatAnnotationCont
     activatedStateID:
       typeof activated === 'number' && Number.isFinite(activated) ? activated : null,
     activeControl: typeof control === 'string' ? control : null,
+    workspace: typeof annotation?.workspace === 'string' ? annotation.workspace : null,
+    groundTruthShown: record(settings?.shapes)?.showGroundTruth === true && !!gtInstance,
   };
 }
 
@@ -106,15 +130,30 @@ function zRange(states: readonly CvatObjectStateLike[]): [number, number] {
   return min <= max ? [min, max] : [0, 0];
 }
 
-/** Re-sync cvat-ui's Redux annotation state (states + undo history) after direct writes. */
+export type RefreshResult = 'ok' | 'stale' | 'failed';
+
+export interface RefreshTarget {
+  readonly frame: number | null;
+  readonly job: CvatJobLike | null;
+}
+
+/**
+ * Re-sync cvat-ui's Redux annotation state (states + undo history) after direct writes.
+ * `fetch` mirrors `fetchAnnotationsAsync`, `update` mirrors `updateAnnotationsAsync`'s tail (it keeps
+ * ground-truth states that are merged into Redux, so it is used when those are shown).
+ * Nothing is dispatched when the frame or job changed while we were awaiting (`stale`): CVAT's own
+ * frame change already fetched that frame, and replacing its states with ours would corrupt Redux.
+ */
 export async function refreshCvatAnnotations(
   store: CvatStoreLike | null,
-  kind: 'update' | 'fetch' = 'update'
-): Promise<boolean> {
-  if (!store) return false;
+  expected: RefreshTarget,
+  kind: 'update' | 'fetch' = 'fetch'
+): Promise<RefreshResult> {
+  if (!store) return 'failed';
   const ctx = readCvatContext(store);
   const get = ctx.job?.annotations?.get;
-  if (!ctx.job || typeof get !== 'function' || ctx.frame === null) return false;
+  if (!ctx.job || typeof get !== 'function' || ctx.frame === null) return 'failed';
+  if (ctx.frame !== expected.frame || ctx.job !== expected.job) return 'stale';
   try {
     const states = await get.call(
       ctx.job.annotations,
@@ -122,33 +161,42 @@ export async function refreshCvatAnnotations(
       ctx.showAllInterpolationTracks,
       ctx.filters
     );
-    if (!Array.isArray(states)) return false;
-    const [minZ, maxZ] = zRange(states);
-    if (kind === 'fetch') {
-      store.dispatch({ type: 'FETCH_ANNOTATIONS_SUCCESS', payload: { states, minZ, maxZ } });
-      return true;
-    }
+    if (!Array.isArray(states)) return 'failed';
     const getHistory = ctx.job.actions?.get;
     const history =
       typeof getHistory === 'function' ? await getHistory.call(ctx.job.actions) : undefined;
+    const after = readCvatContext(store);
+    if (after.frame !== expected.frame || after.job !== expected.job) return 'stale';
+    // minZ/maxZ are not read by current cvat-ui reducers (they recompute the range); older builds
+    // took them from the payload, so they are kept as harmless extras.
+    const [minZ, maxZ] = zRange(states);
     store.dispatch({
-      type: 'UPDATE_ANNOTATIONS_SUCCESS',
+      type: kind === 'fetch' ? 'FETCH_ANNOTATIONS_SUCCESS' : 'UPDATE_ANNOTATIONS_SUCCESS',
       payload: { states, history, minZ, maxZ },
     });
-    return true;
+    return 'ok';
   } catch {
-    return false;
+    return 'failed';
   }
 }
 
-/** Same two steps as `applyFilters` in CVAT's filters-modal: change filters, then re-fetch. */
+/**
+ * Same two steps as `applyFilters` in CVAT's filters-modal: `CHANGE_ANNOTATIONS_FILTERS`, then a
+ * full re-fetch. Refused (false) when ground-truth states are shown because a full replace of the
+ * Redux states would drop them.
+ */
 export async function applyCvatFilters(
   store: CvatStoreLike | null,
   filters: readonly unknown[]
 ): Promise<boolean> {
   if (!store) return false;
+  const before = readCvatContext(store);
+  if (before.groundTruthShown) return false;
   store.dispatch({ type: 'CHANGE_ANNOTATIONS_FILTERS', payload: { filters: [...filters] } });
-  return refreshCvatAnnotations(store, 'fetch');
+  // `stale` still means the filter was applied: CVAT's own frame change re-fetches with it.
+  return (
+    (await refreshCvatAnnotations(store, { frame: before.frame, job: before.job })) !== 'failed'
+  );
 }
 
 export interface StateWrite {
@@ -165,6 +213,15 @@ export interface WriteSummary {
   skippedLocked: number;
   skippedOutside: number;
   failed: number;
+  /** Strict batch refused before touching anything (a member was locked / outside / unwritable). */
+  refused: boolean;
+  /**
+   * `transaction`: one native undo step (`saveStates`). `per-object`: CVAT without `saveStates`,
+   * one undo step per saved object (see `undoSteps`).
+   */
+  historyMode: 'transaction' | 'per-object' | 'none';
+  /** Number of native Ctrl+Z presses that revert this action. */
+  undoSteps: number;
 }
 
 /**
@@ -187,6 +244,7 @@ export function collectNeighborPins(
     state.updateFlags.reset();
     let snapshot: CvatObjectStateLike;
     try {
+      // Track.save(frame, state) with no update flags set only returns `new ObjectState(this.get(frame))`.
       snapshot = read(neighbor, state);
     } catch {
       continue;
@@ -206,30 +264,107 @@ export function collectNeighborPins(
   return pins;
 }
 
-/**
- * Write current-frame changes for many objects. Neighbor pinning for tracks happens first (all
- * snapshots are read before any write), then each object is saved once through `ObjectState.save()`.
- * The caller refreshes Redux once afterwards with `refreshCvatAnnotations`.
- */
-export async function writeStatesAtFrame(
-  writes: readonly StateWrite[],
-  frame: number,
-  lastFrame?: number
-): Promise<WriteSummary> {
-  const summary: WriteSummary = {
+export interface WriteOptions {
+  readonly job?: CvatJobLike | null;
+  readonly lastFrame?: number;
+  /**
+   * All-or-nothing: if any member cannot be written (locked, outside, ground truth, no snapshot
+   * access) nothing is written at all. Used for swaps where a half-applied result would duplicate
+   * geometry.
+   */
+  readonly strict?: boolean;
+}
+
+interface Before {
+  readonly points?: number[];
+  readonly attributes?: Record<number | string, string | undefined>;
+  readonly occluded?: boolean;
+  readonly hidden?: boolean;
+}
+
+function snapshotBefore(write: StateWrite): Before {
+  const state = write.state;
+  const attributes: Record<number | string, string | undefined> = {};
+  for (const key of Object.keys(write.attributes ?? {})) attributes[key] = state.attributes?.[key];
+  return {
+    ...(write.points ? { points: [...(state.points ?? [])] } : {}),
+    ...(write.attributes ? { attributes } : {}),
+    ...(write.occluded !== undefined ? { occluded: !!state.occluded } : {}),
+    ...(write.hidden !== undefined ? { hidden: !!state.hidden } : {}),
+  };
+}
+
+function applyToState(state: CvatObjectStateLike, change: Before): void {
+  // ObjectState property setters raise their own update flags (object-state.ts).
+  state.updateFlags?.reset?.();
+  if (change.points) state.points = [...change.points];
+  if (change.attributes) {
+    const defined: Record<string, string> = {};
+    for (const [key, value] of Object.entries(change.attributes))
+      if (value !== undefined) defined[key] = value;
+    state.attributes = { ...state.attributes, ...defined };
+  }
+  if (change.occluded !== undefined) state.occluded = change.occluded;
+  if (change.hidden !== undefined) state.hidden = change.hidden;
+}
+
+function nextFor(write: StateWrite): Before {
+  const state = write.state;
+  return {
+    ...(write.points
+      ? { points: [...write.points, ...(state.points ?? []).slice(write.points.length)] }
+      : {}),
+    ...(write.attributes ? { attributes: { ...write.attributes } } : {}),
+    ...(write.occluded !== undefined ? { occluded: write.occluded } : {}),
+    ...(write.hidden !== undefined ? { hidden: write.hidden } : {}),
+  };
+}
+
+async function setFrozen(job: CvatJobLike | null | undefined, frozen: boolean): Promise<boolean> {
+  const freeze = job?.actions?.freeze;
+  if (typeof freeze !== 'function') return false;
+  await freeze.call(job!.actions, frozen);
+  return true;
+}
+
+function emptySummary(): WriteSummary {
+  return {
     written: 0,
     pinnedNeighbors: 0,
     skippedLocked: 0,
     skippedOutside: 0,
     failed: 0,
+    refused: false,
+    historyMode: 'none',
+    undoSteps: 0,
   };
+}
+
+/**
+ * Write current-frame changes for many objects as ONE undo step when CVAT supports it (see the
+ * file header). Neighbor pinning for tracks happens first with history frozen; the edits then go
+ * through a single `saveStates` transaction. The caller refreshes Redux once afterwards.
+ */
+export async function writeStatesAtFrame(
+  writes: readonly StateWrite[],
+  frame: number,
+  options: WriteOptions = {}
+): Promise<WriteSummary> {
+  const { job, lastFrame, strict = false } = options;
+  const summary = emptySummary();
   const todo: StateWrite[] = [];
   for (const write of writes) {
     const state = write.state;
-    if (state.lock && write.hidden === undefined) summary.skippedLocked += 1;
-    else if (state.outside && write.hidden === undefined) summary.skippedOutside += 1;
-    else if (typeof state.save !== 'function') summary.failed += 1;
+    // Shape/Track.save() return early without changes when the object is locked.
+    if (state.lock) summary.skippedLocked += 1;
+    else if (state.outside) summary.skippedOutside += 1;
+    else if (state.isGroundTruth || typeof state.save !== 'function') summary.failed += 1;
     else todo.push(write);
+  }
+  const skipped = summary.skippedLocked + summary.skippedOutside + summary.failed;
+  if (strict && skipped > 0) {
+    summary.refused = true;
+    return summary;
   }
 
   const pins: CvatObjectStateLike[] = [];
@@ -243,51 +378,96 @@ export async function writeStatesAtFrame(
       } catch {
         // Without a snapshot we cannot prove neighbors stay put, so never write this track.
         summary.failed += 1;
+        if (strict) {
+          summary.refused = true;
+          return summary;
+        }
         continue;
       }
     }
     ready.push(write);
   }
-  for (const pin of pins) {
-    try {
-      pin.updateFlags!.reset!();
-      pin.points = [...pin.points!];
-      pin.keyframe = true;
-      pin.updateFlags!.points = true;
-      pin.updateFlags!.keyframe = true;
-      await pin.save!();
-      summary.pinnedNeighbors += 1;
-    } catch {
-      summary.failed += 1;
+  if (!ready.length) return summary;
+
+  const saveStates = job?.annotations?.saveStates;
+  const batch = typeof saveStates === 'function';
+  const frozen = pins.length > 0 && batch ? await setFrozen(job, true) : false;
+  try {
+    for (const pin of pins) {
+      try {
+        pin.updateFlags!.reset!();
+        pin.points = [...pin.points!];
+        pin.keyframe = true;
+        await pin.save!();
+        summary.pinnedNeighbors += 1;
+        if (!frozen) summary.undoSteps += 1;
+      } catch {
+        // A track whose neighbor could not be pinned must not be edited: abort before any edit.
+        summary.failed += 1;
+        summary.refused = true;
+        return summary;
+      }
     }
+  } finally {
+    if (frozen) await setFrozen(job, false).catch(() => undefined);
   }
 
+  if (batch) return writeTransaction(ready, summary, saveStates!, job!);
+  return writePerObject(ready, summary, strict);
+}
+
+async function writeTransaction(
+  ready: readonly StateWrite[],
+  summary: WriteSummary,
+  saveStates: NonNullable<NonNullable<CvatJobLike['annotations']>['saveStates']>,
+  job: CvatJobLike
+): Promise<WriteSummary> {
+  for (const write of ready) applyToState(write.state, nextFor(write));
+  try {
+    await saveStates.call(
+      job.annotations,
+      ready.map((write) => write.state)
+    );
+    summary.written = ready.length;
+    summary.historyMode = 'transaction';
+    summary.undoSteps += 1;
+  } catch {
+    // saveStates aborts its transaction, rolling every object back; nothing was written.
+    summary.failed += ready.length;
+  }
+  return summary;
+}
+
+async function writePerObject(
+  ready: readonly StateWrite[],
+  summary: WriteSummary,
+  strict: boolean
+): Promise<WriteSummary> {
+  summary.historyMode = 'per-object';
+  const done: { write: StateWrite; before: Before }[] = [];
   for (const write of ready) {
-    const state = write.state;
+    const before = snapshotBefore(write);
     try {
-      state.updateFlags?.reset?.();
-      const flags = state.updateFlags;
-      if (write.points) {
-        const tail = (state.points ?? []).slice(write.points.length);
-        state.points = [...write.points, ...tail];
-        if (flags) flags.points = true;
-      }
-      if (write.attributes) {
-        state.attributes = { ...state.attributes, ...write.attributes };
-        if (flags) flags.attributes = true;
-      }
-      if (write.occluded !== undefined) {
-        state.occluded = write.occluded;
-        if (flags) flags.occluded = true;
-      }
-      if (write.hidden !== undefined) {
-        state.hidden = write.hidden;
-        if (flags) flags.hidden = true;
-      }
-      await state.save!();
+      applyToState(write.state, nextFor(write));
+      await write.state.save!();
+      done.push({ write, before });
       summary.written += 1;
+      summary.undoSteps += 1;
     } catch {
       summary.failed += 1;
+      if (strict) {
+        for (const item of done.reverse()) {
+          try {
+            applyToState(item.write.state, item.before);
+            await item.write.state.save!();
+            summary.written -= 1;
+            summary.undoSteps += 1;
+          } catch {
+            // best effort: the user can still Ctrl+Z the partial result
+          }
+        }
+        return summary;
+      }
     }
   }
   return summary;

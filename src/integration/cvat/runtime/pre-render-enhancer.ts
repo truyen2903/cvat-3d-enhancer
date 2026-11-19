@@ -148,6 +148,7 @@ export interface CvatObjectStateLike {
   outside?: boolean;
   occluded?: boolean;
   keyframe?: boolean;
+  isGroundTruth?: boolean;
   updateFlags?: {
     reset?: () => void;
     points?: boolean;

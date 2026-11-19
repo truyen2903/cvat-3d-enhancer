@@ -97,7 +97,7 @@ function setup(enabled = true) {
   };
   const shiftDrag = (from: [number, number], to: [number, number], init: MouseEventInit = {}) => {
     fire('mousedown', from, { shiftKey: true, ...init });
-    fire('mousemove', to, { shiftKey: true, ...init });
+    fire('mousemove', to, { shiftKey: true, buttons: 1, ...init });
     fire('mouseup', to, { shiftKey: true, ...init });
   };
   return {
@@ -192,7 +192,7 @@ describe('CanvasSelectionController', () => {
   it('shows a marquee overlay only during the drag', () => {
     const { controller, fire, canvas } = setup();
     fire('mousedown', [10, 10], { shiftKey: true });
-    fire('mousemove', [60, 60], { shiftKey: true });
+    fire('mousemove', [60, 60], { shiftKey: true, buttons: 1 });
     expect(document.querySelector('.meow-selection-ui')).not.toBeNull();
     fire('mouseup', [60, 60], { shiftKey: true });
     expect(document.querySelector('.meow-selection-ui[aria-hidden]')).toBeNull();
@@ -332,5 +332,124 @@ describe('CanvasSelectionController', () => {
     fire('mousedown', client(0.5, 0), { shiftKey: true });
     expect(native).toHaveBeenCalledTimes(1);
     removeSpy.mockRestore();
+  });
+});
+
+describe('CanvasSelectionController robustness and scope', () => {
+  it('leaves Shift gestures on Top / Side / Front and zoomed ortho canvases to CVAT', () => {
+    const { controller, host, shiftClick, shiftDrag } = setup();
+    for (const cls of [
+      'cvat-canvas3d-topview',
+      'cvat-canvas3d-sideview',
+      'cvat-canvas3d-frontview',
+    ]) {
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        `<div class="${cls}"><canvas class="${cls}-c"></canvas></div>`
+      );
+      const ortho = document.querySelector<HTMLCanvasElement>(`.${cls}-c`)!;
+      const native = vi.fn();
+      for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click'])
+        ortho.addEventListener(type, native);
+      const fire = (type: string, init: MouseEventInit = {}): MouseEvent => {
+        const event = new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          clientX: 100,
+          clientY: 100,
+          button: 0,
+          shiftKey: true,
+          ...init,
+        });
+        ortho.dispatchEvent(event);
+        return event;
+      };
+      fire('pointerdown');
+      const down = fire('mousedown');
+      fire('mousemove', { buttons: 1, clientX: 140, clientY: 140 });
+      const up = fire('mouseup', { clientX: 140, clientY: 140 });
+      expect(down.defaultPrevented).toBe(false);
+      expect(up.defaultPrevented).toBe(false);
+      expect(native).toHaveBeenCalledTimes(3);
+    }
+    expect(controller.size).toBe(0);
+    expect(host.getCamera).not.toHaveBeenCalled();
+    expect(document.querySelector('.meow-selection-ui')).toBeNull();
+    // the perspective canvas still works
+    shiftClick(client(0.5, 0));
+    shiftDrag(client(-0.6, 0.6), client(-0.4, 0.4));
+    expect(controller.size).toBe(2);
+    controller.dispose();
+  });
+
+  it('does not open the Meow context menu while CVAT is in a draw/merge/split mode', () => {
+    const { controller, shiftClick, fire, host } = setup();
+    shiftClick(client(0.5, 0));
+    host.isIdle.mockReturnValue(false);
+    const event = fire('contextmenu', client(0.5, 0), { button: 2 });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    controller.dispose();
+  });
+
+  it('refuses to run a menu action when CVAT left the idle mode after the menu opened', () => {
+    const { controller, shiftClick, fire, host } = setup();
+    shiftClick(client(0.5, 0));
+    fire('contextmenu', client(0.5, 0), { button: 2 });
+    host.isIdle.mockReturnValue(false);
+    [...document.querySelectorAll('[role="menu"] button')]
+      .find((b) => b.textContent!.includes('Tráo vị trí'))!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(host.toast).toHaveBeenLastCalledWith(expect.stringContaining('thoát chế độ'), 'error');
+    controller.dispose();
+  });
+
+  it('drops a marquee when the frame or mode changes before the button is released', () => {
+    const { controller, fire, host } = setup();
+    fire('mousedown', client(-0.9, 0.9), { shiftKey: true });
+    fire('mousemove', client(0.9, -0.9), { shiftKey: true, buttons: 1 });
+    host.getFrame.mockReturnValue(6);
+    fire('mouseup', client(0.9, -0.9), { shiftKey: true });
+    expect(controller.size).toBe(0);
+    expect(document.querySelector('.meow-selection-ui')).toBeNull();
+
+    host.getFrame.mockReturnValue(5);
+    fire('mousedown', client(-0.9, 0.9), { shiftKey: true });
+    fire('mousemove', client(0.9, -0.9), { shiftKey: true, buttons: 1 });
+    host.isIdle.mockReturnValue(false);
+    fire('mouseup', client(0.9, -0.9), { shiftKey: true });
+    expect(controller.size).toBe(0);
+    controller.dispose();
+  });
+
+  it('abandons a drag whose button was released outside the window', () => {
+    const { controller, fire } = setup();
+    fire('mousedown', client(-0.9, 0.9), { shiftKey: true });
+    fire('mousemove', client(0.2, -0.2), { shiftKey: true, buttons: 1 });
+    expect(document.querySelector('.meow-selection-ui')).not.toBeNull();
+    fire('mousemove', client(0.3, -0.3), { shiftKey: true, buttons: 0 });
+    expect(document.querySelector('.meow-selection-ui')).toBeNull();
+    fire('mouseup', client(0.9, -0.9), { shiftKey: true });
+    expect(controller.size).toBe(0);
+    controller.dispose();
+  });
+
+  it('removes the marquee overlay and menu when disposed mid-gesture', () => {
+    const { controller, fire, shiftClick } = setup();
+    shiftClick(client(0.5, 0));
+    fire('contextmenu', client(0.5, 0), { button: 2 });
+    fire('mousedown', client(-0.9, 0.9), { shiftKey: true });
+    fire('mousemove', client(0.2, -0.2), { shiftKey: true, buttons: 1 });
+    controller.dispose();
+    expect(document.querySelector('.meow-selection-ui')).toBeNull();
+  });
+
+  it('a marquee that catches nothing leaves an empty selection and no toolbar', () => {
+    const { controller, shiftDrag } = setup();
+    shiftDrag(client(0.9, 0.9), client(0.95, 0.95));
+    expect(controller.size).toBe(0);
+    expect(document.querySelector('.meow-selection-ui')).toBeNull();
+    controller.dispose();
   });
 });

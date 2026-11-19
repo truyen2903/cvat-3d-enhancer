@@ -9,6 +9,7 @@ import {
   readUnfilteredFrameStates,
   refreshCvatAnnotations,
   writeStatesAtFrame,
+  type CvatJobLike,
   type CvatStoreLike,
   type StateWrite,
   type WriteSummary,
@@ -303,9 +304,17 @@ export interface MultiActionHost {
   toast: (message: string, kind: MeowToastKind) => void;
 }
 
+interface RunScope {
+  readonly frame: number;
+  readonly job: CvatJobLike;
+}
+
+const ABORTED = 'Đã đổi frame trong lúc xử lý, thao tác bị hủy (chưa ghi gì)';
+
 export class MultiObjectRunner {
   public readonly filterHistory = new FilterHistory();
   private busy = false;
+  private scope: RunScope | null = null;
 
   public constructor(private readonly host: MultiActionHost) {}
 
@@ -313,44 +322,69 @@ export class MultiObjectRunner {
     return this.busy;
   }
 
+  /** True while the frame and job captured at the start of the action are still current. */
+  private isCurrent(): boolean {
+    const scope = this.scope;
+    if (!scope) return false;
+    const ctx = readCvatContext(this.host.getStore());
+    return ctx.frame === scope.frame && ctx.job === scope.job;
+  }
+
   private async resolveStates(
     ids: readonly number[]
-  ): Promise<{ states: Map<number, CvatObjectStateLike>; missing: number }> {
+  ): Promise<{ states: Map<number, CvatObjectStateLike>; missing: number } | null> {
+    const scope = this.scope!;
     const ctx = readCvatContext(this.host.getStore());
     const wanted = new Set(ids);
     const states = new Map<number, CvatObjectStateLike>();
-    for (const state of ctx.states) {
-      if (typeof state.clientID === 'number' && wanted.has(state.clientID))
-        states.set(state.clientID, state);
-    }
-    if (states.size < wanted.size) {
-      const all = await readUnfilteredFrameStates(this.host.getStore());
-      for (const state of all ?? []) {
+    const take = (list: readonly CvatObjectStateLike[]): void => {
+      for (const state of list) {
         if (
           typeof state.clientID === 'number' &&
           wanted.has(state.clientID) &&
-          !states.has(state.clientID)
+          !states.has(state.clientID) &&
+          (state.frame === undefined || state.frame === scope.frame)
         )
           states.set(state.clientID, state);
       }
+    };
+    take(ctx.states);
+    if (states.size < wanted.size) {
+      const all = await readUnfilteredFrameStates(this.host.getStore());
+      if (!this.isCurrent()) return null;
+      take(all ?? []);
     }
     return { states, missing: wanted.size - states.size };
   }
 
-  private async commit(writes: readonly StateWrite[]): Promise<WriteSummary | null> {
-    const ctx = readCvatContext(this.host.getStore());
-    if (ctx.frame === null) {
-      this.host.toast('Không đọc được frame hiện tại', 'error');
+  private async commit(
+    writes: readonly StateWrite[],
+    strict: boolean
+  ): Promise<WriteSummary | null> {
+    const scope = this.scope!;
+    if (!this.isCurrent()) {
+      this.host.toast(ABORTED, 'error');
       return null;
     }
-    const summary = await writeStatesAtFrame(writes, ctx.frame, ctx.lastFrame);
-    const synced = await refreshCvatAnnotations(this.host.getStore(), 'update');
-    this.host.afterWrite();
-    if (!synced && summary.written > 0)
-      this.host.toast(
-        'Đã ghi vào CVAT nhưng chưa làm mới giao diện; hãy đổi frame để cập nhật',
-        'info'
+    const ctx = readCvatContext(this.host.getStore());
+    const summary = await writeStatesAtFrame(writes, scope.frame, {
+      job: scope.job,
+      lastFrame: ctx.lastFrame,
+      strict,
+    });
+    if (summary.written > 0 || summary.pinnedNeighbors > 0) {
+      const refreshed = await refreshCvatAnnotations(
+        this.host.getStore(),
+        { frame: scope.frame, job: scope.job },
+        ctx.groundTruthShown ? 'update' : 'fetch'
       );
+      this.host.afterWrite();
+      if (refreshed === 'failed')
+        this.host.toast(
+          'Đã ghi vào CVAT nhưng chưa làm mới giao diện; hãy đổi frame để cập nhật',
+          'info'
+        );
+    }
     return summary;
   }
 
@@ -359,6 +393,15 @@ export class MultiObjectRunner {
     if (summary.skippedLocked) notes.push(`${summary.skippedLocked} object bị khóa`);
     if (summary.skippedOutside) notes.push(`${summary.skippedOutside} object outside`);
     if (summary.failed) notes.push(`${summary.failed} lỗi ghi`);
+    if (summary.historyMode === 'per-object' && summary.undoSteps > 1)
+      notes.push(`bản CVAT này không gộp undo: cần Ctrl+Z ${summary.undoSteps} lần`);
+    if (summary.refused) {
+      this.host.toast(
+        `Đã hủy, chưa ghi gì (${notes.join(', ') || 'object không ghi được'})`,
+        'error'
+      );
+      return;
+    }
     const text = notes.length ? `${doneText} (${notes.join(', ')})` : doneText;
     this.host.toast(text, summary.written > 0 && summary.failed === 0 ? 'success' : 'error');
   }
@@ -372,11 +415,23 @@ export class MultiObjectRunner {
     if (this.busy) return false;
     this.busy = true;
     try {
+      const ctx = readCvatContext(this.host.getStore());
+      const isWrite = !id.startsWith('filter');
+      if (isWrite && ctx.workspace === 'Review') {
+        this.host.toast('Không sửa được object trong workspace Review', 'error');
+        return false;
+      }
+      if (ctx.frame === null || !ctx.job) {
+        this.host.toast('Không đọc được frame hiện tại', 'error');
+        return false;
+      }
+      this.scope = { frame: ctx.frame, job: ctx.job };
       return await this.dispatch(id, selection, activeID);
     } catch (error: unknown) {
       this.host.toast(error instanceof Error ? error.message : 'Thao tác thất bại', 'error');
       return false;
     } finally {
+      this.scope = null;
       this.busy = false;
     }
   }
@@ -420,7 +475,12 @@ export class MultiObjectRunner {
       this.host.toast('Hãy chọn object gốc bằng click thường trước', 'error');
       return false;
     }
-    const { states, missing } = await this.resolveStates([pair.first, pair.second]);
+    const resolved = await this.resolveStates([pair.first, pair.second]);
+    if (!resolved) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+    const { states, missing } = resolved;
     const first = states.get(pair.first);
     const second = states.get(pair.second);
     if (missing > 0 || !first || !second) {
@@ -435,7 +495,8 @@ export class MultiObjectRunner {
       this.host.toast('Object không có hộp 3D hợp lệ', 'error');
       return false;
     }
-    const summary = await this.commit(plan.writes);
+    // A swap must be all-or-nothing: writing only one side would duplicate geometry.
+    const summary = await this.commit(plan.writes, true);
     if (!summary) return false;
     const notes = plan.attributesBlocked
       ? [
@@ -464,7 +525,12 @@ export class MultiObjectRunner {
       return false;
     }
     const others = selection.filter((x) => x !== activeID);
-    const { states, missing } = await this.resolveStates([activeID, ...others]);
+    const resolved = await this.resolveStates([activeID, ...others]);
+    if (!resolved) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+    const { states, missing } = resolved;
     const source = states.get(activeID);
     if (!source) {
       this.host.toast('Không tìm thấy object gốc trên frame hiện tại', 'error');
@@ -480,7 +546,7 @@ export class MultiObjectRunner {
       );
       return false;
     }
-    const summary = await this.commit(plan.writes);
+    const summary = await this.commit(plan.writes, false);
     if (!summary) return false;
     const notes: string[] = [];
     if (plan.skipped)
@@ -497,14 +563,19 @@ export class MultiObjectRunner {
   }
 
   private async runHidden(hide: boolean, selection: readonly number[]): Promise<boolean> {
-    const { states, missing } = await this.resolveStates(selection);
+    const resolved = await this.resolveStates(selection);
+    if (!resolved) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+    const { states, missing } = resolved;
     const writes: StateWrite[] = [...states.values()].map((state) => ({ state, hidden: hide }));
     if (!writes.length) {
       this.host.toast('Không tìm thấy object trên frame hiện tại', 'error');
       return false;
     }
-    // Visibility is a UI flag in CVAT (the sidebar eye); locked objects can still be hidden.
-    const summary = await this.commit(writes);
+    // Locked objects are skipped: cvat-core's save() is a no-op for them (and reported as locked).
+    const summary = await this.commit(writes, false);
     if (!summary) return false;
     this.report(
       summary,
@@ -521,27 +592,30 @@ export class MultiObjectRunner {
     const store = this.host.getStore();
     const current = readCvatContext(store).filters;
     let next: readonly unknown[];
+    let popped: readonly unknown[] | undefined;
     if (id === 'filter-restore') {
       const previous = this.filterHistory.pop();
       if (!previous) {
         this.host.toast('Không có filter trước đó để khôi phục', 'info');
         return false;
       }
+      popped = previous;
       next = previous;
     } else {
       if (!selection.length) return false;
       next =
         id === 'filter-add' ? composeAddFilter(current, selection) : composeOnlyFilter(selection);
-      this.filterHistory.push(current);
     }
     const ok = await applyCvatFilters(store, next);
+    if (ok && id !== 'filter-restore') this.filterHistory.push(current);
+    else if (!ok && popped) this.filterHistory.push(popped);
     this.host.afterWrite();
     this.host.toast(
       ok
         ? id === 'filter-restore'
           ? 'Đã trả về filter trước'
           : `Đã lọc ${selection.length} object`
-        : 'Không áp dụng được filter (không truy cập được Redux/job của CVAT)',
+        : 'Không áp dụng được filter (không truy cập được Redux/job của CVAT, hoặc đang hiển thị Ground truth)',
       ok ? 'success' : 'error'
     );
     return ok;

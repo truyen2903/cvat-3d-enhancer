@@ -79,16 +79,16 @@ Overlay tự mất khi thả G hoặc Alt, mất focus, đổi object/frame, ho�
 
 ### Chọn nhiều box trên canvas 3D (chỉ frame hiện tại)
 
-Bật bằng **Shift+click / Shift+drag: multi-select boxes on the 3D canvas** trong Workspace (mặc định bật). Mọi thao tác chỉ ghi vào **frame đang mở**; Meow không đụng tới các frame khác.
+Bật bằng **Shift+click / Shift+drag: multi-select boxes on the 3D canvas** trong Workspace (mặc định bật). Mọi thao tác chỉ ghi vào **frame đang mở**; Meow không đụng tới các frame khác. Chỉ hoạt động trong **view 3D Perspective chính**: ở Top, Side, Front và các view ortho đang phóng to/maximize, Shift+click/kéo hoàn toàn thuộc về CVAT (Meow không can thiệp).
 
-| Thao tác                                        | Kết quả                                                                                                                                        |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Click thường                                    | CVAT chọn **gốc** (object active, vẫn dùng highlight và thẻ sidebar của CVAT).                                                                 |
-| **Shift+click** box khác (Perspective hoặc Top) | Box đó thành **đích**, tô màu vàng. CVAT không chọn lại box này. Shift+click lần nữa để bỏ đích; Shift+click box khác sẽ thay đích (tối đa 2). |
-| **Shift+kéo chuột trái**                        | Vẽ khung chọn; khi thả, chọn các box có **tâm** chiếu nằm trong khung. Camera không xoay. Kéo tiếp để thêm.                                    |
-| **Shift+Alt+kéo** (hoặc Shift+Alt+click)        | Bỏ các box trong khung (hoặc box dưới con trỏ) khỏi vùng chọn.                                                                                 |
-| **Chuột phải** trong vùng chọn                  | Mở menu Meow thay cho menu của CVAT. Chuột phải ngoài vùng chọn, hoặc kéo camera bằng chuột phải, giữ nguyên hành vi CVAT.                     |
-| **Esc**, đổi frame, click thường object khác    | Xóa vùng chọn.                                                                                                                                 |
+| Thao tác                                           | Kết quả                                                                                                                                        |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Click thường                                       | CVAT chọn **gốc** (object active, vẫn dùng highlight và thẻ sidebar của CVAT).                                                                 |
+| **Shift+click** box khác (chỉ view 3D Perspective) | Box đó thành **đích**, tô màu vàng. CVAT không chọn lại box này. Shift+click lần nữa để bỏ đích; Shift+click box khác sẽ thay đích (tối đa 2). |
+| **Shift+kéo chuột trái**                           | Vẽ khung chọn; khi thả, chọn các box có **tâm** chiếu nằm trong khung. Camera không xoay. Kéo tiếp để thêm.                                    |
+| **Shift+Alt+kéo** (hoặc Shift+Alt+click)           | Bỏ các box trong khung (hoặc box dưới con trỏ) khỏi vùng chọn.                                                                                 |
+| **Chuột phải** trong vùng chọn                     | Mở menu Meow thay cho menu của CVAT. Chuột phải ngoài vùng chọn, hoặc kéo camera bằng chuột phải, giữ nguyên hành vi CVAT.                     |
+| **Esc**, đổi frame, click thường object khác       | Xóa vùng chọn.                                                                                                                                 |
 
 Thanh công cụ nhỏ ở góc trên trái canvas chính hiển thị số object đã chọn, các nút nhanh và **Hành động ▾** (cùng menu với chuột phải).
 
@@ -107,7 +107,11 @@ Menu khi có **cụm** (chọn bằng khung):
 - **Thêm vật thể xung quanh**: thêm các object (kể cả object đang bị filter ẩn) có tâm nằm quanh vùng chọn trên màn hình, đọc từ dữ liệu annotation đã có trong trình duyệt, không gọi server. Nếu không đọc được dữ liệu chưa lọc, Meow chỉ lấy các object đang hiển thị và nói rõ trong toast.
 - **Đặt làm gốc**: chuột phải đúng box đã chọn rồi chọn mục này để làm object active.
 
-Với track, ghi tại frame f biến f thành keyframe. Để các frame lân cận không bị lệch, Meow đặt **keyframe giữ nguyên giá trị** tại f−1 và f+1 nếu hai frame đó đang được nội suy (nằm trong track, không outside). Object bị khóa hoặc outside bị bỏ qua. Mỗi object/frame ghi một mục lịch sử của CVAT, nên **Ctrl+Z** hoàn tác từng bước; một thao tác cặp có thể cần vài lần Ctrl+Z. Sau khi ghi, Meow đồng bộ Redux của CVAT để nút Undo/Redo hoạt động. Dùng **Save** của CVAT để lưu lên server.
+Với track, ghi tại frame f biến f thành keyframe. Để các frame lân cận không bị lệch, Meow đặt **keyframe giữ nguyên giá trị** tại f−1 và f+1 nếu hai frame đó đang được nội suy (nằm trong track, không outside); các keyframe ghim này được ghi khi tạm đóng băng lịch sử nên không tạo bước undo, và vẫn ở lại sau khi undo (đúng giá trị nội suy cũ nên hình học track không đổi).
+
+**Mỗi thao tác Meow là đúng một bước Ctrl+Z.** Meow ghi qua `job.annotations.saveStates` của CVAT (cùng cơ chế CVAT dùng khi di chuyển nhiều object đã chọn): tráo, đồng bộ, ghim đáy, ẩn/hiện nhiều object được hoàn tác / làm lại bằng **một** lần Ctrl+Z / Ctrl+Shift+Z hoặc nút Undo/Redo. Ghi thất bại giữa chừng thì CVAT hoàn lại tất cả. Với bản CVAT cũ chưa có `saveStates`, Meow quay về ghi từng object và toast cho biết cần Ctrl+Z bao nhiêu lần.
+
+Quy tắc an toàn: thao tác cặp (tráo / đồng bộ gốc → đích) là **tất cả hoặc không gì cả**: nếu một trong hai object bị khóa, outside hoặc không ghi được thì từ chối và toast, không ghi gì. Thao tác cụm bỏ qua object bị khóa/outside và đếm trong toast. Không sửa trong workspace Review. Nếu bạn đổi frame trong lúc Meow đang xử lý, thao tác bị hủy. Khi CVAT đang vẽ/gộp/tách/nhóm, Shift+click/kéo và menu chuột phải của Meow tạm tắt. Lọc cụm không dùng được khi đang hiện Ground truth. Dùng **Save** của CVAT để lưu lên server.
 
 ### Chỉnh cuboid bằng bàn phím
 

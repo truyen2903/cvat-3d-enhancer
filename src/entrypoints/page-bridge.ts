@@ -1054,7 +1054,8 @@ export class PageBridgeRuntimeHost {
 
   /** Re-sync cvat-ui's Redux states + undo history after an extension-side write. */
   private async syncReduxAfterWrite(): Promise<void> {
-    await refreshCvatAnnotations(this.reduxStore, 'update');
+    const ctx = readCvatContext(this.reduxStore);
+    await refreshCvatAnnotations(this.reduxStore, { frame: ctx.frame, job: ctx.job }, 'update');
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
