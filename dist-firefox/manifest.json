@@ -1,0 +1,90 @@
+{
+  "manifest_version": 3,
+  "name": "Meow",
+  "version": "0.2.5",
+  "description": "Meow — make your workspace feel like home.",
+  "icons": {
+    "16": "assets/meow-16.png",
+    "32": "assets/meow-32.png",
+    "48": "assets/meow-48.png",
+    "128": "assets/meow-128.png"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.cvat.ai/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "service-worker-loader.js"
+    ],
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Meow",
+    "default_icon": {
+      "16": "assets/meow-16.png",
+      "32": "assets/meow-32.png",
+      "48": "assets/meow-48.png",
+      "128": "assets/meow-128.png"
+    },
+    "default_popup": "src/entrypoints/popup/index.html"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "assets/content.ts-loader-CN_4zNpE.js"
+      ],
+      "matches": [
+        "https://*.cvat.ai/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "resources": [
+        "assets/*"
+      ]
+    },
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "resources": [
+        "assets/index-D-fE3yjt.js",
+        "assets/index-YF8g75cw.js",
+        "assets/schemas-njzct5Su.js",
+        "assets/index-D5_ZH5vf.js",
+        "assets/origin-validator--cNPonwa.js",
+        "assets/ortho-cuboid-editor-CTiUxoRP.js",
+        "assets/content.ts-CY2SvRBz.js"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "meow@cvat-3d-enhancer",
+      "strict_min_version": "128.0"
+    }
+  }
+}

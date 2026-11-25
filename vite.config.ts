@@ -10,11 +10,14 @@ import manifest from './manifest.config';
  * chunks on user-authorized custom domains (via optional_host_permissions) without hardcoding
  * private domains into source code.
  */
+const isFirefox = process.env.BUILD_TARGET === 'firefox';
+const outDir = isFirefox ? 'dist-firefox' : 'dist';
+
 function allowDynamicOriginResourcesPlugin(): Plugin {
   return {
     name: 'allow-dynamic-origin-resources',
     closeBundle() {
-      const manifestPath = resolve(__dirname, 'dist/manifest.json');
+      const manifestPath = resolve(__dirname, outDir, 'manifest.json');
       try {
         const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
           web_accessible_resources?: {
@@ -24,13 +27,31 @@ function allowDynamicOriginResourcesPlugin(): Plugin {
           }[];
         };
         if (Array.isArray(raw.web_accessible_resources)) {
-          raw.web_accessible_resources = raw.web_accessible_resources.map((entry) => ({
-            ...entry,
-            matches: ['https://*/*', 'http://*/*'],
-            use_dynamic_url: false,
-          }));
-          writeFileSync(manifestPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+          raw.web_accessible_resources = raw.web_accessible_resources.map((entry) => {
+            const next = {
+              ...entry,
+              matches: ['https://*/*', 'http://*/*'],
+              use_dynamic_url: false,
+            };
+            // use_dynamic_url is Chrome-only; Firefox warns on unknown keys.
+            if (isFirefox) delete (next as { use_dynamic_url?: boolean }).use_dynamic_url;
+            return next;
+          });
         }
+        if (isFirefox) {
+          const ff = raw as Record<string, unknown>;
+          const bg = ff.background as { service_worker?: string } | undefined;
+          // Firefox MV3 uses event-page scripts instead of a service worker.
+          ff.background = {
+            scripts: [bg?.service_worker ?? 'service-worker-loader.js'],
+            type: 'module',
+          };
+          delete ff.minimum_chrome_version;
+          ff.browser_specific_settings = {
+            gecko: { id: 'meow@cvat-3d-enhancer', strict_min_version: '128.0' },
+          };
+        }
+        writeFileSync(manifestPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
       } catch {
         // Ignore if dist/manifest.json is not present during partial runs
       }
@@ -46,6 +67,7 @@ export default defineConfig({
   },
   plugins: [react(), crx({ manifest }), allowDynamicOriginResourcesPlugin()],
   build: {
+    outDir,
     target: 'es2022',
     sourcemap: false,
     emptyOutDir: true,

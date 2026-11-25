@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:firefox": "tsc --noEmit && BUILD_TARGET=firefox vite build",
+    "build:all": "npm run build && npm run build:firefox",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests scripts",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,html}\" \"tests/**/*.{ts,tsx}\" \"docs/**/*.md\"",
