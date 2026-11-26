@@ -7,10 +7,10 @@ export interface QcMarginTarget {
   readonly labelName: string | null | undefined;
 }
 
-const OUTER_FILL = 'rgba(255, 159, 64, 0.38)';
-const OUTER_STROKE = 'rgba(255, 159, 64, 0.9)';
-const INNER_FILL = 'rgba(64, 160, 255, 0.38)';
-const INNER_STROKE = 'rgba(64, 160, 255, 0.9)';
+const OUTER_FILL = 'rgba(255, 159, 64, 0.14)';
+const OUTER_STROKE = 'rgba(255, 159, 64, 0.55)';
+const INNER_FILL = 'rgba(64, 160, 255, 0.14)';
+const INNER_STROKE = 'rgba(64, 160, 255, 0.55)';
 
 /** Everything a single source canvas needs; allocated once and reused by every render. */
 interface ViewState {
@@ -232,7 +232,7 @@ export class QcMarginOverlay {
     }
 
     ctx.clearRect(0, 0, state.width, state.height);
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1;
     const boxCount = convexHull(state, 16, state.boxHull);
     if (boxCount >= 3) {
       // Outer band: between the outer shell and the box. Inner band: between the box and the inner shell.
