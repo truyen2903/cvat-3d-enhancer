@@ -30,6 +30,17 @@ const result = {
 };
 
 describe('recent Workspace feature options', () => {
+  it('enables the QC margin options by default and validates their booleans', () => {
+    const keys = ['showQcMargin', 'showQcMarginPerspective', 'showQcMarginOrtho'] as const;
+    const defaults = normalizeWorkspaceFeatureOptions({});
+    const invalid = normalizeWorkspaceFeatureOptions({ showQcMargin: 'x' });
+    for (const key of keys) expect(defaults[key]).toBe(true);
+    expect(invalid.showQcMargin).toBe(true);
+    expect(normalizeWorkspaceFeatureOptions({ showQcMarginOrtho: false }).showQcMarginOrtho).toBe(
+      false
+    );
+  });
+
   it('defaults legacy settings to enabled, validates booleans and preserves disabled flags through CVAT overwrites', () => {
     expect(
       normalizeWorkspaceFeatureOptions({ enableDimensionSync: 'false' }).enableDimensionSync
@@ -97,8 +108,8 @@ describe('recent Workspace feature options', () => {
       'Điều hướng',
       'Chọn nhiều',
     ]);
-    expect(groups.map((group) => group.querySelectorAll('input').length)).toEqual([2, 5, 3, 1]);
-    expect(section.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(11);
+    expect(groups.map((group) => group.querySelectorAll('input').length)).toEqual([5, 5, 3, 1]);
+    expect(section.querySelectorAll('input[data-enhancer-opt]')).toHaveLength(14);
     for (const input of section.querySelectorAll<HTMLInputElement>('input')) {
       expect(input.getAttribute('aria-label')).toBeTruthy();
       expect(input.closest('fieldset')).not.toBeNull();

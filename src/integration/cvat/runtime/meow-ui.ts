@@ -47,6 +47,7 @@ export function ensureMeowStyle(doc: Document): void {
   style.id = STYLE_ID;
   style.textContent = `
 .meow-base-guide,
+.meow-qc-margin,
 .meow-track-ghosts {
   position: fixed;
   pointer-events: none;
@@ -74,6 +75,7 @@ export function ensureMeowStyle(doc: Document): void {
 .dark-theme .meow-surface,
 .cvat-dark-theme .meow-surface,
 [data-theme="dark"] .meow-base-guide,
+.meow-qc-margin,
 .meow-track-ghosts {
   position: fixed;
   pointer-events: none;

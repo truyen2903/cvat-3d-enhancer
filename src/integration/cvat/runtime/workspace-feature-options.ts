@@ -1,6 +1,9 @@
 /** Defaults preserve the enhancements already enabled before Workspace controls were added. */
 export const WORKSPACE_FEATURE_DEFAULTS = {
   showCuboidBaseGuide: true,
+  showQcMargin: true,
+  showQcMarginPerspective: true,
+  showQcMarginOrtho: true,
   enableTrackGhosts: true,
   disableSidebarQuickFilter: true,
   enableDimensionSync: true,
@@ -62,6 +65,24 @@ export const WORKSPACE_FEATURE_CONTROLS = [
     group: 'Hiển thị',
     title: 'Tia căn đáy box',
     description: 'Hiện tia đỏ dưới box đang chọn ở góc Side / Front.',
+  },
+  {
+    key: 'showQcMargin',
+    group: 'Hiển thị',
+    title: 'QC vùng đệm P',
+    description: 'Tô vùng ±% quanh box đang chọn: Vehicles 5%, Two-wheels 8%, Pedestrian 10%.',
+  },
+  {
+    key: 'showQcMarginPerspective',
+    group: 'Hiển thị',
+    title: 'QC vùng đệm ở 3D chính',
+    description: 'Hiện vùng đệm trong khung 3D chính.',
+  },
+  {
+    key: 'showQcMarginOrtho',
+    group: 'Hiển thị',
+    title: 'QC vùng đệm ở Top / Side / Front',
+    description: 'Hiện vùng đệm trong ba khung chiếu.',
   },
   {
     key: 'disableSidebarQuickFilter',

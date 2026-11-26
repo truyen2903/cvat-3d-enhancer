@@ -137,13 +137,26 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 - **Tia đỏ căn đáy** xuất hiện trong Side/Front tại lát thấp nhất của cuboid đang chọn, kể cả ô nhỏ. Tia là lớp hiển thị, không chỉnh hình học annotation.
 - **Giữ object trên màn hình khi chuyển frame**: camera được dịch theo thay đổi vị trí của object đang chọn, khi runtime cung cấp thông tin camera và frame phù hợp. Việc chỉnh box trong cùng frame không chủ động kéo camera theo box.
 
+### QC vùng đệm P
+
+Khi một object **vehicles**, **two-wheels** hoặc **pedestrian** đang được chọn, Meow tô hai lớp trong suốt quanh cuboid của CVAT để người kiểm tra xem box ôm point quá rộng hay quá chật:
+
+- **Lớp ngoài (cam)**: kích thước box × (1 + tỉ lệ). Point lọt ra ngoài lớp này nghĩa là box quá chật.
+- **Lớp trong (xanh)**: kích thước box × (1 − tỉ lệ). Nếu không có point nào chạm tới lớp này, box quá rộng.
+- Tỉ lệ theo nhãn: **vehicles 5%**, **two-wheels 8%**, **pedestrian 10%**. Các nhãn khác (Animal, Obstacle…) không vẽ gì.
+
+Hiện ở 3D chính và Top/Side/Front; mỗi nơi có công tắc riêng trong Workspace. Overlay chỉ là lớp hiển thị, không ghi vào annotation, không quét point cloud và chỉ vẽ lại khi box, nhãn, camera hoặc kích thước khung thay đổi.
+
 ## Các tùy chọn trong Settings → Workspace
 
-Mở mục thu gọn **Meow** trong Workspace để xem đủ 11 tùy chọn. Mô tả ngắn nằm dưới mỗi mục; di chuột để xem chi tiết.
+Mở mục thu gọn **Meow** trong Workspace để xem đủ 14 tùy chọn. Mô tả ngắn nằm dưới mỗi mục; di chuột để xem chi tiết.
 
 | Nhóm       | Tùy chọn                         | Công dụng                                            |
 | ---------- | -------------------------------- | ---------------------------------------------------- |
 | Hiển thị   | Tia căn đáy box                  | Tia đỏ ở Side/Front.                                 |
+| Hiển thị   | QC vùng đệm P                    | Tô vùng ±% quanh box đang chọn (công tắc chính).     |
+| Hiển thị   | QC vùng đệm ở 3D chính           | Hiện vùng đệm trong khung 3D chính.                  |
+| Hiển thị   | QC vùng đệm ở Top / Side / Front | Hiện vùng đệm trong ba khung chiếu.                  |
 | Hiển thị   | Bóng track · Alt+G               | Khung keyframe và đường đi khi giữ Alt+G.            |
 | Chỉnh box  | Đồng bộ H / W / L                | Hiện nhóm kích thước và mục Thuộc tính trong ⋯.      |
 | Chỉnh box  | Công cụ hướng box                | Hiện lật 180°, Đổi L↔W và Nội suy yaw.               |

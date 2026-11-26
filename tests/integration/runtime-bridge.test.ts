@@ -182,6 +182,104 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
     }
   });
 
+  describe('QC margin overlay', () => {
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const shrink = [0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 1];
+    const matrices = {
+      matrixWorldInverse: { elements: identity },
+      projectionMatrix: { elements: shrink },
+    };
+
+    function start(labelName: string) {
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+        clearRect: vi.fn(),
+        beginPath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        closePath: vi.fn(),
+        stroke: vi.fn(),
+        fill: vi.fn(),
+      } as unknown as CanvasRenderingContext2D);
+      const host = new PageBridgeRuntimeHost(
+        'qc_margin_session_token_999999',
+        window as never,
+        document
+      );
+      const internal = host as unknown as {
+        preRenderEnhancer: Cvat3dPreRenderEnhancer;
+        resolveActiveCuboid: () => unknown;
+      };
+      const attach = vi.spyOn(internal.preRenderEnhancer, 'setCanvasRenderListener');
+      vi.spyOn(internal, 'resolveActiveCuboid').mockReturnValue({
+        clientID: 1,
+        entry: null,
+        state: { points: [0, 0, 0, 0, 0, 0, 4, 2, 2], label: { name: labelName } },
+      });
+      const stop = host.start();
+      const render = attach.mock.calls[0]![0]!;
+      const options = (value: Record<string, boolean>) =>
+        vi.spyOn(internal.preRenderEnhancer, 'getOptionsReadonly').mockReturnValue(value as never);
+      const perspective = document.querySelector<HTMLCanvasElement>(
+        '.cvat-canvas3d-perspective canvas'
+      )!;
+      const top = document.querySelector<HTMLCanvasElement>('.cvat-canvas3d-topview canvas')!;
+      return { render, stop, options, perspective, top };
+    }
+    const overlays = () => document.querySelectorAll<HTMLCanvasElement>('canvas.meow-qc-margin');
+
+    it('draws for an active vehicles box and removes the overlay on shutdown', () => {
+      const { render, stop, perspective } = start('vehicles');
+      try {
+        render(perspective, matrices);
+        expect(overlays()).toHaveLength(1);
+        expect(overlays()[0]!.style.display).toBe('block');
+      } finally {
+        stop();
+      }
+      expect(overlays()).toHaveLength(0);
+    });
+
+    it('draws nothing for an Animal box', () => {
+      const { render, stop, perspective } = start('Animal');
+      try {
+        render(perspective, matrices);
+        expect(overlays()).toHaveLength(0);
+      } finally {
+        stop();
+      }
+    });
+
+    it('hides everything when the master option is off', () => {
+      const { render, stop, perspective, options } = start('vehicles');
+      try {
+        render(perspective, matrices);
+        options({ showQcMargin: false });
+        render(perspective, matrices);
+        expect(overlays()[0]!.style.display).toBe('none');
+      } finally {
+        stop();
+      }
+    });
+
+    it('toggles the main 3D view and the Top/Side/Front views independently', () => {
+      const { render, stop, perspective, top, options } = start('vehicles');
+      try {
+        options({ showQcMargin: true, showQcMarginPerspective: false, showQcMarginOrtho: true });
+        render(perspective, matrices);
+        expect(overlays()).toHaveLength(0);
+        render(top, { ...matrices, isOrthographicCamera: true });
+        expect(overlays()).toHaveLength(1);
+        options({ showQcMargin: true, showQcMarginPerspective: true, showQcMarginOrtho: false });
+        render(top, { ...matrices, isOrthographicCamera: true });
+        expect(overlays()[0]!.style.display).toBe('none');
+        render(perspective, matrices);
+        expect(overlays()).toHaveLength(2);
+      } finally {
+        stop();
+      }
+    });
+  });
+
   it('does not treat deselection as cuboid client ID zero', () => {
     const host = new PageBridgeRuntimeHost(
       'deselected_guide_session_token_999999',

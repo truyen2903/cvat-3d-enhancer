@@ -20,6 +20,9 @@ import {
   syncSidebarMutableAttribute,
 } from '../integration/cvat/runtime/sidebar-enhancements';
 import { BASE_GUIDE_CLASS, CuboidBaseGuide } from '../integration/cvat/runtime/cuboid-base-guide';
+import type { GuideCameraLike } from '../integration/cvat/runtime/cuboid-base-guide';
+import { QcMarginOverlay } from '../integration/cvat/runtime/qc-margin-overlay';
+import type { QcMarginTarget } from '../integration/cvat/runtime/qc-margin-overlay';
 import { MessageProtocol } from '../integration/cvat/bridge';
 import type { CanvasVisualConfigInput, PageRuntimeProbeResult } from '../integration/cvat/runtime';
 import {
@@ -325,6 +328,7 @@ export class PageBridgeRuntimeHost {
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true
     ));
+    const qcMargin = new QcMarginOverlay(this.doc);
     const trackGhosts = (this.trackGhosts = new TrackGhostOverlay(
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly().enableTrackGhosts ?? true,
@@ -406,6 +410,11 @@ export class PageBridgeRuntimeHost {
     ): void => {
       trackGhosts.render(canvas, camera as OrthoCameraLike);
       const cam = camera as OrthoCameraLike;
+      qcMargin.render(
+        canvas,
+        cam as unknown as GuideCameraLike,
+        this.resolveQcMarginTarget(Boolean(cam?.isOrthographicCamera))
+      );
       if (!cam?.isOrthographicCamera) return;
       if ((this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true) === false) {
         baseGuide.update(canvas, cam, null);
@@ -845,6 +854,7 @@ export class PageBridgeRuntimeHost {
       this.selection?.dispose();
       this.selection = null;
       baseGuide.clear();
+      qcMargin.dispose();
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
       removeQuickFilterGuard();
@@ -1166,6 +1176,33 @@ export class PageBridgeRuntimeHost {
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
+  private qcLabelCache: { clientID: number; name: string } | null = null;
+
+  /** Cheap per-render lookup: null unless the QC margin applies to the active cuboid here. */
+  private resolveQcMarginTarget(isOrthographic: boolean): QcMarginTarget | null {
+    const options = this.preRenderEnhancer.getOptionsReadonly();
+    const viewEnabled = isOrthographic
+      ? (options.showQcMarginOrtho ?? true)
+      : (options.showQcMarginPerspective ?? true);
+    if (!(options.showQcMargin ?? true) || !viewEnabled) return null;
+    const active = this.resolveActiveCuboid(false);
+    const state = active?.state;
+    const points = active?.entry?.data.points ?? state?.points;
+    if (!active || !state || !points) return null;
+    if (state.shapeType && state.shapeType !== 'cuboid') return null;
+    if (state.hidden || state.outside || active.entry?.data.hidden || active.entry?.data.outside)
+      return null;
+    let labelName = state.label?.name ?? active.entry?.state?.label?.name;
+    if (!labelName) {
+      if (this.qcLabelCache?.clientID !== active.clientID) {
+        const name = resolveSidebarObjectContext(this.doc, active.clientID)?.state?.label?.name;
+        this.qcLabelCache = { clientID: active.clientID, name: name ?? '' };
+      }
+      labelName = this.qcLabelCache?.name || undefined;
+    }
+    return { points, labelName };
+  }
+
   private resolveActiveCuboid(allowReduxFallback = true): {
     clientID: number;
     entry: CvatDrawnObjectEntry | null;
