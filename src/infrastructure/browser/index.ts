@@ -112,18 +112,56 @@ export async function syncDynamicContentScripts(
     }
 
     const matches = customOrigins.map((origin) => `${origin}/*`);
-    await chrome.scripting.registerContentScripts([
-      {
-        id: scriptId,
-        js: contentScriptFiles,
-        matches,
-        runAt: 'document_start',
-        persistAcrossSessions: true,
-      },
-    ]);
-    log.info(`Registered persistent dynamic content scripts for ${matches.length} custom origin(s)`);
+    const script = {
+      id: scriptId,
+      js: contentScriptFiles,
+      matches,
+      runAt: 'document_start' as const,
+    };
+    try {
+      await chrome.scripting.registerContentScripts([{ ...script, persistAcrossSessions: true }]);
+    } catch (firstErr) {
+      // Some browsers (e.g. Firefox) reject or ignore optional properties; retry with the minimum.
+      log.warn('registerContentScripts with persistAcrossSessions failed, retrying', firstErr);
+      await chrome.scripting.registerContentScripts([script]);
+    }
+    log.info(
+      `Registered persistent dynamic content scripts for ${matches.length} custom origin(s)`
+    );
+    await injectIntoOpenTabs(matches, contentScriptFiles);
   } catch (err) {
     log.warn('Could not register dynamic content scripts (host permission may be required)', err);
   }
 }
 
+/**
+ * Injects the content script into already-open tabs of authorized origins, so a freshly granted
+ * domain works without a manual reload (the permission prompt may close the popup before it can
+ * ask the background to do this).
+ */
+async function injectIntoOpenTabs(
+  matches: readonly string[],
+  files: readonly string[]
+): Promise<void> {
+  if (!chrome.tabs?.query || !chrome.scripting?.executeScript) {
+    return;
+  }
+  try {
+    const tabs = await chrome.tabs.query({ url: [...matches] });
+    for (const tab of tabs) {
+      if (typeof tab.id !== 'number') continue;
+      try {
+        const [already] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => document.querySelector('script[data-cvat-enhancer-bridge-token]') !== null,
+        });
+        if (already?.result === true) continue;
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: [...files] });
+      } catch (err) {
+        log.warn('Could not inject into open tab', err);
+      }
+    }
+  } catch (err) {
+    log.warn('Could not query open tabs for injection', err);
+  }
+}

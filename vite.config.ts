@@ -48,7 +48,11 @@ function allowDynamicOriginResourcesPlugin(): Plugin {
           };
           delete ff.minimum_chrome_version;
           ff.browser_specific_settings = {
-            gecko: { id: 'meow@cvat-3d-enhancer', strict_min_version: '128.0' },
+            gecko: {
+              id: 'meow@cvat-3d-enhancer',
+              strict_min_version: '128.0',
+              data_collection_permissions: { required: ['none'] },
+            },
           };
         }
         writeFileSync(manifestPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
