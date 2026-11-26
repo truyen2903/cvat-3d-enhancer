@@ -42,7 +42,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/content.ts-loader-CN_4zNpE.js"
+        "assets/content.ts-loader-BCEqkpHa.js"
       ],
       "matches": [
         "https://*.cvat.ai/*",
@@ -68,13 +68,13 @@
         "http://*/*"
       ],
       "resources": [
-        "assets/index-D-fE3yjt.js",
-        "assets/index-YF8g75cw.js",
+        "assets/index-GTXaoV7i.js",
+        "assets/index-BuBfJJVI.js",
         "assets/schemas-njzct5Su.js",
         "assets/index-D5_ZH5vf.js",
         "assets/origin-validator--cNPonwa.js",
         "assets/ortho-cuboid-editor-CTiUxoRP.js",
-        "assets/content.ts-CY2SvRBz.js"
+        "assets/content.ts-BdiTRvs7.js"
       ]
     }
   ],
@@ -84,7 +84,12 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "meow@cvat-3d-enhancer",
-      "strict_min_version": "128.0"
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
     }
   }
 }
