@@ -7,9 +7,9 @@ export interface QcMarginTarget {
   readonly labelName: string | null | undefined;
 }
 
-const OUTER_FILL = 'rgba(255, 159, 64, 0.22)';
+const OUTER_FILL = 'rgba(255, 159, 64, 0.38)';
 const OUTER_STROKE = 'rgba(255, 159, 64, 0.9)';
-const INNER_FILL = 'rgba(64, 160, 255, 0.22)';
+const INNER_FILL = 'rgba(64, 160, 255, 0.38)';
 const INNER_STROKE = 'rgba(64, 160, 255, 0.9)';
 
 /** Everything a single source canvas needs; allocated once and reused by every render. */
@@ -17,11 +17,13 @@ interface ViewState {
   readonly overlay: HTMLCanvasElement;
   readonly context: CanvasRenderingContext2D;
   readonly box: Float64Array; // cached cx, cy, cz, rx, ry, rz, L, W, H
-  readonly shells: Float64Array; // 16 corners (x, y, z)
-  readonly screen: Float64Array; // 16 corners (x, y, valid)
+  readonly shells: Float64Array; // 24 corners (x, y, z): outer, inner, box
+  readonly screen: Float64Array; // 24 corners (x, y, valid)
   readonly camera: Float64Array; // view + projection matrices
   readonly sorted: Int32Array;
-  readonly hull: Int32Array;
+  readonly outerHull: Int32Array;
+  readonly innerHull: Int32Array;
+  readonly boxHull: Int32Array;
   ratio: number;
   shellsValid: boolean;
   shellVersion: number;
@@ -44,8 +46,8 @@ function cross(s: Float64Array, offset: number, a: number, b: number, c: number)
 }
 
 /** Convex hull of the valid projected corners of one shell; returns the vertex count. */
-function convexHull(state: ViewState, offset: number): number {
-  const { screen, sorted, hull } = state;
+function convexHull(state: ViewState, offset: number, hull: Int32Array): number {
+  const { screen, sorted } = state;
   let n = 0;
   for (let i = 0; i < 8; i += 1) if (screen[(offset + i) * 3 + 2] !== 0) sorted[n++] = i;
   if (n < 3) return 0;
@@ -174,11 +176,13 @@ export class QcMarginOverlay {
       overlay,
       context,
       box: new Float64Array(9),
-      shells: new Float64Array(48),
-      screen: new Float64Array(48),
+      shells: new Float64Array(72),
+      screen: new Float64Array(72),
       camera: new Float64Array(32),
       sorted: new Int32Array(8),
-      hull: new Int32Array(17),
+      outerHull: new Int32Array(17),
+      innerHull: new Int32Array(17),
+      boxHull: new Int32Array(17),
       ratio: NaN,
       shellsValid: false,
       shellVersion: 0,
@@ -210,7 +214,7 @@ export class QcMarginOverlay {
     }
     if (overlay.style.display !== 'block') overlay.style.display = 'block';
 
-    for (let i = 0; i < 48; i += 3) {
+    for (let i = 0; i < 72; i += 3) {
       const x = shells[i]!;
       const y = shells[i + 1]!;
       const z = shells[i + 2]!;
@@ -228,25 +232,52 @@ export class QcMarginOverlay {
     }
 
     ctx.clearRect(0, 0, state.width, state.height);
-    ctx.lineWidth = 1;
-    for (let shell = 0; shell < 2; shell += 1) {
-      const count = convexHull(state, shell * 8);
-      if (count < 3) continue;
-      ctx.fillStyle = shell === 0 ? OUTER_FILL : INNER_FILL;
-      ctx.strokeStyle = shell === 0 ? OUTER_STROKE : INNER_STROKE;
-      ctx.beginPath();
-      for (let i = 0; i < count; i += 1) {
-        const o = (shell * 8 + state.hull[i]!) * 3;
-        if (i === 0) ctx.moveTo(screen[o]!, screen[o + 1]!);
-        else ctx.lineTo(screen[o]!, screen[o + 1]!);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+    ctx.lineWidth = 1.5;
+    const boxCount = convexHull(state, 16, state.boxHull);
+    if (boxCount >= 3) {
+      // Outer band: between the outer shell and the box. Inner band: between the box and the inner shell.
+      const outerCount = convexHull(state, 0, state.outerHull);
+      if (outerCount >= 3)
+        this.fillRing(state, OUTER_FILL, OUTER_STROKE, 0, state.outerHull, outerCount, boxCount);
+      const innerCount = convexHull(state, 8, state.innerHull);
+      if (innerCount >= 3)
+        this.fillRing(state, INNER_FILL, INNER_STROKE, 8, state.innerHull, innerCount, boxCount);
     }
     state.drawn = true;
     state.drawnShellVersion = state.shellVersion;
     state.drawnRectVersion = this.rectVersion;
+  }
+
+  /** Even-odd fill of (shell polygon + box polygon): only the band between them is tinted. */
+  private fillRing(
+    state: ViewState,
+    fill: string,
+    stroke: string,
+    shellOffset: number,
+    shellHull: Int32Array,
+    shellCount: number,
+    boxCount: number
+  ): void {
+    const ctx = state.context;
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.beginPath();
+    this.tracePolygon(state, shellOffset, shellHull, shellCount);
+    this.tracePolygon(state, 16, state.boxHull, boxCount);
+    ctx.fill('evenodd');
+    ctx.beginPath();
+    this.tracePolygon(state, shellOffset, shellHull, shellCount);
+    ctx.stroke();
+  }
+
+  private tracePolygon(state: ViewState, offset: number, hull: Int32Array, count: number): void {
+    const { context: ctx, screen } = state;
+    for (let i = 0; i < count; i += 1) {
+      const o = (offset + hull[i]!) * 3;
+      if (i === 0) ctx.moveTo(screen[o]!, screen[o + 1]!);
+      else ctx.lineTo(screen[o]!, screen[o + 1]!);
+    }
+    ctx.closePath();
   }
 
   private hide(state: ViewState): void {

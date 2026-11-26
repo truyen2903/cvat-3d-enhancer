@@ -1176,7 +1176,31 @@ export class PageBridgeRuntimeHost {
   }
 
   /** Active cuboid (drawn entry + ObjectState) on the current frame. */
-  private qcLabelCache: { clientID: number; name: string } | null = null;
+  private qcLabelCache: { clientID: number; name: string; at: number } | null = null;
+
+  /** Label of the active object: drawn state first, then the sidebar card (cached briefly). */
+  private resolveQcLabelName(
+    clientID: number,
+    state: CvatObjectStateLike | null | undefined
+  ): string | undefined {
+    const direct = state?.label?.name;
+    if (direct) return direct;
+    const now = Date.now();
+    if (this.qcLabelCache?.clientID !== clientID || now - this.qcLabelCache.at > 400) {
+      const item = this.doc.getElementById(`cvat-objects-sidebar-state-item-${clientID}`);
+      const name =
+        item
+          ?.querySelector(
+            '.cvat-objects-sidebar-state-item-label-selector .ant-select-selection-item'
+          )
+          ?.textContent?.trim() ||
+        resolveSidebarObjectContext(this.doc, clientID)?.state?.label?.name ||
+        item?.querySelector('.ant-select-selection-item')?.textContent?.trim() ||
+        '';
+      this.qcLabelCache = { clientID, name, at: now };
+    }
+    return this.qcLabelCache.name || undefined;
+  }
 
   /** Cheap per-render lookup: null unless the QC margin applies to the active cuboid here. */
   private resolveQcMarginTarget(isOrthographic: boolean): QcMarginTarget | null {
@@ -1186,21 +1210,17 @@ export class PageBridgeRuntimeHost {
       : (options.showQcMarginPerspective ?? true);
     if (!(options.showQcMargin ?? true) || !viewEnabled) return null;
     const active = this.resolveActiveCuboid(false);
-    const state = active?.state;
-    const points = active?.entry?.data.points ?? state?.points;
-    if (!active || !state || !points) return null;
-    if (state.shapeType && state.shapeType !== 'cuboid') return null;
-    if (state.hidden || state.outside || active.entry?.data.hidden || active.entry?.data.outside)
-      return null;
-    let labelName = state.label?.name ?? active.entry?.state?.label?.name;
-    if (!labelName) {
-      if (this.qcLabelCache?.clientID !== active.clientID) {
-        const name = resolveSidebarObjectContext(this.doc, active.clientID)?.state?.label?.name;
-        this.qcLabelCache = { clientID: active.clientID, name: name ?? '' };
-      }
-      labelName = this.qcLabelCache?.name || undefined;
-    }
-    return { points, labelName };
+    if (!active) return null;
+    const { entry, state } = active;
+    // The drawn entry is the source of truth, exactly like the base guide; state may be absent.
+    const points = entry?.data.points ?? state?.points;
+    if (!points) return null;
+    if (state?.shapeType && state.shapeType !== 'cuboid') return null;
+    if (state?.hidden || state?.outside || entry?.data.hidden || entry?.data.outside) return null;
+    return {
+      points,
+      labelName: this.resolveQcLabelName(active.clientID, state ?? entry?.state),
+    };
   }
 
   private resolveActiveCuboid(allowReduxFallback = true): {

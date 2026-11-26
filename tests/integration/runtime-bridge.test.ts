@@ -223,7 +223,7 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
         '.cvat-canvas3d-perspective canvas'
       )!;
       const top = document.querySelector<HTMLCanvasElement>('.cvat-canvas3d-topview canvas')!;
-      return { render, stop, options, perspective, top };
+      return { render, stop, options, perspective, top, internal };
     }
     const overlays = () => document.querySelectorAll<HTMLCanvasElement>('canvas.meow-qc-margin');
 
@@ -237,6 +237,26 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
         stop();
       }
       expect(overlays()).toHaveLength(0);
+    });
+
+    it('draws when the drawn entry has no state, reading the label from the sidebar', () => {
+      const { render, stop, perspective, internal } = start('vehicles');
+      try {
+        document.body.insertAdjacentHTML(
+          'beforeend',
+          '<div id="cvat-objects-sidebar-state-item-1"><div class="cvat-objects-sidebar-state-item-label-selector"><span class="ant-select-selection-item">Vehicles</span></div></div>'
+        );
+        vi.spyOn(internal, 'resolveActiveCuboid').mockReturnValue({
+          clientID: 1,
+          entry: { data: { clientID: 1, points: [0, 0, 0, 0, 0, 0, 4, 2, 2] } },
+          state: null,
+        });
+        render(perspective, matrices);
+        expect(overlays()).toHaveLength(1);
+        expect(overlays()[0]!.style.display).toBe('block');
+      } finally {
+        stop();
+      }
     });
 
     it('draws nothing for an Animal box', () => {

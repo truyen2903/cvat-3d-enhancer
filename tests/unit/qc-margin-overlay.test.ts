@@ -53,6 +53,13 @@ describe('QcMarginOverlay', () => {
     expect(context.fill).toHaveBeenCalledTimes(2);
   });
 
+  it('fills each band as a ring (even-odd) so only the margins are tinted', () => {
+    const { canvas, context, overlay } = setup();
+    overlay.render(canvas, camera, { points: box, labelName: 'vehicles' });
+    expect(context.fill).toHaveBeenNthCalledWith(1, 'evenodd');
+    expect(context.fill).toHaveBeenNthCalledWith(2, 'evenodd');
+  });
+
   it('draws nothing for an Animal box', () => {
     const { canvas, context, overlay } = setup();
     overlay.render(canvas, camera, { points: box, labelName: 'Animal' });

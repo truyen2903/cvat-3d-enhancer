@@ -19,7 +19,7 @@ describe('resolveQcMarginRatio', () => {
 
 describe('buildQcShells', () => {
   it('builds outer and inner corners for an axis-aligned 4x2x2 box at ratio 0.05', () => {
-    const out = new Float64Array(48);
+    const out = new Float64Array(72);
     expect(buildQcShells([0, 0, 0, 0, 0, 0, 4, 2, 2], 0.05, out)).toBe(true);
     expect(out[0]).toBeCloseTo(-2.1);
     expect(out[1]).toBeCloseTo(-1.05);
@@ -29,10 +29,14 @@ describe('buildQcShells', () => {
     expect(out[23]).toBeCloseTo(1.05);
     expect(out[45]).toBeCloseTo(1.9);
     expect(out[46]).toBeCloseTo(0.95);
+    // third shell is the unscaled box itself: corner 7 of a 4x2x2 box
+    expect(out[69]).toBeCloseTo(2);
+    expect(out[70]).toBeCloseTo(1);
+    expect(out[71]).toBeCloseTo(1);
   });
 
   it('rejects invalid points without touching out', () => {
-    const out = new Float64Array(48).fill(7);
+    const out = new Float64Array(72).fill(7);
     expect(buildQcShells([0, 0, 0, 0, 0, 0, 4, 2], 0.05, out)).toBe(false);
     expect(buildQcShells([0, 0, 0, 0, 0, 0, 4, NaN, 2], 0.05, out)).toBe(false);
     expect(buildQcShells([0, 0, 0, 0, 0, 0, 4, 0, 2], 0.05, out)).toBe(false);

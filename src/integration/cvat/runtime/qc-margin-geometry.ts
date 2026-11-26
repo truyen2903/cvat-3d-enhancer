@@ -27,21 +27,22 @@ export function resolveQcMarginRatio(labelName: string | null | undefined): numb
 }
 
 /**
- * Writes 16 corners (x, y, z) into `out`: 8 outer (size × (1 + ratio)) then 8 inner
- * (size × (1 − ratio)). Corner i uses a + sign on axis k when bit k of i is set.
+ * Writes 24 corners (x, y, z) into `out`: 8 outer (size × (1 + ratio)), 8 inner
+ * (size × (1 − ratio)) and 8 of the box itself. Corner i uses a + sign on axis k when bit k
+ * of i is set.
  */
 export function buildQcShells(
   points: readonly number[],
   ratio: number,
   out: Float64Array
 ): boolean {
-  if (points.length < 9 || out.length < 48) return false;
+  if (points.length < 9 || out.length < 72) return false;
   for (let i = 0; i < 9; i += 1) if (!Number.isFinite(points[i])) return false;
   if (points[6]! <= 0 || points[7]! <= 0 || points[8]! <= 0) return false;
 
   const axes = cuboidAxes(points);
-  for (let shell = 0; shell < 2; shell += 1) {
-    const scale = shell === 0 ? 1 + ratio : 1 - ratio;
+  for (let shell = 0; shell < 3; shell += 1) {
+    const scale = shell === 0 ? 1 + ratio : shell === 1 ? 1 - ratio : 1;
     for (let corner = 0; corner < 8; corner += 1) {
       let x = points[0]!;
       let y = points[1]!;
