@@ -141,8 +141,8 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 
 Khi một object **vehicles**, **two-wheels** hoặc **pedestrian** đang được chọn, Meow tô hai lớp trong suốt quanh cuboid của CVAT để người kiểm tra xem box ôm point quá rộng hay quá chật:
 
-- **Lớp ngoài (cam)**: kích thước box × (1 + tỉ lệ). Point lọt ra ngoài lớp này nghĩa là box quá chật.
-- **Lớp trong (xanh)**: kích thước box × (1 − tỉ lệ). Nếu không có point nào chạm tới lớp này, box quá rộng.
+- **Lớp ngoài (cam)**: mỗi mặt của box nở ra đúng tỉ lệ × kích thước theo trục đó, ở cả 6 hướng. Point lọt ra ngoài lớp này nghĩa là box quá chật.
+- **Lớp trong (xanh)**: mỗi mặt của box lùi vào cùng khoảng đó. Nếu không có point nào chạm tới lớp này, box quá rộng.
 - Tỉ lệ theo nhãn: **vehicles 5%**, **two-wheels 8%**, **pedestrian 10%**. Các nhãn khác (Animal, Obstacle…) không vẽ gì.
 
 Hiện ở 3D chính và Top/Side/Front; mỗi nơi có công tắc riêng trong Workspace. Overlay chỉ là lớp hiển thị, không ghi vào annotation, không quét point cloud và chỉ vẽ lại khi box, nhãn, camera hoặc kích thước khung thay đổi.

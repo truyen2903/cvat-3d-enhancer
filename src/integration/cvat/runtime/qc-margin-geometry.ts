@@ -27,8 +27,8 @@ export function resolveQcMarginRatio(labelName: string | null | undefined): numb
 }
 
 /**
- * Writes 24 corners (x, y, z) into `out`: 8 outer (size × (1 + ratio)), 8 inner
- * (size × (1 − ratio)) and 8 of the box itself. Corner i uses a + sign on axis k when bit k
+ * Writes 24 corners (x, y, z) into `out`: 8 outer (every face pushed out by ratio × that
+ * axis' size), 8 inner (every face pulled in by the same) and 8 of the box itself. Corner i uses a + sign on axis k when bit k
  * of i is set.
  */
 export function buildQcShells(
@@ -42,13 +42,14 @@ export function buildQcShells(
 
   const axes = cuboidAxes(points);
   for (let shell = 0; shell < 3; shell += 1) {
-    const scale = shell === 0 ? 1 + ratio : shell === 1 ? 1 - ratio : 1;
+    // Half-extent = size × (0.5 ± ratio): the padding applies on both sides of every axis.
+    const halfFactor = shell === 0 ? 0.5 + ratio : shell === 1 ? 0.5 - ratio : 0.5;
     for (let corner = 0; corner < 8; corner += 1) {
       let x = points[0]!;
       let y = points[1]!;
       let z = points[2]!;
       for (let k = 0; k < 3; k += 1) {
-        const half = (points[6 + k]! * scale) / 2;
+        const half = points[6 + k]! * halfFactor;
         const signed = corner & (1 << k) ? half : -half;
         const axis = axes[k]!;
         x += axis[0] * signed;

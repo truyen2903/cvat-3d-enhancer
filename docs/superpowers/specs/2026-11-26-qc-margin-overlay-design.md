@@ -30,5 +30,5 @@ from box to point cloud is easy to judge. Z (ground contact) is explicitly out o
 3. SVG polygons (like `CuboidBaseGuide`). Works, but DOM attribute churn per frame.
 
 ## My calls (not user-confirmed)
-- "±5%" means the box **size** scaled by 1±ratio (not an offset of 5% per side).
+- Superseded 2026-11-26 by user: padding applies on **every side**, each face offset by ratio × that axis' size (half-extent × (0.5 ± ratio)).
 - New options default to enabled, like other Workspace features.
