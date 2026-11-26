@@ -134,7 +134,7 @@ Có thể kéo cạnh của cuboid trong các góc nhìn trực giao để chỉ
 ### Focus và tia căn đáy
 
 - **Double-click** nền thẻ object để chọn và focus object. Tùy chọn Workspace có thể bỏ Quick filter tự động của bản CVAT tùy chỉnh, đồng thời giữ thao tác focus. Nếu không tìm được thao tác focus gốc, extension giữ hành vi double-click của CVAT.
-- **Tia đỏ căn đáy** xuất hiện trong Side/Front tại lát thấp nhất của cuboid đang chọn, kể cả ô nhỏ. Tia là lớp hiển thị, không chỉnh hình học annotation.
+- **Tia đỏ căn đáy** (bật/tắt nhanh bằng **Alt+[**) xuất hiện trong Side/Front tại lát thấp nhất của cuboid đang chọn, kể cả ô nhỏ. Tia là lớp hiển thị, không chỉnh hình học annotation.
 - **Giữ object trên màn hình khi chuyển frame**: camera được dịch theo thay đổi vị trí của object đang chọn, khi runtime cung cấp thông tin camera và frame phù hợp. Việc chỉnh box trong cùng frame không chủ động kéo camera theo box.
 
 ### QC vùng đệm P
@@ -153,7 +153,7 @@ Mở mục thu gọn **Meow** trong Workspace để xem đủ 14 tùy chọn. M�
 
 | Nhóm       | Tùy chọn                         | Công dụng                                            |
 | ---------- | -------------------------------- | ---------------------------------------------------- |
-| Hiển thị   | Tia căn đáy box                  | Tia đỏ ở Side/Front.                                 |
+| Hiển thị   | Tia căn đáy box · Alt+[          | Tia đỏ ở Side/Front; Alt+[ bật/tắt nhanh.            |
 | Hiển thị   | QC vùng đệm P · Alt+P            | Tô vùng đệm quanh box đang chọn (công tắc chính).    |
 | Hiển thị   | QC vùng đệm ở 3D chính           | Hiện vùng đệm trong khung 3D chính.                  |
 | Hiển thị   | QC vùng đệm ở Top / Side / Front | Hiện vùng đệm trong ba khung chiếu.                  |

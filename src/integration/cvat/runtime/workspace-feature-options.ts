@@ -63,7 +63,7 @@ export const WORKSPACE_FEATURE_CONTROLS = [
   {
     key: 'showCuboidBaseGuide',
     group: 'Hiển thị',
-    title: 'Tia căn đáy box',
+    title: 'Tia căn đáy box · Alt+[',
     description: 'Hiện tia đỏ dưới box đang chọn ở góc Side / Front.',
   },
   {

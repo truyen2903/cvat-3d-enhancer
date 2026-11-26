@@ -123,6 +123,16 @@ const IGNORED_MUTATION_SELECTOR =
   '#meow-toast-stack, [data-meow-owned], .meow-selection-ui, #cvat-3d-enhancer-workspace-settings-section, ' +
   '[data-enhancer-workspace-settings], .ant-select-dropdown, .ant-tooltip, .ant-popover';
 
+const TOGGLE_HOTKEYS: Readonly<
+  Record<
+    string,
+    { readonly option: 'showQcMargin' | 'showCuboidBaseGuide'; readonly label: string }
+  >
+> = {
+  KeyP: { option: 'showQcMargin', label: 'QC vùng đệm P' },
+  BracketLeft: { option: 'showCuboidBaseGuide', label: 'Tia căn đáy' },
+};
+
 const CAMERA_KEY_MAPPING: Record<
   CameraPresetAction,
   { readonly code: string; readonly altKey: boolean; readonly shiftKey: boolean }
@@ -329,10 +339,12 @@ export class PageBridgeRuntimeHost {
       () => this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true
     ));
     const qcMargin = new QcMarginOverlay(this.doc);
-    // Alt+P: quick on/off for the QC margin overlay (same toggle as the Workspace checkbox).
-    const onQcMarginHotkey = (event: KeyboardEvent): void => {
+    // Alt+P / Alt+[: quick on/off for the QC margin overlay and the red base guide
+    // (same toggles as the Workspace checkboxes).
+    const onToggleHotkey = (event: KeyboardEvent): void => {
+      const hotkey = TOGGLE_HOTKEYS[event.code];
       if (
-        event.code !== 'KeyP' ||
+        !hotkey ||
         !event.altKey ||
         event.shiftKey ||
         event.ctrlKey ||
@@ -346,13 +358,15 @@ export class PageBridgeRuntimeHost {
       event.preventDefault();
       event.stopPropagation();
       const options = this.preRenderEnhancer.getOptionsReadonly();
-      const enabled = !(options.showQcMargin ?? true);
-      this.applyWorkspaceOptions({ ...options, showQcMargin: enabled });
-      showMeowToast(this.doc, `QC vùng đệm P: ${enabled ? 'bật' : 'tắt'}`, 'info');
-      if (enabled) this.preRenderEnhancer.requestViewsRedraw();
-      else qcMargin.clear();
+      const enabled = !(options[hotkey.option] ?? true);
+      this.applyWorkspaceOptions({ ...options, [hotkey.option]: enabled });
+      showMeowToast(this.doc, `${hotkey.label}: ${enabled ? 'bật' : 'tắt'}`, 'info');
+      if (hotkey.option === 'showQcMargin') {
+        if (enabled) this.preRenderEnhancer.requestViewsRedraw();
+        else qcMargin.clear();
+      }
     };
-    this.win.addEventListener('keydown', onQcMarginHotkey, true);
+    this.win.addEventListener('keydown', onToggleHotkey, true);
     const trackGhosts = (this.trackGhosts = new TrackGhostOverlay(
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly().enableTrackGhosts ?? true,
@@ -878,7 +892,7 @@ export class PageBridgeRuntimeHost {
       this.selection?.dispose();
       this.selection = null;
       baseGuide.clear();
-      this.win.removeEventListener('keydown', onQcMarginHotkey, true);
+      this.win.removeEventListener('keydown', onToggleHotkey, true);
       qcMargin.dispose();
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');

@@ -306,6 +306,32 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       expect(shown()).not.toBe(false);
     });
 
+    it('Alt+[ toggles the red base guide option and ignores text fields', () => {
+      const { stop, internal } = start('vehicles');
+      const guide = () => internal.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide;
+      const altBracket = (target: EventTarget = window) =>
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            code: 'BracketLeft',
+            key: '[',
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      try {
+        document.body.insertAdjacentHTML('beforeend', '<input id="guide-field" />');
+        altBracket(document.getElementById('guide-field')!);
+        expect(guide()).not.toBe(false);
+        expect(altBracket()).toBe(false);
+        expect(guide()).toBe(false);
+        altBracket();
+        expect(guide()).toBe(true);
+      } finally {
+        stop();
+      }
+    });
+
     it('draws nothing for an Animal box', () => {
       const { render, stop, perspective } = start('Animal');
       try {
