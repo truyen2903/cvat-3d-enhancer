@@ -69,8 +69,8 @@ export const WORKSPACE_FEATURE_CONTROLS = [
   {
     key: 'showQcMargin',
     group: 'Hiển thị',
-    title: 'QC vùng đệm P',
-    description: 'Tô vùng ±% quanh box đang chọn: Vehicles 5%, Two-wheels 8%, Pedestrian 10%.',
+    title: 'QC vùng đệm P · Alt+P',
+    description: 'Bật/tắt nhanh bằng Alt+P. Vehicles 5%, Two-wheels 8%, Pedestrian 10%.',
   },
   {
     key: 'showQcMarginPerspective',

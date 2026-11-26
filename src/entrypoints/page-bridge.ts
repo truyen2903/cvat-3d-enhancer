@@ -329,6 +329,30 @@ export class PageBridgeRuntimeHost {
       () => this.preRenderEnhancer.getOptionsReadonly().showCuboidBaseGuide ?? true
     ));
     const qcMargin = new QcMarginOverlay(this.doc);
+    // Alt+P: quick on/off for the QC margin overlay (same toggle as the Workspace checkbox).
+    const onQcMarginHotkey = (event: KeyboardEvent): void => {
+      if (
+        event.code !== 'KeyP' ||
+        !event.altKey ||
+        event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.repeat
+      )
+        return;
+      const target = event.target as Element | null;
+      if (target?.closest?.('input,textarea,select,[contenteditable="true"],[role="textbox"]'))
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      const options = this.preRenderEnhancer.getOptionsReadonly();
+      const enabled = !(options.showQcMargin ?? true);
+      this.applyWorkspaceOptions({ ...options, showQcMargin: enabled });
+      showMeowToast(this.doc, `QC vùng đệm P: ${enabled ? 'bật' : 'tắt'}`, 'info');
+      if (enabled) this.preRenderEnhancer.requestViewsRedraw();
+      else qcMargin.clear();
+    };
+    this.win.addEventListener('keydown', onQcMarginHotkey, true);
     const trackGhosts = (this.trackGhosts = new TrackGhostOverlay(
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly().enableTrackGhosts ?? true,
@@ -854,6 +878,7 @@ export class PageBridgeRuntimeHost {
       this.selection?.dispose();
       this.selection = null;
       baseGuide.clear();
+      this.win.removeEventListener('keydown', onQcMarginHotkey, true);
       qcMargin.dispose();
       this.baseGuide = null;
       this.doc.documentElement.removeAttribute('data-meow-ortho-keyboard');
@@ -1017,21 +1042,24 @@ export class PageBridgeRuntimeHost {
     injectCvatWorkspaceSettingsControls(
       this.doc,
       () => this.preRenderEnhancer.getOptionsReadonly(),
-      (next: Cvat3dWorkspaceRenderOptions) => {
-        const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
-        const canvasInstance = this.getActiveCanvas3dInstance();
-        if (canvasInstance) {
-          this.preRenderEnhancer.ensureHooked(canvasInstance);
-          this.ensureActiveObjectHoverLock(canvasInstance);
-        }
-        this.preRenderEnhancer.setOptions(persisted, canvasInstance);
-        this.syncKeyboardEnabledAttribute();
-        this.tryMountObjectItemDimensionSyncControls();
-        this.baseGuide?.refresh();
-        this.trackGhosts?.refreshEnabled();
-        this.selection?.refreshEnabled();
-      }
+      (next: Cvat3dWorkspaceRenderOptions) => this.applyWorkspaceOptions(next)
     );
+  }
+
+  /** Persist and activate new Workspace options (checkbox change or hotkey). */
+  private applyWorkspaceOptions(next: Cvat3dWorkspaceRenderOptions): void {
+    const persisted = writeRenderOptionsToClientSettings(next, this.win.localStorage);
+    const canvasInstance = this.getActiveCanvas3dInstance();
+    if (canvasInstance) {
+      this.preRenderEnhancer.ensureHooked(canvasInstance);
+      this.ensureActiveObjectHoverLock(canvasInstance);
+    }
+    this.preRenderEnhancer.setOptions(persisted, canvasInstance);
+    this.syncKeyboardEnabledAttribute();
+    this.tryMountObjectItemDimensionSyncControls();
+    this.baseGuide?.refresh();
+    this.trackGhosts?.refreshEnabled();
+    this.selection?.refreshEnabled();
   }
 
   private syncKeyboardEnabledAttribute(): void {

@@ -145,7 +145,7 @@ Khi một object **vehicles**, **two-wheels** hoặc **pedestrian** đang đư�
 - **Lớp trong (xanh)**: mỗi mặt của box lùi vào cùng khoảng đó. Nếu không có point nào chạm tới lớp này, box quá rộng.
 - Tỉ lệ theo nhãn: **vehicles 5%**, **two-wheels 8%**, **pedestrian 10%**. Các nhãn khác (Animal, Obstacle…) không vẽ gì.
 
-Hiện ở 3D chính và Top/Side/Front; mỗi nơi có công tắc riêng trong Workspace. Overlay chỉ là lớp hiển thị, không ghi vào annotation, không quét point cloud và chỉ vẽ lại khi box, nhãn, camera hoặc kích thước khung thay đổi.
+Nhấn **Alt+P** để bật/tắt nhanh (cùng công tắc với Workspace, có toast báo trạng thái; không nhận phím khi đang gõ trong ô nhập liệu). Hiện ở 3D chính và Top/Side/Front; mỗi nơi có công tắc riêng trong Workspace. Overlay chỉ là lớp hiển thị, không ghi vào annotation, không quét point cloud và chỉ vẽ lại khi box, nhãn, camera hoặc kích thước khung thay đổi.
 
 ## Các tùy chọn trong Settings → Workspace
 
@@ -154,7 +154,7 @@ Mở mục thu gọn **Meow** trong Workspace để xem đủ 14 tùy chọn. M�
 | Nhóm       | Tùy chọn                         | Công dụng                                            |
 | ---------- | -------------------------------- | ---------------------------------------------------- |
 | Hiển thị   | Tia căn đáy box                  | Tia đỏ ở Side/Front.                                 |
-| Hiển thị   | QC vùng đệm P                    | Tô vùng ±% quanh box đang chọn (công tắc chính).     |
+| Hiển thị   | QC vùng đệm P · Alt+P            | Tô vùng đệm quanh box đang chọn (công tắc chính).    |
 | Hiển thị   | QC vùng đệm ở 3D chính           | Hiện vùng đệm trong khung 3D chính.                  |
 | Hiển thị   | QC vùng đệm ở Top / Side / Front | Hiện vùng đệm trong ba khung chiếu.                  |
 | Hiển thị   | Bóng track · Alt+G               | Khung keyframe và đường đi khi giữ Alt+G.            |

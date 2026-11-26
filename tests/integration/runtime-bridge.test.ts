@@ -259,6 +259,53 @@ describe('CVAT 3D Runtime & PageBridge Integration', () => {
       }
     });
 
+    const altP = (init: KeyboardEventInit = {}, target: EventTarget = window) =>
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          code: 'KeyP',
+          key: 'p',
+          altKey: true,
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        })
+      );
+
+    it('Alt+P toggles the QC margin, persists it and hides the overlay at once', () => {
+      const { render, stop, perspective, internal } = start('vehicles');
+      try {
+        render(perspective, matrices);
+        expect(overlays()[0]!.style.display).toBe('block');
+        expect(altP()).toBe(false); // default prevented
+        expect(internal.preRenderEnhancer.getOptionsReadonly().showQcMargin).toBe(false);
+        const stored = JSON.parse(window.localStorage.getItem('cvat3dEnhancerSettings')!);
+        expect(stored.showQcMargin).toBe(false);
+        expect(overlays()[0]!.style.display).toBe('none');
+        altP();
+        expect(internal.preRenderEnhancer.getOptionsReadonly().showQcMargin).toBe(true);
+      } finally {
+        stop();
+      }
+    });
+
+    it('Alt+P is ignored in text fields, without Alt, with other modifiers and after shutdown', () => {
+      const { stop, internal } = start('vehicles');
+      const shown = () => internal.preRenderEnhancer.getOptionsReadonly().showQcMargin;
+      try {
+        document.body.insertAdjacentHTML('beforeend', '<input id="qc-field" />');
+        altP({}, document.getElementById('qc-field')!);
+        altP({ altKey: false });
+        altP({ shiftKey: true });
+        altP({ ctrlKey: true });
+        altP({ repeat: true });
+        expect(shown()).not.toBe(false);
+      } finally {
+        stop();
+      }
+      altP();
+      expect(shown()).not.toBe(false);
+    });
+
     it('draws nothing for an Animal box', () => {
       const { render, stop, perspective } = start('Animal');
       try {
