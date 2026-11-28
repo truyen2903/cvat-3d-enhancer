@@ -265,6 +265,29 @@ describe('CanvasSelectionController', () => {
     controller.dispose();
   });
 
+  it('lists the static anchor action last in Theo gốc only when a source exists', () => {
+    const { controller, shiftClick, fire, setActive } = setup();
+    shiftClick(client(0.5, 0));
+    fire('contextmenu', client(0.5, 0), { button: 2 });
+    let menu = document.querySelector('[role="menu"]')!;
+    const group = menu.querySelector('[role="group"][aria-label="Theo gốc"]')!;
+    const item = group.querySelector('[data-action="place-by-anchor"]')!;
+    expect(item.textContent).toBe('Đặt theo mốc tĩnh');
+    expect(group.lastElementChild).toBe(item);
+    expect(
+      [...menu.querySelectorAll('[role="group"]')].map((g) => g.getAttribute('aria-label'))
+    ).toEqual(['Cặp', 'Lọc', 'Hiển thị', 'Theo gốc', 'Khác']);
+    expect(
+      document.querySelector('.meow-selection-toolbar [data-action="place-by-anchor"]')
+    ).toBeNull();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    setActive(null);
+    fire('contextmenu', client(0.5, 0), { button: 2 });
+    menu = document.querySelector('[role="menu"]')!;
+    expect(menu.querySelector('[data-action="place-by-anchor"]')).toBeNull();
+    controller.dispose();
+  });
+
   it('opens the Meow menu on right-click inside the selection and leaves CVAT alone otherwise', () => {
     const { controller, shiftClick, fire, host } = setup();
     const before = fire('contextmenu', client(0.5, 0), { button: 2 });

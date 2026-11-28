@@ -223,6 +223,13 @@ Robustness rules: gestures start only when `annotation.canvas.activeControl` is 
   pinning frame f-1 when interpolated. Each frame is one `saveStates` transaction, i.e. one native
   undo step per frame (cvat-core transactions are single-frame). Frames are read with
   `annotations.get(frame, true, [])`; at most 2000 frames per action.
+- `place-by-anchor` (ego-frame static anchor) reads inside keyframes of the anchor and each target
+  track from `__internal.export().shapes`, picks the nearest common frame K ≠ f (earlier on ties),
+  reads both boxes at K with `annotations.get(K, true, [])` and writes only the current frame
+  through the same `saveStates` path as the other single-frame actions (f-1 / f+1 pinned, one
+  native undo step). Yaw-only: `xy = xyB_f + Rot(Δψ)(xyA_K − xyB_K)`, `z` shifts with the anchor.
+  Refused when the anchor is not a keyframe at f, changed size > 10 % or yaw > 135° since K.
+  Plain shapes are not supported (no stable clientID across frames).
 
 ### Single undo step per Meow action
 

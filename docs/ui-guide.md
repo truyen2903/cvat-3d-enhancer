@@ -50,6 +50,7 @@ Sau:   ( 2 chọn | ⇄ Tráo | ▽ Chỉ cụm | Ẩn | ⋯ | × )
        | Theo gốc                       |
        | Ghim đáy: frame này / → cuối track |
        | Kích thước: frame này / mọi frame |
+       | Đặt theo mốc tĩnh              |
        |--------------------------------|
        | Khác                           |
        | Thêm xung quanh / Đặt làm gốc / Bỏ chọn |
