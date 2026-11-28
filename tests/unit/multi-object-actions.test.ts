@@ -1026,6 +1026,36 @@ describe('place by static anchor', () => {
     expect(w.job.annotations.saveStates).not.toHaveBeenCalled();
   });
 
+  it('writes targets of a good K and reports a refused K as an error', async () => {
+    const w = anchorWorld();
+    w.b.shapes[3] = shapeish([5, 0, 0, 0, 0, 0, 4.8, 2, 1.5], {});
+    const c = new FakeObject(7, 'track', w.history, 0);
+    c.shapes[3] = shapeish([8, 3, 0, 0, 0, 0, 2, 1, 1], {});
+    c.shapes[9] = shapeish([8, 3, 0, 0, 0, 0, 2, 1, 1], {});
+    w.objects.set(7, c);
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6, 7], 4)).toBe(true);
+    expect(5 in w.a.shapes).toBe(true);
+    expect(5 in c.shapes).toBe(false);
+    const [message, kind] = lastToast(toast);
+    expect(kind).toBe('error');
+    expect(message).toContain('frame 2');
+    expect(message).toContain('đổi kích thước');
+  });
+
+  it('skips a target missing at frame K without writing', async () => {
+    const w = anchorWorld();
+    const original = w.job.annotations.get.getMockImplementation()!;
+    w.job.annotations.get.mockImplementation(async (f: number) => {
+      const states = await original(f);
+      return f === 2 ? states.filter((st) => st.clientID !== 6) : states;
+    });
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6], 4)).toBe(false);
+    expect(w.job.annotations.saveStates).not.toHaveBeenCalled();
+    expect(lastToast(toast)[0]).toContain('không đọc được');
+  });
+
   it('needs a target besides the anchor', async () => {
     const w = anchorWorld();
     const { runner, toast } = makeRunner(w.store);

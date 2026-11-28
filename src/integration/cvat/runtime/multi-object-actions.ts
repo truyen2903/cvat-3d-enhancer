@@ -494,7 +494,13 @@ export class MultiObjectRunner {
     return summary;
   }
 
-  private report(summary: WriteSummary, doneText: string, extra: string[] = []): void {
+  /** `partial`: some requested targets were refused, so never show the result as a plain success. */
+  private report(
+    summary: WriteSummary,
+    doneText: string,
+    extra: string[] = [],
+    partial = false
+  ): void {
     const notes = [...extra];
     if (summary.skippedLocked) notes.push(`${summary.skippedLocked} object bị khóa`);
     if (summary.skippedOutside) notes.push(`${summary.skippedOutside} object outside`);
@@ -509,7 +515,10 @@ export class MultiObjectRunner {
       return;
     }
     const text = notes.length ? `${doneText} (${notes.join(', ')})` : doneText;
-    this.host.toast(text, summary.written > 0 && summary.failed === 0 ? 'success' : 'error');
+    this.host.toast(
+      text,
+      summary.written > 0 && summary.failed === 0 && !partial ? 'success' : 'error'
+    );
   }
 
   /**
@@ -1032,7 +1041,8 @@ export class MultiObjectRunner {
     this.report(
       summary,
       `Đã đặt ${summary.written} object theo mốc #${activeID} (frame ${usedFrames.join(', ')}; sai ~${errorText} m nếu yaw mốc lệch 1°)`,
-      notes
+      notes,
+      refusals.length > 0 || unreadable > 0 || noCommon > 0 || notTrack > 0
     );
     return summary.written > 0;
   }
