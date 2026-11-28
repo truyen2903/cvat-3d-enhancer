@@ -687,7 +687,10 @@ export class CanvasSelectionController {
       ['Cặp', ['swap-geometry', 'swap-attributes', 'sync-source-target']],
       ['Lọc', ['filter-only', 'filter-add', 'filter-restore']],
       ['Hiển thị', ['hide', 'show']],
-      ['Theo gốc', ['pin-bottom', 'pin-bottom-forward', 'sync-size', 'sync-size-track']],
+      [
+        'Theo gốc',
+        ['pin-bottom', 'pin-bottom-forward', 'sync-size', 'sync-size-track', 'place-by-anchor'],
+      ],
       ['Khác', ['add-surroundings', 'set-source', 'clear']],
     ];
     for (const [name, ids] of groups) {
