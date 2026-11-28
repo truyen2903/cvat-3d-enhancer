@@ -5,6 +5,13 @@
 import type { CvatObjectStateLike } from './pre-render-enhancer';
 import { trackKeyframes } from './track-editing';
 import {
+  anchorErrorAt1Deg,
+  checkAnchorConsistency,
+  insideKeyframes,
+  pickReferenceFrame,
+  predictFromAnchor,
+} from './static-anchor';
+import {
   applyCvatFilters,
   readCvatContext,
   readFrameStates,
@@ -31,6 +38,7 @@ export type MultiActionId =
   | 'pin-bottom-forward'
   | 'sync-size'
   | 'sync-size-track'
+  | 'place-by-anchor'
   | 'add-surroundings'
   | 'set-source'
   | 'clear';
@@ -58,6 +66,11 @@ export const MULTI_ACTIONS: readonly MultiActionDef[] = [
   },
   { id: 'sync-size', label: 'Đồng bộ kích thước theo gốc (frame này)', scope: 'cluster' },
   { id: 'sync-size-track', label: 'Đồng bộ kích thước theo gốc (mọi frame)', scope: 'cluster' },
+  {
+    id: 'place-by-anchor',
+    label: 'Đặt theo mốc tĩnh (tính đích từ mốc theo frame cả hai cùng được label)',
+    scope: 'cluster',
+  },
   { id: 'add-surroundings', label: 'Thêm vật thể xung quanh', scope: 'selection' },
   { id: 'set-source', label: 'Đặt làm gốc', scope: 'selection' },
   { id: 'clear', label: 'Bỏ chọn', scope: 'selection' },
@@ -362,7 +375,8 @@ export function availableActions(ctx: ActionAvailability): MultiActionDef[] {
       def.id === 'pin-bottom' ||
       def.id === 'pin-bottom-forward' ||
       def.id === 'sync-size' ||
-      def.id === 'sync-size-track'
+      def.id === 'sync-size-track' ||
+      def.id === 'place-by-anchor'
     )
       return ctx.hasSource;
     if (def.id === 'set-source') return false; // offered by the menu only when a target is under the cursor
@@ -597,6 +611,8 @@ export class MultiObjectRunner {
       case 'pin-bottom-forward':
       case 'sync-size-track':
         return this.runClusterFrames(id, selection, activeID);
+      case 'place-by-anchor':
+        return this.runAnchor(selection, activeID);
       default:
         return false;
     }
@@ -893,6 +909,132 @@ export class MultiObjectRunner {
       notes
     );
     return total.written > 0;
+  }
+
+  /**
+   * Static anchor (ego-frame LiDAR): every target takes the pose it had relative to the active
+   * anchor at the nearest frame K where both are inside keyframes (see `static-anchor.ts`). All
+   * targets are written on the current frame through `commit`, i.e. one native undo step, with
+   * f-1 / f+1 pinned so the rest of each track keeps its geometry.
+   */
+  private async runAnchor(selection: readonly number[], activeID: number | null): Promise<boolean> {
+    if (activeID === null) {
+      this.host.toast('Chọn object mốc bằng click hoặc Đặt làm gốc.', 'error');
+      return false;
+    }
+    const scope = this.scope!;
+    const others = selection.filter((x) => x !== activeID);
+    if (!others.length) {
+      this.host.toast('Chưa chọn object đích', 'error');
+      return false;
+    }
+    const resolved = await this.resolveStates([activeID, ...others]);
+    if (!resolved) {
+      this.host.toast(ABORTED, 'error');
+      return false;
+    }
+    const anchor = resolved.states.get(activeID);
+    const anchorKeys = anchor ? insideKeyframes(anchor) : null;
+    if (
+      !anchor ||
+      !anchorKeys ||
+      anchor.shapeType !== 'cuboid' ||
+      anchor.outside ||
+      !anchor.keyframe ||
+      !anchor.points ||
+      anchor.points.length < 9
+    ) {
+      this.host.toast('Hãy label mốc ở frame này trước (cần keyframe)', 'error');
+      return false;
+    }
+
+    let notTrack = 0;
+    let noCommon = 0;
+    const byFrame = new Map<number, CvatObjectStateLike[]>();
+    for (const id of others) {
+      const target = resolved.states.get(id);
+      if (!target) continue;
+      const keys = target.shapeType === 'cuboid' ? insideKeyframes(target) : null;
+      if (!keys) {
+        notTrack += 1;
+        continue;
+      }
+      const k = pickReferenceFrame(scope.frame, anchorKeys, keys);
+      if (k === null) {
+        noCommon += 1;
+        continue;
+      }
+      const group = byFrame.get(k);
+      if (group) group.push(target);
+      else byFrame.set(k, [target]);
+    }
+
+    const writes: StateWrite[] = [];
+    const usedFrames: number[] = [];
+    const refusals: string[] = [];
+    let unreadable = 0;
+    let error = 0;
+    for (const k of [...byFrame.keys()].sort((a, b) => a - b)) {
+      const targets = byFrame.get(k)!;
+      const states = await readFrameStates(scope.job, k);
+      if (!this.isCurrent()) {
+        this.host.toast(ABORTED, 'error');
+        return false;
+      }
+      const atK = new Map<number, CvatObjectStateLike>();
+      for (const state of states ?? [])
+        if (typeof state.clientID === 'number') atK.set(state.clientID, state);
+      const anchorRef = atK.get(activeID)?.points;
+      if (!anchorRef) {
+        unreadable += targets.length;
+        continue;
+      }
+      const check = checkAnchorConsistency(anchorRef, anchor.points);
+      if (check !== 'ok') {
+        refusals.push(
+          check === 'size-changed'
+            ? `mốc đổi kích thước > 10% so với frame ${k}`
+            : `mốc có thể bị lật hướng (> 135°) so với frame ${k}`
+        );
+        continue;
+      }
+      let used = false;
+      for (const target of targets) {
+        const targetRef = atK.get(target.clientID as number)?.points;
+        const next =
+          targetRef && target.points
+            ? predictFromAnchor(anchorRef, targetRef, anchor.points, target.points)
+            : null;
+        if (!next || !targetRef) {
+          unreadable += 1;
+          continue;
+        }
+        writes.push({ state: target, points: next });
+        error = Math.max(error, anchorErrorAt1Deg(anchorRef, targetRef));
+        used = true;
+      }
+      if (used) usedFrames.push(k);
+    }
+
+    const notes: string[] = [];
+    if (notTrack) notes.push(`bỏ qua ${notTrack} object không phải track`);
+    if (noCommon) notes.push(`${noCommon} object chưa có frame chung với mốc`);
+    if (unreadable) notes.push(`${unreadable} object không đọc được ở frame tham chiếu`);
+    if (resolved.missing) notes.push(`${resolved.missing} object không có trên frame`);
+    notes.push(...refusals);
+    if (!writes.length) {
+      this.host.toast(`Không đặt được object nào (${notes.join(', ')})`, 'error');
+      return false;
+    }
+    const summary = await this.commit(writes, false);
+    if (!summary) return false;
+    const errorText = error.toFixed(1).replace('.', ',');
+    this.report(
+      summary,
+      `Đã đặt ${summary.written} object theo mốc #${activeID} (frame ${usedFrames.join(', ')}; sai ~${errorText} m nếu yaw mốc lệch 1°)`,
+      notes
+    );
+    return summary.written > 0;
   }
 
   private async runHidden(hide: boolean, selection: readonly number[]): Promise<boolean> {

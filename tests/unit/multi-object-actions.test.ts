@@ -193,6 +193,8 @@ describe('availability and pair resolution', () => {
     );
     expect(ids(base)).not.toContain('pin-bottom');
     expect(ids(base)).not.toContain('filter-restore');
+    expect(ids(base)).not.toContain('place-by-anchor');
+    expect(ids({ ...base, hasSource: true })).toContain('place-by-anchor');
     expect(ids({ ...base, hasSource: true, filterHistorySize: 1 })).toEqual(
       expect.arrayContaining(['pin-bottom', 'sync-size', 'filter-restore'])
     );
@@ -929,5 +931,105 @@ describe('filters', () => {
     expect(w.dispatched).toHaveLength(0);
     expect(runner.filterHistory.size).toBe(0);
     expect(toast).toHaveBeenLastCalledWith(expect.stringContaining('Ground truth'), 'error');
+  });
+});
+
+describe('place by static anchor', () => {
+  // anchor track 4: keyframes 2 and 5; target track 6: keyframes 2 and 9 (interpolated at 4..6)
+  function anchorWorld(frame = 5) {
+    const w = createWorld({ frame });
+    const b = new FakeObject(4, 'track', w.history, 0);
+    b.shapes[2] = shapeish([10, 0, 0, 0, 0, 0, 4, 2, 1.5], {});
+    b.shapes[5] = shapeish([0, 0, 0.5, 0, 0, Math.PI / 2, 4, 2, 1.5], {});
+    const a = new FakeObject(6, 'track', w.history, 0);
+    a.shapes[2] = shapeish([20, 0, 1, 0, 0, 0.3, 3, 1, 1], {});
+    a.shapes[9] = shapeish([27, 0, 1, 0, 0, 0.3, 3, 1, 1], {});
+    w.objects.set(4, b);
+    w.objects.set(6, a);
+    return { ...w, b, a };
+  }
+  const lastToast = (toast: ReturnType<typeof makeRunner>['toast']) =>
+    toast.mock.calls.at(-1) as [string, string];
+
+  it('places the target from frame 2 and keeps neighbors', async () => {
+    const w = anchorWorld();
+    const before4 = [...w.a.snapshot(4).points];
+    const before6 = [...w.a.snapshot(6).points];
+    const { runner, toast, afterWrite } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6], 4)).toBe(true);
+    const p = w.a.snapshot(5).points;
+    const expected = [0, 10, 1.5, 0, 0, 0.3 + Math.PI / 2, 3, 1, 1];
+    expected.forEach((v, i) => expect(p[i]).toBeCloseTo(v));
+    expect(w.a.snapshot(4).points).toEqual(before4);
+    expect(w.a.snapshot(6).points).toEqual(before6);
+    const [message, kind] = lastToast(toast);
+    expect(kind).toBe('success');
+    expect(message).toContain('frame 2');
+    expect(message).toContain('#4');
+    expect(afterWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('is one native undo step', async () => {
+    const w = anchorWorld();
+    const before5 = [...w.a.snapshot(5).points];
+    const { runner } = makeRunner(w.store);
+    await runner.run('place-by-anchor', [4, 6], 4);
+    expect(5 in w.a.shapes).toBe(true);
+    await w.nativeStep('undo');
+    expect(5 in w.a.shapes).toBe(false);
+    w.a.snapshot(5).points.forEach((v, i) => expect(v).toBeCloseTo(before5[i]!));
+  });
+
+  it('refuses when the anchor is not a keyframe here', async () => {
+    const w = anchorWorld(4);
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6], 4)).toBe(false);
+    expect(w.job.annotations.saveStates).not.toHaveBeenCalled();
+    const [message, kind] = lastToast(toast);
+    expect(kind).toBe('error');
+    expect(message).toContain('keyframe');
+  });
+
+  it('skips non-track and no-common-frame targets', async () => {
+    const w = anchorWorld();
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6, 3, 2], 4)).toBe(true);
+    expect(5 in w.a.shapes).toBe(true);
+    expect(w.s3.shapes[5]!.points.slice(0, 3)).toEqual([50, 50, 5]);
+    expect(w.t2.shapes[5]!.points[0]).toBe(5);
+    const [message] = lastToast(toast);
+    expect(message).toContain('không phải track');
+    expect(message).toContain('chưa có frame chung');
+  });
+
+  it('refuses a flipped anchor', async () => {
+    const w = anchorWorld();
+    w.b.shapes[5]!.points[5] = Math.PI;
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6], 4)).toBe(false);
+    expect(w.job.annotations.saveStates).not.toHaveBeenCalled();
+    expect(5 in w.a.shapes).toBe(false);
+    expect(lastToast(toast)[0]).toContain('lật');
+  });
+
+  it('aborts when the frame changes while reading', async () => {
+    const w = anchorWorld();
+    const original = w.job.annotations.get.getMockImplementation()!;
+    w.job.annotations.get.mockImplementation(async (f: number) => {
+      const states = await original(f);
+      if (f === 2) w.frame.value = 6;
+      return states;
+    });
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4, 6], 4)).toBe(false);
+    expect(lastToast(toast)[0]).toBe('Đã đổi frame; hủy thao tác, chưa ghi.');
+    expect(w.job.annotations.saveStates).not.toHaveBeenCalled();
+  });
+
+  it('needs a target besides the anchor', async () => {
+    const w = anchorWorld();
+    const { runner, toast } = makeRunner(w.store);
+    expect(await runner.run('place-by-anchor', [4], 4)).toBe(false);
+    expect(lastToast(toast)[0]).toBe('Chưa chọn object đích');
   });
 });

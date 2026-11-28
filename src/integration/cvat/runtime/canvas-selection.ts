@@ -551,6 +551,7 @@ export class CanvasSelectionController {
       'pin-bottom-forward': 'Ghim đáy · → cuối track',
       'sync-size': 'Kích thước · frame này',
       'sync-size-track': 'Kích thước · mọi frame',
+      'place-by-anchor': 'Đặt theo mốc tĩnh',
       'add-surroundings': 'Thêm xung quanh',
       'set-source': 'Đặt làm gốc',
       clear: 'Bỏ chọn',
